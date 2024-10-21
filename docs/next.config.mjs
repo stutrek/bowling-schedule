@@ -9,7 +9,7 @@ const nextConfig = {
     pageExtensions: ['js', 'jsx', 'md', 'mdx', 'ts', 'tsx'],
     // Optionally, add any other Next.js config below
     output: 'export',
-    basePath: '/react-multi-page-form',
+    basePath: '',
 };
 
 async function getConfig() {
