@@ -14,7 +14,6 @@ function shiftByTwo(arr: number[]) {
 class PinsetterAlgorithm {
     schedule: Schedule;
     daysFilled = 0;
-    reverse = false;
     constructor(schedule: Schedule) {
         this.schedule = schedule;
     }
@@ -27,11 +26,16 @@ class PinsetterAlgorithm {
     }
 
     fillDay(teams: number[]) {
-        if (this.reverse) {
-            teams.reverse();
-        }
         const day = this.daysFilled++;
         const groups = chunk(teams, 4);
+        if (day % 2 === 0) {
+            groups.reverse();
+        }
+        if (day % 2 === 0) {
+            groups.forEach((group) => {
+                group.reverse();
+            });
+        }
         groups.forEach((group, i) => {
             const slot = i > 1 ? 2 : 0;
             const lane = (i % (this.schedule.config.lanes / 2)) * 2;
@@ -66,26 +70,11 @@ class PinsetterAlgorithm {
         this.fillDay(this.schedule.getNewTeamList());
         this.fillDay([0, 1, 3, 2, 5, 4, 6, 7, 8, 9, 11, 10, 12, 13, 15, 14]);
 
-        // teams = this.schedule.getNewTeamList().sort((a, b) => {
-        //     if (a % 2 === 0 && b % 2 === 1) {
-        //         return -1;
-        //     }
-        //     if (a % 2 === 1 && b % 2 === 0) {
-        //         return 1;
-        //     }
-        //     return a - b;
-        // });
-        // this.fillDay(teams);
-
-        // const chunks = chunk(this.schedule.getNewTeamList(), teams.length / 2);
-        // chunks[0].reverse();
-        // this.fillDay(zip(...chunks).flat());
-
-        // teams = sortBy(this.schedule.getNewTeamList(), (team) => team % 2);
-        // this.fillDay(teams);
-
-        // teams = sortBy(this.schedule.getNewTeamList(), (team) => team % 3);
-        // this.fillDay(teams);
+        // fill remaining four weeks, after all teams have played each other once.
+        this.highsVsLows(1);
+        this.highsVsLows(0);
+        this.highsVsLows(3);
+        this.highsVsLows(2);
     }
 }
 

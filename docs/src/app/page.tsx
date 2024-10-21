@@ -156,7 +156,7 @@ export default function () {
                                 <td
                                     // biome-ignore lint/suspicious/noArrayIndexKey: <explanation>
                                     key={j}
-                                    className={lanesColors[laneCounts[i][j]]}
+                                    className={lanesColors[slotCounts[i][j]]}
                                 >
                                     {slotCounts[i][j]}
                                 </td>

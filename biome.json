@@ -8,7 +8,9 @@
     },
     "files": {
         "ignoreUnknown": false,
-        "ignore": [".next"]
+        "ignore": [
+            ".next"
+        ]
     },
     "formatter": {
         "enabled": true,
@@ -26,6 +28,9 @@
                 "noLabelWithoutControl": "off",
                 "useKeyWithClickEvents": "off",
                 "useButtonType": "off"
+            },
+            "complexity": {
+                "noForEach": "off"
             },
             "suspicious": {
                 "noExplicitAny": "off"
