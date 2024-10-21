@@ -8,6 +8,10 @@ export class Schedule {
         this.config = config;
     }
 
+    getNewTeamList(): number[] {
+        return new Array(this.config.teams).fill(0).map((_, i) => i);
+    }
+
     createSchedule(): void {
         for (let day = 0; day < this.config.days; day++) {
             for (

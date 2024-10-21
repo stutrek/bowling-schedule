@@ -1,8 +1,9 @@
 import { useMemo } from 'react';
 import Intro from './Intro.mdx';
 import { Header } from './header';
-import { Schedule } from '../../../src/schedule';
+import { Schedule } from '../../../src/Schedule';
 import { fillRandomly } from '../../../src/random';
+import { pinsetter } from '../../../src/pinsetter1';
 import type { Config } from '../../../src/types';
 
 const config: Config = {
@@ -36,9 +37,8 @@ export default function () {
     const schedule = useMemo(() => {
         const schedule = new Schedule(config);
         schedule.createSchedule();
-
-        fillRandomly(schedule);
-        console.log(schedule);
+        pinsetter(schedule);
+        // fillRandomly(schedule);
         return schedule;
     }, []);
 
@@ -53,6 +53,9 @@ export default function () {
             .fill([])
             .map(() => new Array(schedule.config.teams).fill(0));
         schedule.schedule.map((game) => {
+            if (game.teams[0] === -1 || game.teams[1] === -1) {
+                return;
+            }
             matchups[game.teams[0]][game.teams[1]]++;
             laneCounts[game.lane][game.teams[0]]++;
             laneCounts[game.lane][game.teams[1]]++;
@@ -155,7 +158,7 @@ export default function () {
                                     key={j}
                                     className={lanesColors[laneCounts[i][j]]}
                                 >
-                                    {laneCounts[i][j]}
+                                    {slotCounts[i][j]}
                                 </td>
                             ))}
                         </tr>
