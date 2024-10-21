@@ -8,9 +8,7 @@
     },
     "files": {
         "ignoreUnknown": false,
-        "ignore": [
-            ".next"
-        ]
+        "ignore": [".next"]
     },
     "formatter": {
         "enabled": true,
