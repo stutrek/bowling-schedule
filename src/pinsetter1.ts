@@ -25,17 +25,21 @@ class PinsetterAlgorithm {
         this.schedule.setGame(teams[2], teams[1], day, slot + 1, lane + 1);
     }
 
-    fillDay(teams: number[]) {
+    fillDay(teams: number[], swapSlots = false) {
         const day = this.daysFilled++;
-        const groups = chunk(teams, 4);
-        if (day % 2 === 0) {
+        let groups = chunk(teams, 4);
+        if (swapSlots) {
             groups.reverse();
+            groups.forEach((group) => group.reverse());
         }
-        if (day % 2 === 0) {
-            groups.forEach((group) => {
-                group.reverse();
+
+        if (day % 3 === 0) {
+            groups = groups.map((group, i) => {
+                const [a, b, c, d] = group;
+                return [c, d, a, b];
             });
         }
+
         groups.forEach((group, i) => {
             const slot = i > 1 ? 2 : 0;
             const lane = (i % (this.schedule.config.lanes / 2)) * 2;
@@ -49,32 +53,35 @@ class PinsetterAlgorithm {
         for (let i = 0; i < shiftAmount; i++) {
             shiftByTwo(chunks[1]);
         }
-        this.fillDay(zip(...chunks).flat() as number[]);
+        return zip(...chunks).flat() as number[];
     }
 
     fill() {
-        this.highsVsLows(0);
-        this.highsVsLows(1);
-        this.highsVsLows(2);
-        this.highsVsLows(3);
+        this.fillDay(this.highsVsLows(0), true);
+        this.fillDay(this.highsVsLows(1));
+        this.fillDay(this.highsVsLows(2), true);
+        this.fillDay(this.highsVsLows(3));
 
-        this.fillDay([
-            // hi
-            0, 4, 1, 5, 2, 6, 3, 7, 8, 12, 9, 13, 10, 14, 11, 15,
-        ]);
+        this.fillDay(
+            [
+                // hi
+                0, 4, 1, 5, 2, 6, 3, 7, 8, 12, 9, 13, 10, 14, 11, 15,
+            ],
+            true,
+        );
         this.fillDay([
             // hi
             0, 6, 1, 7, 2, 4, 3, 5, 8, 14, 9, 15, 10, 12, 11, 13,
         ]);
 
-        this.fillDay(this.schedule.getNewTeamList());
+        this.fillDay(this.schedule.getNewTeamList(), true);
         this.fillDay([0, 1, 3, 2, 5, 4, 6, 7, 8, 9, 11, 10, 12, 13, 15, 14]);
 
         // fill remaining four weeks, after all teams have played each other once.
-        this.highsVsLows(1);
-        this.highsVsLows(0);
-        this.highsVsLows(3);
-        this.highsVsLows(2);
+        this.fillDay(this.highsVsLows(3), true);
+        this.fillDay(this.highsVsLows(2));
+        this.fillDay(this.highsVsLows(1), true);
+        this.fillDay(this.highsVsLows(0));
     }
 }
 
