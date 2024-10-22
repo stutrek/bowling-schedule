@@ -42,7 +42,7 @@ export default function () {
         return schedule;
     }, []);
 
-    const { matchups, laneCounts, slotCounts } = useMemo(() => {
+    const { matchups, laneCounts, slotCounts, earlyOrLate } = useMemo(() => {
         const matchups: number[][] = new Array(schedule.config.teams)
             .fill([])
             .map(() => new Array(schedule.config.teams).fill(0));
@@ -52,6 +52,10 @@ export default function () {
         const slotCounts: number[][] = new Array(schedule.config.timeSlots)
             .fill([])
             .map(() => new Array(schedule.config.teams).fill(0));
+
+        const earlyOrLate: number[][] = new Array(schedule.config.teams)
+            .fill([])
+            .map(() => new Array(schedule.config.days).fill(0));
         schedule.schedule.map((game) => {
             if (game.teams[0] === -1 || game.teams[1] === -1) {
                 return;
@@ -61,9 +65,11 @@ export default function () {
             laneCounts[game.lane][game.teams[1]]++;
             slotCounts[game.timeSlot][game.teams[0]]++;
             slotCounts[game.timeSlot][game.teams[1]]++;
+            earlyOrLate[game.teams[0]][game.day] = game.timeSlot < 2 ? 1 : 2;
+            earlyOrLate[game.teams[1]][game.day] = game.timeSlot < 2 ? 1 : 2;
         });
 
-        return { matchups, laneCounts, slotCounts };
+        return { matchups, laneCounts, slotCounts, earlyOrLate };
     }, [schedule]);
 
     return (
@@ -110,7 +116,7 @@ export default function () {
             <table>
                 <thead>
                     <tr>
-                        <th>Team</th>
+                        <th> </th>
                         {Array.from({ length: config.teams }).map((_, i) => (
                             // biome-ignore lint/suspicious/noArrayIndexKey: <explanation>
                             <th key={i}>{i + 1}</th>
@@ -121,7 +127,7 @@ export default function () {
                     {laneCounts.map((row, i) => (
                         // biome-ignore lint/suspicious/noArrayIndexKey: <explanation>
                         <tr key={i}>
-                            <td>{i + 1}</td>
+                            <td>Lane {i + 1}</td>
                             {row.map((_, j) => (
                                 <td
                                     // biome-ignore lint/suspicious/noArrayIndexKey: <explanation>
@@ -140,7 +146,7 @@ export default function () {
             <table>
                 <thead>
                     <tr>
-                        <th>Team</th>
+                        <th> </th>
                         {Array.from({ length: config.teams }).map((_, i) => (
                             // biome-ignore lint/suspicious/noArrayIndexKey: <explanation>
                             <th key={i}>{i + 1}</th>
@@ -151,7 +157,7 @@ export default function () {
                     {slotCounts.map((row, i) => (
                         // biome-ignore lint/suspicious/noArrayIndexKey: <explanation>
                         <tr key={i}>
-                            <td>{i + 1}</td>
+                            <td>Slot {i + 1}</td>
                             {row.map((_, j) => (
                                 <td
                                     // biome-ignore lint/suspicious/noArrayIndexKey: <explanation>
@@ -159,6 +165,40 @@ export default function () {
                                     className={lanesColors[slotCounts[i][j]]}
                                 >
                                     {slotCounts[i][j]}
+                                </td>
+                            ))}
+                        </tr>
+                    ))}
+                </tbody>
+            </table>
+
+            <h2>Early Or Late</h2>
+            <table>
+                <thead>
+                    <tr>
+                        <th> </th>
+                        {Array.from({ length: config.days }).map((_, i) => (
+                            // biome-ignore lint/suspicious/noArrayIndexKey: <explanation>
+                            <th key={i}>{i + 1}</th>
+                        ))}
+                    </tr>
+                </thead>
+                <tbody>
+                    {earlyOrLate.map((row, i) => (
+                        // biome-ignore lint/suspicious/noArrayIndexKey: <explanation>
+                        <tr key={i}>
+                            <td>Team {i + 1}</td>
+                            {row.map((earlyOrLate, j) => (
+                                <td
+                                    // biome-ignore lint/suspicious/noArrayIndexKey: <explanation>
+                                    key={j}
+                                    className={
+                                        earlyOrLate === 1
+                                            ? 'bg-white'
+                                            : 'bg-black'
+                                    }
+                                >
+                                    {earlyOrLate}
                                 </td>
                             ))}
                         </tr>

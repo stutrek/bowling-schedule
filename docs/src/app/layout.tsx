@@ -37,9 +37,9 @@ export default function RootLayout({
 export const metadata: Metadata = {
     title: {
         template: '%s | Project',
-        default: 'Project',
+        default: 'Bowling Schedule',
     },
-    description: 'Project description',
+    description: 'Attempts to make a more efficient bowling schedule',
     // openGraph: {
     //     images: [ogImage.src],
     // },
