@@ -63,8 +63,8 @@ struct BestResults {
 struct CoreSlot {
     best_cost: u32,
     best_assignment: Assignment,
-    /// Written by sync logic when this core should be reset
     reset_to: Option<Assignment>,
+    reset_temp: Option<f64>,
 }
 
 struct SyncState {
@@ -267,7 +267,7 @@ fn assignment_to_tsv(a: &Assignment) -> String {
 
 fn cost_label(c: &CostBreakdown) -> String {
     format!(
-        "total:{} matchup:{} consec:{} el_bal:{} el_alt:{} lane:{} switch:{}",
+        "total: {:>4} matchup: {:>3} consec: {:>3} el_bal: {:>3} el_alt: {:>3} lane: {:>3} switch: {:>3}",
         c.total, c.matchup_balance, c.consecutive_opponents,
         c.early_late_balance, c.early_late_alternation, c.lane_balance,
         c.lane_switch_balance,
@@ -343,6 +343,7 @@ fn main() {
                     best_cost: u32::MAX,
                     best_assignment: dummy_assignment,
                     reset_to: None,
+                    reset_temp: None,
                 })
                 .collect(),
             checked_in: 0,
@@ -556,8 +557,6 @@ fn main() {
                             }
                         }
 
-                        temp = t0 * (cool_rate * (i - cool_offset) as f64).exp();
-
                         if i > 0 && i % restart_interval == 0 && cost.total > best_cost {
                             if i % (restart_interval * 2) == 0 {
                                 a = random_assignment(&mut rng);
@@ -566,8 +565,9 @@ fn main() {
                                 perturb(&mut a, &mut rng, 20);
                             }
                             cost = evaluate(&a, &w8);
-                            temp = t0 * 0.3;
                         }
+
+                        temp = t0 * (cool_rate * (i - cool_offset) as f64).exp();
 
                         if i > 0 && i % progress_interval == 0 {
                             let label = if i >= 1_000_000_000 {
@@ -589,6 +589,7 @@ fn main() {
                             sync.slots[core_id].best_cost = best_cost;
                             sync.slots[core_id].best_assignment = best_a;
                             sync.slots[core_id].reset_to = None;
+                            sync.slots[core_id].reset_temp = None;
                             sync.checked_in += 1;
 
                             if sync.checked_in == num_cores {
@@ -642,6 +643,7 @@ fn main() {
                                     let mut gen_rng = SmallRng::seed_from_u64(sync.epoch.wrapping_mul(97));
                                     for slot in &mut sync.slots {
                                         slot.reset_to = Some(random_assignment(&mut gen_rng));
+                                        slot.reset_temp = Some(t0);
                                     }
 
                                     eprintln!(
@@ -705,6 +707,10 @@ fn main() {
                                         }
                                     }
 
+                                    // Escalate temperature with stagnation: t0 at low stagnation, up to 2*t0 near threshold
+                                    let stag_ratio = sync.stagnation_epochs as f64 / stagnation_threshold as f64;
+                                    let reset_temp_val = t0 * (1.0 + stag_ratio);
+
                                     let max_perturb = if reset_set.len() <= 1 { 0 } else { reset_set.len() - 1 };
                                     for (rank, &cid) in reset_set.iter().enumerate() {
                                         let perturbations = if max_perturb == 0 {
@@ -719,6 +725,7 @@ fn main() {
                                             perturb(&mut new_a, &mut prng, perturbations);
                                         }
                                         sync.slots[cid].reset_to = Some(new_a);
+                                        sync.slots[cid].reset_temp = Some(reset_temp_val);
                                         let reason = if dedup_resets.contains(&cid) { "dedup" } else { "worst50" };
                                         reset_info.push((cid, perturbations, reason));
                                     }
@@ -727,13 +734,14 @@ fn main() {
                                         .map(|(cid, p, reason)| format!("core{}({}perturb,{})", cid, p, reason))
                                         .collect();
                                     eprintln!(
-                                        "[{}] SYNC epoch {} | global best: {} ({}) | stagnation: {}/{} | reset: [{}]",
+                                        "[{}] SYNC epoch {} | global best: {} ({}) | stagnation: {}/{} | reset_temp: {:.1} | reset: [{}]",
                                         now_iso(),
                                         sync.epoch,
                                         sync.global_best_cost,
                                         cost_label(&global_cost),
                                         sync.stagnation_epochs,
                                         stagnation_threshold,
+                                        reset_temp_val,
                                         reset_desc.join(", "),
                                     );
                                 }
@@ -749,6 +757,7 @@ fn main() {
                             }
 
                             let my_reset = sync.slots[core_id].reset_to;
+                            let my_reset_temp = sync.slots[core_id].reset_temp;
                             drop(sync);
 
                             if let Some(new_a) = my_reset {
@@ -756,7 +765,7 @@ fn main() {
                                 cost = evaluate(&a, &w8);
                                 best_a = new_a;
                                 best_cost = cost.total;
-                                temp = t0;
+                                temp = my_reset_temp.unwrap_or(t0);
                                 cool_offset = i;
                             }
                         }
