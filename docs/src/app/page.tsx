@@ -137,6 +137,7 @@ interface Analysis {
     laneCounts: number[][];
     slotCounts: number[][];
     groups: number[][];
+    laneSwitchCounts: number[];
 }
 
 function analyzeSchedule(schedule: Schedule): Analysis {
@@ -151,6 +152,9 @@ function analyzeSchedule(schedule: Schedule): Analysis {
         new Array(teams).fill(0),
     );
     const groups = Array.from({ length: teams }, () => new Array(days).fill(0));
+    const teamWeekLane = Array.from({ length: teams }, () =>
+        new Array(days).fill(-1),
+    );
 
     for (const game of schedule.schedule) {
         if (game.teams[0] === -1 || game.teams[1] === -1) continue;
@@ -163,9 +167,24 @@ function analyzeSchedule(schedule: Schedule): Analysis {
         const group = (game.timeSlot < 2 ? 0 : 2) + (game.lane < 2 ? 1 : 2);
         groups[game.teams[0]][game.day] = group;
         groups[game.teams[1]][game.day] = group;
+        for (const t of game.teams) {
+            if (teamWeekLane[t][game.day] === -1)
+                teamWeekLane[t][game.day] = game.lane;
+        }
     }
 
-    return { matchups, laneCounts, slotCounts, groups };
+    // stays = weeks where both games were on the same lane, switches = different lane
+    const laneSwitchCounts: number[] = new Array(teams).fill(0);
+    for (const game of schedule.schedule) {
+        if (game.teams[0] === -1 || game.teams[1] === -1) continue;
+        for (const t of game.teams) {
+            if (teamWeekLane[t][game.day] !== game.lane) {
+                laneSwitchCounts[t]++;
+            }
+        }
+    }
+
+    return { matchups, laneCounts, slotCounts, groups, laneSwitchCounts };
 }
 
 interface Violations {
@@ -752,6 +771,11 @@ export default function Page() {
                                             value: cost.laneBalance,
                                             desc: 'Each team on each lane 6 times',
                                         },
+                                        {
+                                            label: 'Lane switches',
+                                            value: cost.laneSwitchBalance,
+                                            desc: 'Equal stay vs switch between games',
+                                        },
                                     ].map((row) => (
                                         <tr key={row.label}>
                                             <td>{row.label}</td>
@@ -863,6 +887,68 @@ export default function Page() {
                                                 ))}
                                             </tr>
                                         ))}
+                                    </tbody>
+                                </table>
+                            </div>
+
+                            <h2>Lane Switches</h2>
+                            <div className="overflow-x-auto">
+                                <table className="text-sm">
+                                    <thead>
+                                        <tr>
+                                            <th> </th>
+                                            {Array.from(
+                                                { length: config.teams },
+                                                (_, i) => (
+                                                    // biome-ignore lint/suspicious/noArrayIndexKey: sequential
+                                                    <th key={i}>{i + 1}</th>
+                                                ),
+                                            )}
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        <tr>
+                                            <td>Stay</td>
+                                            {analysis.laneSwitchCounts.map(
+                                                (sw, i) => (
+                                                    <td
+                                                        // biome-ignore lint/suspicious/noArrayIndexKey: sequential
+                                                        key={`stay-${i}`}
+                                                        className={
+                                                            Math.abs(config.days - sw - config.days / 2) === 0
+                                                                ? 'bg-green-100'
+                                                                : Math.abs(config.days - sw - config.days / 2) <= 1
+                                                                  ? 'bg-yellow-100'
+                                                                  : 'bg-red-100'
+                                                        }
+                                                        title={`Team ${i + 1}: ${config.days - sw} stay, ${sw} switch (expect ${config.days / 2} each)`}
+                                                    >
+                                                        {config.days - sw}
+                                                    </td>
+                                                ),
+                                            )}
+                                        </tr>
+                                        <tr>
+                                            <td>Switch</td>
+                                            {analysis.laneSwitchCounts.map(
+                                                (sw, i) => (
+                                                    <td
+                                                        // biome-ignore lint/suspicious/noArrayIndexKey: sequential
+                                                        key={`switch-${i}`}
+                                                        className={
+                                                            Math.abs(sw - config.days / 2) === 0
+                                                                ? 'bg-green-100'
+                                                                : Math.abs(sw - config.days / 2) <= 1
+                                                                  ? 'bg-yellow-100'
+                                                                  : 'bg-red-100'
+                                                        }
+                                                        title={`Team ${i + 1}: ${config.days - sw} stay, ${sw} switch (expect ${config.days / 2} each)`}
+                                                    >
+                                                        {sw}
+                                                    </td>
+                                                ),
+                                            )}
+                                        </tr>
                                     </tbody>
                                 </table>
                             </div>

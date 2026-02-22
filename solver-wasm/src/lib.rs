@@ -18,6 +18,7 @@ pub struct CostBreakdown {
     pub early_late_balance: u32,
     pub early_late_alternation: u32,
     pub lane_balance: u32,
+    pub lane_switch_balance: u32,
     pub total: u32,
 }
 
@@ -37,6 +38,7 @@ impl SolverResult {
             early_late_balance: self.cost.early_late_balance,
             early_late_alternation: self.cost.early_late_alternation,
             lane_balance: self.cost.lane_balance,
+            lane_switch_balance: self.cost.lane_switch_balance,
             total: self.cost.total,
         }
     }
@@ -264,6 +266,7 @@ fn evaluate(a: &Assignment) -> CostBreakdown {
     let mut matchups = [0i32; TEAMS * TEAMS];
     let mut week_matchup = [0u8; WEEKS * TEAMS * TEAMS];
     let mut lane_counts = [0i32; TEAMS * LANES];
+    let mut stay_count = [0i32; TEAMS];
     let mut early_count = [0i32; TEAMS];
     let mut early_late = [0u8; TEAMS * WEEKS];
 
@@ -288,6 +291,9 @@ fn evaluate(a: &Assignment) -> CostBreakdown {
             lane_counts[pd as usize * LANES + lane_off + 1] += 1;
             lane_counts[pd as usize * LANES + lane_off] += 1;
 
+            stay_count[pa as usize] += 1;
+            stay_count[pc as usize] += 1;
+
             for &t in &[pa, pb, pc, pd] {
                 early_late[t as usize * WEEKS + w] = early;
                 if early == 1 {
@@ -296,8 +302,6 @@ fn evaluate(a: &Assignment) -> CostBreakdown {
             }
         }
     }
-
-    // early_count already represents weeks (one quadrant per team per week)
 
     let mut matchup_balance: u32 = 0;
     for i in 0..TEAMS {
@@ -352,11 +356,19 @@ fn evaluate(a: &Assignment) -> CostBreakdown {
         }
     }
 
+    let mut lane_switch_balance: u32 = 0;
+    let target_stay: f64 = WEEKS as f64 / 2.0;
+    for t in 0..TEAMS {
+        let dev = (stay_count[t] as f64 - target_stay).abs();
+        lane_switch_balance += (dev * 5.0) as u32;
+    }
+
     let total = matchup_balance
         + consecutive_opponents
         + early_late_balance
         + early_late_alternation
-        + lane_balance;
+        + lane_balance
+        + lane_switch_balance;
 
     CostBreakdown {
         matchup_balance,
@@ -364,6 +376,7 @@ fn evaluate(a: &Assignment) -> CostBreakdown {
         early_late_balance,
         early_late_alternation,
         lane_balance,
+        lane_switch_balance,
         total,
     }
 }

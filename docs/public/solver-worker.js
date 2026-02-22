@@ -56,6 +56,7 @@ self.onmessage = async (e) => {
                     earlyLateBalance: cost.early_late_balance,
                     earlyLateAlternation: cost.early_late_alternation,
                     laneBalance: cost.lane_balance,
+                    laneSwitchBalance: cost.lane_switch_balance,
                     total: cost.total,
                 },
                 assignment: Array.from(result.assignment),

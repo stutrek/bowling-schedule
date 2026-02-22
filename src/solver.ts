@@ -9,6 +9,7 @@ export interface CostBreakdown {
     earlyLateBalance: number;
     earlyLateAlternation: number;
     laneBalance: number;
+    laneSwitchBalance: number;
     total: number;
 }
 
@@ -50,6 +51,7 @@ function evaluateAssignment(a: Assignment, config: Config): CostBreakdown {
     const matchups = new Int32Array(T * T);
     const weekMatchup = new Uint8Array(W * T * T);
     const laneCounts = new Int32Array(T * L);
+    const stayCount = new Int32Array(T);
     const earlyCount = new Int32Array(T);
     const earlyLate = new Uint8Array(T * W);
 
@@ -72,13 +74,16 @@ function evaluateAssignment(a: Assignment, config: Config): CostBreakdown {
                 weekMatchup[w * T * T + lo * T + hi] = 1;
             }
 
-            // Lane counts: A gets 2× lane+0, C gets 2× lane+1, B and D get 1 each
             laneCounts[pa * L + laneOff] += 2;
             laneCounts[pb * L + laneOff]++;
             laneCounts[pb * L + laneOff + 1]++;
             laneCounts[pc * L + laneOff + 1] += 2;
             laneCounts[pd * L + laneOff + 1]++;
             laneCounts[pd * L + laneOff]++;
+
+            // pa and pc stay on the same lane both games; pb and pd switch
+            stayCount[pa]++;
+            stayCount[pc]++;
 
             for (const t of [pa, pb, pc, pd]) {
                 earlyLate[t * W + w] = early;
@@ -140,18 +145,26 @@ function evaluateAssignment(a: Assignment, config: Config): CostBreakdown {
         }
     }
 
+    let laneSwitchBalance = 0;
+    const targetStay = W / 2;
+    for (let t = 0; t < T; t++) {
+        laneSwitchBalance += Math.abs(stayCount[t] - targetStay) * 5;
+    }
+
     const total =
         matchupBalance +
         consecutiveOpponents +
         earlyLateBalance +
         earlyLateAlternation +
-        laneBalance;
+        laneBalance +
+        laneSwitchBalance;
     return {
         matchupBalance,
         consecutiveOpponents,
         earlyLateBalance,
         earlyLateAlternation,
         laneBalance,
+        laneSwitchBalance,
         total,
     };
 }
@@ -353,6 +366,7 @@ export function evaluateSchedule(schedule: Schedule): CostBreakdown {
     const laneCounts = new Int32Array(T * L);
     const earlyCount = new Int32Array(T);
     const earlyLate = new Uint8Array(T * W);
+    const teamWeekLane = new Int32Array(T * W).fill(-1);
 
     for (const g of schedule.schedule) {
         if (g.teams[0] === -1 || g.teams[1] === -1) continue;
@@ -363,6 +377,10 @@ export function evaluateSchedule(schedule: Schedule): CostBreakdown {
         weekMatchup[g.day * T * T + lo * T + hi] = 1;
         laneCounts[a * L + g.lane]++;
         laneCounts[b * L + g.lane]++;
+        for (const t of [a, b]) {
+            const idx = t * W + g.day;
+            if (teamWeekLane[idx] === -1) teamWeekLane[idx] = g.lane;
+        }
         const early = g.timeSlot < 2 ? 1 : 0;
         earlyLate[a * W + g.day] = early;
         earlyLate[b * W + g.day] = early;
@@ -425,18 +443,41 @@ export function evaluateSchedule(schedule: Schedule): CostBreakdown {
         }
     }
 
+    const stayCount = new Int32Array(T);
+    for (const g of schedule.schedule) {
+        if (g.teams[0] === -1 || g.teams[1] === -1) continue;
+        for (const t of g.teams) {
+            const idx = t * W + g.day;
+            if (teamWeekLane[idx] === g.lane) stayCount[t]++;
+        }
+    }
+    // Each team sees 2 games/week; stayCount counted once per game on its first-seen lane
+    // so stayCount[t] = stays + switches = 2*W but we only want the stays.
+    // Actually: teamWeekLane records the first lane seen. Each game where lane == teamWeekLane
+    // is a "same lane" game. Over a week with 2 games, if both are same lane: count += 2.
+    // If they switch: count += 1 (only the first game matches).
+    // So stays = stayCount[t] - W (subtract the guaranteed first-game matches).
+    let laneSwitchBalance = 0;
+    const targetStay = W / 2;
+    for (let t = 0; t < T; t++) {
+        const stays = stayCount[t] - W;
+        laneSwitchBalance += Math.abs(stays - targetStay) * 5;
+    }
+
     const total =
         matchupBalance +
         consecutiveOpponents +
         earlyLateBalance +
         earlyLateAlternation +
-        laneBalance;
+        laneBalance +
+        laneSwitchBalance;
     return {
         matchupBalance,
         consecutiveOpponents,
         earlyLateBalance,
         earlyLateAlternation,
         laneBalance,
+        laneSwitchBalance,
         total,
     };
 }

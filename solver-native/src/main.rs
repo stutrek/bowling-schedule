@@ -21,6 +21,7 @@ struct CostBreakdown {
     early_late_balance: u32,
     early_late_alternation: u32,
     lane_balance: u32,
+    lane_switch_balance: u32,
     total: u32,
 }
 
@@ -44,6 +45,8 @@ struct SyncState {
     epoch: u64,
     global_best_cost: u32,
     global_best_assignment: Assignment,
+    stagnation_epochs: u32,
+    prev_global_best_cost: u32,
 }
 
 fn random_assignment(rng: &mut SmallRng) -> Assignment {
@@ -67,6 +70,7 @@ fn evaluate(a: &Assignment) -> CostBreakdown {
     let mut matchups = [0i32; TEAMS * TEAMS];
     let mut week_matchup = [0u8; WEEKS * TEAMS * TEAMS];
     let mut lane_counts = [0i32; TEAMS * LANES];
+    let mut stay_count = [0i32; TEAMS];
     let mut early_count = [0i32; TEAMS];
     let mut early_late = [0u8; TEAMS * WEEKS];
 
@@ -90,6 +94,10 @@ fn evaluate(a: &Assignment) -> CostBreakdown {
             lane_counts[pc as usize * LANES + lane_off + 1] += 2;
             lane_counts[pd as usize * LANES + lane_off + 1] += 1;
             lane_counts[pd as usize * LANES + lane_off] += 1;
+
+            // pa and pc stay on the same lane both games; pb and pd switch
+            stay_count[pa as usize] += 1;
+            stay_count[pc as usize] += 1;
 
             for &t in &[pa, pb, pc, pd] {
                 early_late[t as usize * WEEKS + w] = early;
@@ -154,11 +162,19 @@ fn evaluate(a: &Assignment) -> CostBreakdown {
         }
     }
 
+    let mut lane_switch_balance: u32 = 0;
+    let target_stay: f64 = WEEKS as f64 / 2.0;
+    for t in 0..TEAMS {
+        let dev = (stay_count[t] as f64 - target_stay).abs();
+        lane_switch_balance += (dev * 5.0) as u32;
+    }
+
     let total = matchup_balance
         + consecutive_opponents
         + early_late_balance
         + early_late_alternation
-        + lane_balance;
+        + lane_balance
+        + lane_switch_balance;
 
     CostBreakdown {
         matchup_balance,
@@ -166,6 +182,7 @@ fn evaluate(a: &Assignment) -> CostBreakdown {
         early_late_balance,
         early_late_alternation,
         lane_balance,
+        lane_switch_balance,
         total,
     }
 }
@@ -222,9 +239,10 @@ fn assignment_to_tsv(a: &Assignment) -> String {
 
 fn cost_label(c: &CostBreakdown) -> String {
     format!(
-        "total:{} matchup:{} consec:{} el_bal:{} el_alt:{} lane:{}",
+        "total:{} matchup:{} consec:{} el_bal:{} el_alt:{} lane:{} switch:{}",
         c.total, c.matchup_balance, c.consecutive_opponents,
         c.early_late_balance, c.early_late_alternation, c.lane_balance,
+        c.lane_switch_balance,
     )
 }
 
@@ -232,12 +250,24 @@ fn now_iso() -> String {
     Local::now().format("%Y-%m-%dT%H:%M:%S%:z").to_string()
 }
 
-fn save_assignment(results_dir: &str, prefix: &str, key: u32, a: &Assignment, c: &CostBreakdown) {
+fn save_assignment(
+    results_dir: &str,
+    prefix: &str,
+    key: u32,
+    a: &Assignment,
+    c: &CostBreakdown,
+    last_saved: &mut Option<Assignment>,
+) -> bool {
+    if last_saved.as_ref() == Some(a) {
+        return false;
+    }
     let ts = Local::now().format("%Y-%m-%dT%H%M%S%z");
     let filename = format!("{}/{}-{}-{}.tsv", results_dir, prefix, key, ts);
     let tsv = assignment_to_tsv(a);
     let _ = fs::write(&filename, &tsv);
     eprintln!("[{}] Saved {}: {} ({})", now_iso(), prefix, filename, cost_label(c));
+    *last_saved = Some(*a);
+    true
 }
 
 fn main() {
@@ -267,6 +297,8 @@ fn main() {
             epoch: 0,
             global_best_cost: u32::MAX,
             global_best_assignment: dummy_assignment,
+            stagnation_epochs: 0,
+            prev_global_best_cost: u32::MAX,
         }),
         Condvar::new(),
     ));
@@ -287,20 +319,22 @@ fn main() {
     let saver_best = Arc::clone(&best_results);
     let saver_dir = results_dir.to_string();
     thread::spawn(move || {
+        let mut last_overall: Option<Assignment> = None;
+        let mut last_matchup: Option<Assignment> = None;
         loop {
             thread::sleep(Duration::from_secs(1));
             let mut state = saver_best.lock().unwrap();
 
             if state.overall_dirty {
                 if let Some((ref a, ref c)) = state.overall {
-                    save_assignment(&saver_dir, "best-overall", c.total, a, c);
+                    save_assignment(&saver_dir, "best-overall", c.total, a, c, &mut last_overall);
                 }
                 state.overall_dirty = false;
             }
 
             if state.matchup_dirty {
                 if let Some((ref a, ref c)) = state.best_matchup {
-                    save_assignment(&saver_dir, "best-matchup", c.matchup_balance, a, c);
+                    save_assignment(&saver_dir, "best-matchup", c.matchup_balance, a, c, &mut last_matchup);
                 }
                 state.matchup_dirty = false;
             }
@@ -315,6 +349,8 @@ fn main() {
             thread::spawn(move || {
                 let mut rng = SmallRng::from_os_rng();
                 let t0: f64 = 30.0;
+                let mut last_perfect: Option<Assignment> = None;
+                let mut last_sync: Option<Assignment> = None;
 
                 loop {
                     let cool_rate: f64 = (0.005_f64 / t0).ln() / max_iterations as f64;
@@ -327,7 +363,7 @@ fn main() {
                     for i in 0..max_iterations {
                         if best_cost == 0 {
                             let final_cost = evaluate(&best_a);
-                            save_assignment(&results_dir, "perfect", 0, &best_a, &final_cost);
+                            save_assignment(&results_dir, "perfect", 0, &best_a, &final_cost, &mut last_perfect);
                             eprintln!(
                                 "[{}] core {} found PERFECT solution! ({})",
                                 now_iso(), core_id, cost_label(&final_cost),
@@ -506,37 +542,17 @@ fn main() {
                                 sync.global_best_cost = gb_cost;
                                 sync.global_best_assignment = gb_assign;
 
-                                // Sort cores by cost (worst first)
-                                let mut ranked: Vec<(usize, u32)> = sync.slots.iter()
-                                    .enumerate()
-                                    .map(|(id, s)| (id, s.best_cost))
-                                    .collect();
-                                ranked.sort_by(|a, b| b.1.cmp(&a.1));
-
-                                let num_reset = num_cores / 2;
-                                let mut reset_info: Vec<(usize, usize)> = Vec::new();
-
-                                for (rank, &(cid, _)) in ranked.iter().enumerate() {
-                                    if rank >= num_reset {
-                                        break;
-                                    }
-                                    // Graduated perturbations: worst gets 0 (exact copy),
-                                    // scaling up to 100 for the least-worst of the reset group
-                                    let perturbations = if num_reset <= 1 {
-                                        0
-                                    } else {
-                                        rank * 100 / (num_reset - 1)
-                                    };
-                                    let mut new_a = sync.global_best_assignment;
-                                    if perturbations > 0 {
-                                        // Use a quick deterministic-ish rng seeded from core id + epoch
-                                        let seed = (cid as u64).wrapping_mul(31) ^ sync.epoch;
-                                        let mut prng = SmallRng::seed_from_u64(seed);
-                                        perturb(&mut new_a, &mut prng, perturbations);
-                                    }
-                                    sync.slots[cid].reset_to = Some(new_a);
-                                    reset_info.push((cid, perturbations));
+                                // Stagnation detection
+                                let improved = gb_cost < sync.prev_global_best_cost;
+                                if improved {
+                                    sync.stagnation_epochs = 0;
+                                    sync.prev_global_best_cost = gb_cost;
+                                } else {
+                                    sync.stagnation_epochs += 1;
                                 }
+
+                                let stagnation_threshold = 20;
+                                let generational_restart = sync.stagnation_epochs >= stagnation_threshold;
 
                                 // Save global best at sync time
                                 let global_cost = evaluate(&sync.global_best_assignment);
@@ -556,25 +572,107 @@ fn main() {
                                     }
                                 }
 
-                                // Also save a sync-point snapshot directly
                                 save_assignment(
                                     &results_dir, "sync",
                                     global_cost.total,
                                     &sync.global_best_assignment,
                                     &global_cost,
+                                    &mut last_sync,
                                 );
 
-                                // Log the sync
-                                let reset_desc: Vec<String> = reset_info.iter()
-                                    .map(|(cid, p)| format!("core{}({}perturb)", cid, p))
-                                    .collect();
-                                eprintln!(
-                                    "[{}] SYNC epoch {} | global best: {} | reset: [{}]",
-                                    now_iso(),
-                                    sync.epoch,
-                                    sync.global_best_cost,
-                                    reset_desc.join(", "),
-                                );
+                                if generational_restart {
+                                    // Reset ALL cores to fresh random assignments
+                                    let mut gen_rng = SmallRng::seed_from_u64(sync.epoch.wrapping_mul(97));
+                                    for slot in &mut sync.slots {
+                                        slot.reset_to = Some(random_assignment(&mut gen_rng));
+                                    }
+
+                                    eprintln!(
+                                        "[{}] GENERATION COMPLETE epoch {} | best: {} ({}) | stagnant {} epochs | restarting all cores",
+                                        now_iso(),
+                                        sync.epoch,
+                                        sync.global_best_cost,
+                                        cost_label(&global_cost),
+                                        sync.stagnation_epochs,
+                                    );
+
+                                    sync.stagnation_epochs = 0;
+                                    sync.global_best_cost = u32::MAX;
+                                    sync.prev_global_best_cost = u32::MAX;
+                                    sync.global_best_assignment = [[[0u8; POS]; QUADS]; WEEKS];
+                                } else {
+                                    // Deduplication: find cores with identical assignments
+                                    let mut dedup_resets: Vec<usize> = Vec::new();
+                                    for i in 0..num_cores {
+                                        let dominated = dedup_resets.contains(&i);
+                                        if dominated { continue; }
+                                        for j in (i + 1)..num_cores {
+                                            if dedup_resets.contains(&j) { continue; }
+                                            if sync.slots[i].best_assignment == sync.slots[j].best_assignment {
+                                                dedup_resets.push(j);
+                                            }
+                                        }
+                                    }
+
+                                    // Sort cores by cost (worst first)
+                                    let mut ranked: Vec<(usize, u32)> = sync.slots.iter()
+                                        .enumerate()
+                                        .map(|(id, s)| (id, s.best_cost))
+                                        .collect();
+                                    ranked.sort_by(|a, b| b.1.cmp(&a.1));
+
+                                    let num_reset = num_cores / 2;
+                                    let mut reset_set: Vec<usize> = Vec::new();
+                                    let mut reset_info: Vec<(usize, usize, &str)> = Vec::new();
+
+                                    // Add worst 50% to reset list
+                                    for (rank, &(cid, _)) in ranked.iter().enumerate() {
+                                        if rank >= num_reset { break; }
+                                        if !reset_set.contains(&cid) {
+                                            reset_set.push(cid);
+                                        }
+                                    }
+
+                                    // Add deduplicated cores (even if they'd be in the top 50%)
+                                    for &cid in &dedup_resets {
+                                        if !reset_set.contains(&cid) {
+                                            reset_set.push(cid);
+                                        }
+                                    }
+
+                                    // Apply graduated perturbations
+                                    let max_perturb = if reset_set.len() <= 1 { 0 } else { reset_set.len() - 1 };
+                                    for (rank, &cid) in reset_set.iter().enumerate() {
+                                        let perturbations = if max_perturb == 0 {
+                                            0
+                                        } else {
+                                            rank * 100 / max_perturb
+                                        };
+                                        let mut new_a = sync.global_best_assignment;
+                                        if perturbations > 0 {
+                                            let seed = (cid as u64).wrapping_mul(31) ^ sync.epoch;
+                                            let mut prng = SmallRng::seed_from_u64(seed);
+                                            perturb(&mut new_a, &mut prng, perturbations);
+                                        }
+                                        sync.slots[cid].reset_to = Some(new_a);
+                                        let reason = if dedup_resets.contains(&cid) { "dedup" } else { "worst50" };
+                                        reset_info.push((cid, perturbations, reason));
+                                    }
+
+                                    // Log
+                                    let reset_desc: Vec<String> = reset_info.iter()
+                                        .map(|(cid, p, reason)| format!("core{}({}perturb,{})", cid, p, reason))
+                                        .collect();
+                                    eprintln!(
+                                        "[{}] SYNC epoch {} | global best: {} | stagnation: {}/{} | reset: [{}]",
+                                        now_iso(),
+                                        sync.epoch,
+                                        sync.global_best_cost,
+                                        sync.stagnation_epochs,
+                                        stagnation_threshold,
+                                        reset_desc.join(", "),
+                                    );
+                                }
 
                                 sync.epoch += 1;
                                 sync.checked_in = 0;
