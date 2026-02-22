@@ -133,6 +133,10 @@ dist
 .devcontainer/.zsh_history
 .DS_Store
 
-# Rust/WASM build artifacts
+# Rust build artifacts
 solver-wasm/target/
 solver-wasm/pkg/
+solver-native/target/
+
+# Solver results
+results/

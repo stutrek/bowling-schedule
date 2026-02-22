@@ -102,6 +102,36 @@ function scheduleToTSV(schedule: Schedule): string {
     return rows.join('\n');
 }
 
+function parseTSV(tsv: string): Schedule | null {
+    const lines = tsv.trim().split('\n');
+    if (lines.length < 2) return null;
+
+    const slotMap: Record<string, number> = {
+        'early 1': 0, 'early 2': 1, 'late 1': 2, 'late 2': 3,
+    };
+
+    const s = new Schedule(config);
+    s.createSchedule();
+
+    for (let i = 1; i < lines.length; i++) {
+        const cols = lines[i].split('\t');
+        if (cols.length < 6) continue;
+        const week = Number.parseInt(cols[0].trim(), 10) - 1;
+        const slot = slotMap[cols[1].trim().toLowerCase()];
+        if (Number.isNaN(week) || slot === undefined) continue;
+
+        for (let lane = 0; lane < 4; lane++) {
+            const match = cols[lane + 2]?.trim().match(/(\d+)\s*v\s*(\d+)/);
+            if (!match) continue;
+            const t1 = Number.parseInt(match[1], 10) - 1;
+            const t2 = Number.parseInt(match[2], 10) - 1;
+            s.setGame(t1, t2, week, slot, lane);
+        }
+    }
+
+    return s;
+}
+
 interface Analysis {
     matchups: number[][];
     laneCounts: number[][];
@@ -319,26 +349,37 @@ export default function Page() {
             workersRef.current = [];
 
             const numWorkers = navigator.hardwareConcurrency || 4;
-            const iterationsPerWorker = 200_000_000;
+            const iterationsPerWorker = 600_000_000;
             const basePath =
                 typeof window !== 'undefined'
                     ? window.location.pathname.replace(/\/+$/, '')
                     : '';
 
             let bestCost = Number.POSITIVE_INFINITY;
-            let bestResult: { cost: CostBreakdown; assignment: number[] } | null = null;
-            const workerStates: WorkerProgress[] = Array.from({ length: numWorkers }, () => ({
-                iteration: 0,
-                maxIterations: iterationsPerWorker,
-                bestCost: Number.POSITIVE_INFINITY,
-                done: false,
-            }));
+            let bestResult: {
+                cost: CostBreakdown;
+                assignment: number[];
+            } | null = null;
+            const workerStates: WorkerProgress[] = Array.from(
+                { length: numWorkers },
+                () => ({
+                    iteration: 0,
+                    maxIterations: iterationsPerWorker,
+                    bestCost: Number.POSITIVE_INFINITY,
+                    done: false,
+                }),
+            );
             let doneCount = 0;
 
-            setSolverProgress({ workers: [...workerStates], globalBestCost: null });
+            setSolverProgress({
+                workers: [...workerStates],
+                globalBestCost: null,
+            });
 
             for (let i = 0; i < numWorkers; i++) {
-                const worker = new Worker(`${basePath}/solver-worker.js`, { type: 'module' });
+                const worker = new Worker(`${basePath}/solver-worker.js`, {
+                    type: 'module',
+                });
                 workersRef.current.push(worker);
                 const workerIdx = i;
 
@@ -351,10 +392,15 @@ export default function Page() {
                             bestCost: msg.bestCost,
                             done: false,
                         };
-                        const globalBest = Math.min(...workerStates.map((w) => w.bestCost));
+                        const globalBest = Math.min(
+                            ...workerStates.map((w) => w.bestCost),
+                        );
                         setSolverProgress({
                             workers: [...workerStates],
-                            globalBestCost: globalBest === Number.POSITIVE_INFINITY ? null : globalBest,
+                            globalBestCost:
+                                globalBest === Number.POSITIVE_INFINITY
+                                    ? null
+                                    : globalBest,
                         });
                     } else if (msg.type === 'done') {
                         workerStates[workerIdx].done = true;
@@ -362,17 +408,27 @@ export default function Page() {
                         doneCount++;
                         if (msg.cost.total < bestCost) {
                             bestCost = msg.cost.total;
-                            bestResult = { cost: msg.cost, assignment: msg.assignment };
+                            bestResult = {
+                                cost: msg.cost,
+                                assignment: msg.assignment,
+                            };
                         }
-                        const globalBest = Math.min(...workerStates.map((w) => w.bestCost));
+                        const globalBest = Math.min(
+                            ...workerStates.map((w) => w.bestCost),
+                        );
                         setSolverProgress({
                             workers: [...workerStates],
-                            globalBestCost: globalBest === Number.POSITIVE_INFINITY ? null : globalBest,
+                            globalBestCost:
+                                globalBest === Number.POSITIVE_INFINITY
+                                    ? null
+                                    : globalBest,
                         });
 
                         if (doneCount === numWorkers) {
                             if (bestResult) {
-                                const s = applyAssignmentToSchedule(bestResult.assignment);
+                                const s = applyAssignmentToSchedule(
+                                    bestResult.assignment,
+                                );
                                 setSchedule(s);
                                 setCost(bestResult.cost);
                                 setAnalysis(analyzeSchedule(s));
@@ -389,7 +445,9 @@ export default function Page() {
                         doneCount++;
                         if (doneCount === numWorkers) {
                             if (bestResult) {
-                                const s = applyAssignmentToSchedule(bestResult.assignment);
+                                const s = applyAssignmentToSchedule(
+                                    bestResult.assignment,
+                                );
                                 setSchedule(s);
                                 setCost(bestResult.cost);
                                 setAnalysis(analyzeSchedule(s));
@@ -403,7 +461,10 @@ export default function Page() {
                     }
                 };
 
-                worker.postMessage({ type: 'solve', maxIterations: iterationsPerWorker });
+                worker.postMessage({
+                    type: 'solve',
+                    maxIterations: iterationsPerWorker,
+                });
             }
         } else {
             setTimeout(() => {
@@ -481,6 +542,25 @@ export default function Page() {
         copiedTimer.current = setTimeout(() => setCopied(false), 2000);
     }
 
+    async function pasteTSV() {
+        try {
+            const text = await navigator.clipboard.readText();
+            const s = parseTSV(text);
+            if (!s) {
+                alert('Could not parse TSV from clipboard');
+                return;
+            }
+            setSchedule(s);
+            setCost(evaluateSchedule(s));
+            setAnalysis(analyzeSchedule(s));
+            setViolations(computeViolations(s));
+            setEditHistory([]);
+            setSelectedTeam(null);
+        } catch {
+            alert('Could not read clipboard. Try pasting into the text area instead.');
+        }
+    }
+
     function teamButtonClass(team: number, day: number): string {
         const base =
             'px-1 py-0.5 rounded text-xs font-mono cursor-pointer transition-colors';
@@ -553,52 +633,89 @@ export default function Page() {
                                 Cancel
                             </button>
                         )}
+                        <button
+                            type="button"
+                            onClick={pasteTSV}
+                            disabled={generating}
+                            className="px-4 py-3 rounded-lg font-medium border border-gray-300 hover:bg-gray-100 disabled:opacity-50 transition-colors text-sm"
+                        >
+                            Paste TSV
+                        </button>
                     </div>
 
-                    {solverProgress && (() => {
-                        const { workers, globalBestCost } = solverProgress;
-                        const totalIter = workers.reduce((s, w) => s + w.iteration, 0);
-                        const totalMax = workers.reduce((s, w) => s + w.maxIterations, 0);
-                        const pct = totalMax > 0 ? (totalIter / totalMax) * 100 : 0;
-                        const doneCount = workers.filter((w) => w.done).length;
-                        return (
-                            <div className="not-prose mt-3 p-3 rounded-lg bg-blue-50 border border-blue-200 text-sm font-mono space-y-2">
-                                <div className="flex justify-between">
-                                    <span>
-                                        {workers.length} cores &middot; {doneCount} finished &middot;{' '}
-                                        {(totalIter / 1_000_000).toFixed(0)}M / {(totalMax / 1_000_000).toFixed(0)}M iter
-                                    </span>
-                                    <span className="font-bold">
-                                        {globalBestCost != null
-                                            ? `Best cost: ${globalBestCost}`
-                                            : 'Starting...'}
-                                    </span>
-                                </div>
-                                <div className="w-full bg-blue-200 rounded-full h-2">
+                    {solverProgress &&
+                        (() => {
+                            const { workers, globalBestCost } = solverProgress;
+                            const totalIter = workers.reduce(
+                                (s, w) => s + w.iteration,
+                                0,
+                            );
+                            const totalMax = workers.reduce(
+                                (s, w) => s + w.maxIterations,
+                                0,
+                            );
+                            const pct =
+                                totalMax > 0 ? (totalIter / totalMax) * 100 : 0;
+                            const doneCount = workers.filter(
+                                (w) => w.done,
+                            ).length;
+                            return (
+                                <div className="not-prose mt-3 p-3 rounded-lg bg-blue-50 border border-blue-200 text-sm font-mono space-y-2">
+                                    <div className="flex justify-between">
+                                        <span>
+                                            {workers.length} cores &middot;{' '}
+                                            {doneCount} finished &middot;{' '}
+                                            {(totalIter / 1_000_000).toFixed(0)}
+                                            M /{' '}
+                                            {(totalMax / 1_000_000).toFixed(0)}M
+                                            iter
+                                        </span>
+                                        <span className="font-bold">
+                                            {globalBestCost != null
+                                                ? `Best cost: ${globalBestCost}`
+                                                : 'Starting...'}
+                                        </span>
+                                    </div>
+                                    <div className="w-full bg-blue-200 rounded-full h-2">
+                                        <div
+                                            className="bg-blue-600 h-2 rounded-full transition-all duration-300"
+                                            style={{ width: `${pct}%` }}
+                                        />
+                                    </div>
                                     <div
-                                        className="bg-blue-600 h-2 rounded-full transition-all duration-300"
-                                        style={{ width: `${pct}%` }}
-                                    />
-                                </div>
-                                <div className="grid gap-1" style={{ gridTemplateColumns: `repeat(${Math.min(workers.length, 12)}, 1fr)` }}>
-                                    {workers.map((w, i) => {
-                                        const wp = w.maxIterations > 0 ? (w.iteration / w.maxIterations) * 100 : 0;
-                                        return (
-                                            // biome-ignore lint/suspicious/noArrayIndexKey: stable worker indices
-                                            <div key={i} title={`Core ${i + 1}: ${(w.iteration / 1_000_000).toFixed(0)}M iter, best ${w.bestCost === Number.POSITIVE_INFINITY ? '–' : w.bestCost}`}>
-                                                <div className="bg-blue-200 rounded-full h-1.5">
-                                                    <div
-                                                        className={`h-1.5 rounded-full transition-all duration-300 ${w.done ? 'bg-green-500' : 'bg-blue-500'}`}
-                                                        style={{ width: `${wp}%` }}
-                                                    />
+                                        className="grid gap-1"
+                                        style={{
+                                            gridTemplateColumns: `repeat(${Math.min(workers.length, 12)}, 1fr)`,
+                                        }}
+                                    >
+                                        {workers.map((w, i) => {
+                                            const wp =
+                                                w.maxIterations > 0
+                                                    ? (w.iteration /
+                                                          w.maxIterations) *
+                                                      100
+                                                    : 0;
+                                            return (
+                                                // biome-ignore lint/suspicious/noArrayIndexKey: stable worker indices
+                                                <div
+                                                    key={i}
+                                                    title={`Core ${i + 1}: ${(w.iteration / 1_000_000).toFixed(0)}M iter, best ${w.bestCost === Number.POSITIVE_INFINITY ? '–' : w.bestCost}`}
+                                                >
+                                                    <div className="bg-blue-200 rounded-full h-1.5">
+                                                        <div
+                                                            className={`h-1.5 rounded-full transition-all duration-300 ${w.done ? 'bg-green-500' : 'bg-blue-500'}`}
+                                                            style={{
+                                                                width: `${wp}%`,
+                                                            }}
+                                                        />
+                                                    </div>
                                                 </div>
-                                            </div>
-                                        );
-                                    })}
+                                            );
+                                        })}
+                                    </div>
                                 </div>
-                            </div>
-                        );
-                    })()}
+                            );
+                        })()}
 
                     {hasSchedule && (
                         <>
@@ -843,13 +960,20 @@ export default function Page() {
                                 </table>
                             </div>
 
-                            <div className="mt-4">
+                            <div className="mt-4 flex gap-2">
                                 <button
                                     type="button"
                                     onClick={copyTSV}
                                     className="not-prose px-4 py-2 rounded text-sm font-medium border border-gray-300 hover:bg-gray-100 transition-colors"
                                 >
                                     {copied ? 'Copied!' : 'Copy for Sheets'}
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={pasteTSV}
+                                    className="not-prose px-4 py-2 rounded text-sm font-medium border border-gray-300 hover:bg-gray-100 transition-colors"
+                                >
+                                    Paste from TSV
                                 </button>
                             </div>
                         </>

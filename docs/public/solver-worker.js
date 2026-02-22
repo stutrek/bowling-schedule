@@ -19,7 +19,7 @@ self.onmessage = async (e) => {
             // Already initialized
         }
 
-        const chunkSize = 1_000_000;
+        const chunkSize = 20_000_000;
 
         try {
             const solver = new Solver(maxIterations);
