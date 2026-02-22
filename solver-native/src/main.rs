@@ -1,6 +1,7 @@
 use chrono::Local;
 use rand::rngs::SmallRng;
 use rand::{Rng, SeedableRng};
+use serde::Deserialize;
 use std::fs;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
@@ -13,6 +14,33 @@ const QUADS: usize = 4;
 const POS: usize = 4;
 
 type Assignment = [[[u8; POS]; QUADS]; WEEKS];
+
+#[derive(Deserialize)]
+struct Config {
+    weights: Weights,
+    solver: SolverParams,
+}
+
+#[derive(Deserialize, Clone)]
+struct Weights {
+    matchup_zero: u32,
+    matchup_triple: u32,
+    consecutive_opponents: u32,
+    early_late_balance: f64,
+    early_late_alternation: u32,
+    lane_balance: f64,
+    lane_switch: f64,
+}
+
+#[derive(Deserialize)]
+struct SolverParams {
+    t0: f64,
+    max_iterations: u64,
+    progress_interval: u64,
+    sync_interval: u64,
+    restart_interval: u64,
+    stagnation_threshold: u32,
+}
 
 #[derive(Clone)]
 struct CostBreakdown {
@@ -47,6 +75,7 @@ struct SyncState {
     global_best_assignment: Assignment,
     stagnation_epochs: u32,
     prev_global_best_cost: u32,
+    generation_dir: String,
 }
 
 fn random_assignment(rng: &mut SmallRng) -> Assignment {
@@ -66,7 +95,7 @@ fn random_assignment(rng: &mut SmallRng) -> Assignment {
     a
 }
 
-fn evaluate(a: &Assignment) -> CostBreakdown {
+fn evaluate(a: &Assignment, w8: &Weights) -> CostBreakdown {
     let mut matchups = [0i32; TEAMS * TEAMS];
     let mut week_matchup = [0u8; WEEKS * TEAMS * TEAMS];
     let mut lane_counts = [0i32; TEAMS * LANES];
@@ -95,7 +124,6 @@ fn evaluate(a: &Assignment) -> CostBreakdown {
             lane_counts[pd as usize * LANES + lane_off + 1] += 1;
             lane_counts[pd as usize * LANES + lane_off] += 1;
 
-            // pa and pc stay on the same lane both games; pb and pd switch
             stay_count[pa as usize] += 1;
             stay_count[pc as usize] += 1;
 
@@ -113,9 +141,9 @@ fn evaluate(a: &Assignment) -> CostBreakdown {
         for j in (i + 1)..TEAMS {
             let c = matchups[i * TEAMS + j];
             if c == 0 {
-                matchup_balance += 30;
+                matchup_balance += w8.matchup_zero;
             } else if c >= 3 {
-                matchup_balance += (c - 2) as u32 * 40;
+                matchup_balance += (c - 2) as u32 * w8.matchup_triple;
             }
         }
     }
@@ -128,7 +156,7 @@ fn evaluate(a: &Assignment) -> CostBreakdown {
             for j in (i + 1)..TEAMS {
                 let idx = i * TEAMS + j;
                 if week_matchup[b1 + idx] != 0 && week_matchup[b2 + idx] != 0 {
-                    consecutive_opponents += 10;
+                    consecutive_opponents += w8.consecutive_opponents;
                 }
             }
         }
@@ -138,7 +166,7 @@ fn evaluate(a: &Assignment) -> CostBreakdown {
     let target_e: f64 = WEEKS as f64 / 2.0;
     for t in 0..TEAMS {
         let dev = (early_count[t] as f64 - target_e).abs();
-        early_late_balance += (dev * dev * 20.0) as u32;
+        early_late_balance += (dev * dev * w8.early_late_balance) as u32;
     }
 
     let mut early_late_alternation: u32 = 0;
@@ -148,7 +176,7 @@ fn evaluate(a: &Assignment) -> CostBreakdown {
             if early_late[base + w] == early_late[base + w + 1]
                 && early_late[base + w + 1] == early_late[base + w + 2]
             {
-                early_late_alternation += 25;
+                early_late_alternation += w8.early_late_alternation;
             }
         }
     }
@@ -158,7 +186,7 @@ fn evaluate(a: &Assignment) -> CostBreakdown {
     for t in 0..TEAMS {
         for l in 0..LANES {
             lane_balance +=
-                ((lane_counts[t * LANES + l] as f64 - target_l).abs() * 15.0) as u32;
+                ((lane_counts[t * LANES + l] as f64 - target_l).abs() * w8.lane_balance) as u32;
         }
     }
 
@@ -166,7 +194,7 @@ fn evaluate(a: &Assignment) -> CostBreakdown {
     let target_stay: f64 = WEEKS as f64 / 2.0;
     for t in 0..TEAMS {
         let dev = (stay_count[t] as f64 - target_stay).abs();
-        lane_switch_balance += (dev * 5.0) as u32;
+        lane_switch_balance += (dev * w8.lane_switch) as u32;
     }
 
     let total = matchup_balance
@@ -250,6 +278,19 @@ fn now_iso() -> String {
     Local::now().format("%Y-%m-%dT%H:%M:%S%:z").to_string()
 }
 
+fn new_generation_dir(base: &str) -> String {
+    let ts = Local::now().format("%Y-%m-%dT%H%M%S%.3f");
+    let dir = format!("{}/gen-{}", base, ts);
+    fs::create_dir_all(&dir).expect("Failed to create generation directory");
+    dir
+}
+
+fn complete_dir(base: &str) -> String {
+    let dir = format!("{}/complete", base);
+    fs::create_dir_all(&dir).expect("Failed to create complete directory");
+    dir
+}
+
 fn save_assignment(
     results_dir: &str,
     prefix: &str,
@@ -271,18 +312,29 @@ fn save_assignment(
 }
 
 fn main() {
+    let config_path = std::env::args().nth(1).unwrap_or_else(|| "config.toml".to_string());
+    let config_str = fs::read_to_string(&config_path)
+        .unwrap_or_else(|e| panic!("Failed to read {}: {}", config_path, e));
+    let config: Config = toml::from_str(&config_str)
+        .unwrap_or_else(|e| panic!("Failed to parse {}: {}", config_path, e));
+
     let results_dir = "results";
     fs::create_dir_all(results_dir).expect("Failed to create results directory");
 
     let num_cores = thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4);
-    let max_iterations: u64 = 6_000_000_000;
-    let progress_interval: u64 = 10_000_000;
-    let sync_interval: u64 = 50_000_000;
-    let restart_interval: u64 = 100_000;
+    let max_iterations = config.solver.max_iterations;
+    let progress_interval = config.solver.progress_interval;
+    let sync_interval = config.solver.sync_interval;
+    let restart_interval = config.solver.restart_interval;
+    let stagnation_threshold = config.solver.stagnation_threshold;
+    let t0 = config.solver.t0;
+    let weights = Arc::new(config.weights);
 
     let dummy_assignment: Assignment = [[[0u8; POS]; QUADS]; WEEKS];
+    let initial_gen_dir = new_generation_dir(results_dir);
+    eprintln!("[{}] Generation output: {}", now_iso(), initial_gen_dir);
 
     let sync_pair = Arc::new((
         Mutex::new(SyncState {
@@ -299,6 +351,7 @@ fn main() {
             global_best_assignment: dummy_assignment,
             stagnation_epochs: 0,
             prev_global_best_cost: u32::MAX,
+            generation_dir: initial_gen_dir,
         }),
         Condvar::new(),
     ));
@@ -311,30 +364,38 @@ fn main() {
     }));
 
     eprintln!(
-        "[{}] Starting solver: {} cores, {}B iterations/run, sync every {}M. Ctrl+C to stop.",
-        now_iso(), num_cores, max_iterations / 1_000_000_000, sync_interval / 1_000_000,
+        "[{}] Starting solver: {} cores, {:.1}B iterations/run, sync every {}M, stagnation threshold {}. Ctrl+C to stop.",
+        now_iso(), num_cores, max_iterations as f64 / 1e9, sync_interval / 1_000_000, stagnation_threshold,
+    );
+    eprintln!(
+        "[{}] Weights: matchup_zero={} matchup_triple={} consec={} el_bal={} el_alt={} lane={} switch={}",
+        now_iso(), weights.matchup_zero, weights.matchup_triple, weights.consecutive_opponents,
+        weights.early_late_balance, weights.early_late_alternation, weights.lane_balance, weights.lane_switch,
     );
 
-    // Saver thread: writes dirty results to disk every second
     let saver_best = Arc::clone(&best_results);
-    let saver_dir = results_dir.to_string();
+    let saver_sync = Arc::clone(&sync_pair);
     thread::spawn(move || {
         let mut last_overall: Option<Assignment> = None;
         let mut last_matchup: Option<Assignment> = None;
         loop {
             thread::sleep(Duration::from_secs(1));
+            let gen_dir = {
+                let sync = saver_sync.0.lock().unwrap();
+                sync.generation_dir.clone()
+            };
             let mut state = saver_best.lock().unwrap();
 
             if state.overall_dirty {
                 if let Some((ref a, ref c)) = state.overall {
-                    save_assignment(&saver_dir, "best-overall", c.total, a, c, &mut last_overall);
+                    save_assignment(&gen_dir, "best-overall", c.total, a, c, &mut last_overall);
                 }
                 state.overall_dirty = false;
             }
 
             if state.matchup_dirty {
                 if let Some((ref a, ref c)) = state.best_matchup {
-                    save_assignment(&saver_dir, "best-matchup", c.matchup_balance, a, c, &mut last_matchup);
+                    save_assignment(&gen_dir, "best-matchup", c.matchup_balance, a, c, &mut last_matchup);
                 }
                 state.matchup_dirty = false;
             }
@@ -345,25 +406,28 @@ fn main() {
         .map(|core_id| {
             let sync_pair = Arc::clone(&sync_pair);
             let best_results = Arc::clone(&best_results);
-            let results_dir = results_dir.to_string();
+            let base_dir = results_dir.to_string();
+            let w8 = Arc::clone(&weights);
             thread::spawn(move || {
                 let mut rng = SmallRng::from_os_rng();
-                let t0: f64 = 30.0;
                 let mut last_perfect: Option<Assignment> = None;
                 let mut last_sync: Option<Assignment> = None;
+                let mut last_gen_best: Option<Assignment> = None;
 
                 loop {
                     let cool_rate: f64 = (0.005_f64 / t0).ln() / max_iterations as f64;
                     let mut a = random_assignment(&mut rng);
-                    let mut cost = evaluate(&a);
+                    let mut cost = evaluate(&a, &w8);
                     let mut best_a = a;
                     let mut best_cost = cost.total;
                     let mut temp: f64 = t0;
+                    let mut cool_offset: u64 = 0;
 
                     for i in 0..max_iterations {
                         if best_cost == 0 {
-                            let final_cost = evaluate(&best_a);
-                            save_assignment(&results_dir, "perfect", 0, &best_a, &final_cost, &mut last_perfect);
+                            let final_cost = evaluate(&best_a, &w8);
+                            let gen_dir = sync_pair.0.lock().unwrap().generation_dir.clone();
+                            save_assignment(&gen_dir, "perfect", 0, &best_a, &final_cost, &mut last_perfect);
                             eprintln!(
                                 "[{}] core {} found PERFECT solution! ({})",
                                 now_iso(), core_id, cost_label(&final_cost),
@@ -384,10 +448,11 @@ fn main() {
                                 }
                             }
                             a = random_assignment(&mut rng);
-                            cost = evaluate(&a);
+                            cost = evaluate(&a, &w8);
                             best_a = a;
                             best_cost = cost.total;
                             temp = t0;
+                            cool_offset = i;
                         }
 
                         let rand_val: f64 = rng.random();
@@ -403,7 +468,7 @@ fn main() {
                             a[w][q1][p1] = a[w][q2][p2];
                             a[w][q2][p2] = tmp;
 
-                            let new_cost = evaluate(&a);
+                            let new_cost = evaluate(&a, &w8);
                             let delta = new_cost.total as i64 - cost.total as i64;
                             if delta <= 0 || rng.random::<f64>() < (-delta as f64 / temp).exp() {
                                 cost = new_cost;
@@ -422,7 +487,7 @@ fn main() {
                             a[w][q][p1] = a[w][q][p2];
                             a[w][q][p2] = tmp;
 
-                            let new_cost = evaluate(&a);
+                            let new_cost = evaluate(&a, &w8);
                             let delta = new_cost.total as i64 - cost.total as i64;
                             if delta <= 0 || rng.random::<f64>() < (-delta as f64 / temp).exp() {
                                 cost = new_cost;
@@ -459,7 +524,7 @@ fn main() {
                                 a[w2][qi2][pi2] = other1;
                                 a[w2][qi1][pi1] = team;
 
-                                let new_cost = evaluate(&a);
+                                let new_cost = evaluate(&a, &w8);
                                 let delta = new_cost.total as i64 - cost.total as i64;
                                 if delta <= 0 || rng.random::<f64>() < (-delta as f64 / temp).exp() {
                                     cost = new_cost;
@@ -480,7 +545,7 @@ fn main() {
                             a[w][q1] = a[w][q2];
                             a[w][q2] = tmp;
 
-                            let new_cost = evaluate(&a);
+                            let new_cost = evaluate(&a, &w8);
                             let delta = new_cost.total as i64 - cost.total as i64;
                             if delta <= 0 || rng.random::<f64>() < (-delta as f64 / temp).exp() {
                                 cost = new_cost;
@@ -491,7 +556,7 @@ fn main() {
                             }
                         }
 
-                        temp = t0 * (cool_rate * i as f64).exp();
+                        temp = t0 * (cool_rate * (i - cool_offset) as f64).exp();
 
                         if i > 0 && i % restart_interval == 0 && cost.total > best_cost {
                             if i % (restart_interval * 2) == 0 {
@@ -500,7 +565,7 @@ fn main() {
                                 a = best_a;
                                 perturb(&mut a, &mut rng, 20);
                             }
-                            cost = evaluate(&a);
+                            cost = evaluate(&a, &w8);
                             temp = t0 * 0.3;
                         }
 
@@ -510,27 +575,23 @@ fn main() {
                             } else {
                                 format!("{}M", i / 1_000_000)
                             };
+                            let best_breakdown = evaluate(&best_a, &w8);
                             eprintln!(
-                                "[{}] core {} @ {} iter, run best: {}",
-                                now_iso(), core_id, label, best_cost,
+                                "[{}] core {} @ {} | best: {} | temp: {:.2}",
+                                now_iso(), core_id, label, cost_label(&best_breakdown), temp,
                             );
                         }
 
-                        // Soft sync checkpoint
                         if i > 0 && i % sync_interval == 0 {
                             let (lock, cvar) = &*sync_pair;
                             let mut sync = lock.lock().unwrap();
 
-                            // Write our state into our slot
                             sync.slots[core_id].best_cost = best_cost;
                             sync.slots[core_id].best_assignment = best_a;
                             sync.slots[core_id].reset_to = None;
                             sync.checked_in += 1;
 
                             if sync.checked_in == num_cores {
-                                // Last core to arrive — perform the sync
-
-                                // Update global best from all cores
                                 let mut gb_cost = sync.global_best_cost;
                                 let mut gb_assign = sync.global_best_assignment;
                                 for slot in &sync.slots {
@@ -542,7 +603,6 @@ fn main() {
                                 sync.global_best_cost = gb_cost;
                                 sync.global_best_assignment = gb_assign;
 
-                                // Stagnation detection
                                 let improved = gb_cost < sync.prev_global_best_cost;
                                 if improved {
                                     sync.stagnation_epochs = 0;
@@ -551,11 +611,9 @@ fn main() {
                                     sync.stagnation_epochs += 1;
                                 }
 
-                                let stagnation_threshold = 20;
                                 let generational_restart = sync.stagnation_epochs >= stagnation_threshold;
 
-                                // Save global best at sync time
-                                let global_cost = evaluate(&sync.global_best_assignment);
+                                let global_cost = evaluate(&sync.global_best_assignment, &w8);
                                 {
                                     let mut br = best_results.lock().unwrap();
                                     let is_new = br.overall.as_ref()
@@ -573,7 +631,7 @@ fn main() {
                                 }
 
                                 save_assignment(
-                                    &results_dir, "sync",
+                                    &sync.generation_dir.clone(), "sync",
                                     global_cost.total,
                                     &sync.global_best_assignment,
                                     &global_cost,
@@ -581,7 +639,6 @@ fn main() {
                                 );
 
                                 if generational_restart {
-                                    // Reset ALL cores to fresh random assignments
                                     let mut gen_rng = SmallRng::seed_from_u64(sync.epoch.wrapping_mul(97));
                                     for slot in &mut sync.slots {
                                         slot.reset_to = Some(random_assignment(&mut gen_rng));
@@ -596,25 +653,35 @@ fn main() {
                                         sync.stagnation_epochs,
                                     );
 
+                                    let cdir = complete_dir(&base_dir);
+                                    save_assignment(
+                                        &cdir, "gen-best",
+                                        global_cost.total,
+                                        &sync.global_best_assignment,
+                                        &global_cost,
+                                        &mut last_gen_best,
+                                    );
+
+                                    sync.generation_dir = new_generation_dir(&base_dir);
+                                    eprintln!("[{}] New generation output: {}", now_iso(), sync.generation_dir);
+                                    last_sync = None;
+
                                     sync.stagnation_epochs = 0;
                                     sync.global_best_cost = u32::MAX;
                                     sync.prev_global_best_cost = u32::MAX;
                                     sync.global_best_assignment = [[[0u8; POS]; QUADS]; WEEKS];
                                 } else {
-                                    // Deduplication: find cores with identical assignments
                                     let mut dedup_resets: Vec<usize> = Vec::new();
-                                    for i in 0..num_cores {
-                                        let dominated = dedup_resets.contains(&i);
-                                        if dominated { continue; }
-                                        for j in (i + 1)..num_cores {
-                                            if dedup_resets.contains(&j) { continue; }
-                                            if sync.slots[i].best_assignment == sync.slots[j].best_assignment {
-                                                dedup_resets.push(j);
+                                    for ci in 0..num_cores {
+                                        if dedup_resets.contains(&ci) { continue; }
+                                        for cj in (ci + 1)..num_cores {
+                                            if dedup_resets.contains(&cj) { continue; }
+                                            if sync.slots[ci].best_assignment == sync.slots[cj].best_assignment {
+                                                dedup_resets.push(cj);
                                             }
                                         }
                                     }
 
-                                    // Sort cores by cost (worst first)
                                     let mut ranked: Vec<(usize, u32)> = sync.slots.iter()
                                         .enumerate()
                                         .map(|(id, s)| (id, s.best_cost))
@@ -625,7 +692,6 @@ fn main() {
                                     let mut reset_set: Vec<usize> = Vec::new();
                                     let mut reset_info: Vec<(usize, usize, &str)> = Vec::new();
 
-                                    // Add worst 50% to reset list
                                     for (rank, &(cid, _)) in ranked.iter().enumerate() {
                                         if rank >= num_reset { break; }
                                         if !reset_set.contains(&cid) {
@@ -633,14 +699,12 @@ fn main() {
                                         }
                                     }
 
-                                    // Add deduplicated cores (even if they'd be in the top 50%)
                                     for &cid in &dedup_resets {
                                         if !reset_set.contains(&cid) {
                                             reset_set.push(cid);
                                         }
                                     }
 
-                                    // Apply graduated perturbations
                                     let max_perturb = if reset_set.len() <= 1 { 0 } else { reset_set.len() - 1 };
                                     for (rank, &cid) in reset_set.iter().enumerate() {
                                         let perturbations = if max_perturb == 0 {
@@ -659,15 +723,15 @@ fn main() {
                                         reset_info.push((cid, perturbations, reason));
                                     }
 
-                                    // Log
                                     let reset_desc: Vec<String> = reset_info.iter()
                                         .map(|(cid, p, reason)| format!("core{}({}perturb,{})", cid, p, reason))
                                         .collect();
                                     eprintln!(
-                                        "[{}] SYNC epoch {} | global best: {} | stagnation: {}/{} | reset: [{}]",
+                                        "[{}] SYNC epoch {} | global best: {} ({}) | stagnation: {}/{} | reset: [{}]",
                                         now_iso(),
                                         sync.epoch,
                                         sync.global_best_cost,
+                                        cost_label(&global_cost),
                                         sync.stagnation_epochs,
                                         stagnation_threshold,
                                         reset_desc.join(", "),
@@ -678,29 +742,27 @@ fn main() {
                                 sync.checked_in = 0;
                                 cvar.notify_all();
                             } else {
-                                // Wait for all cores to check in
                                 let epoch_before = sync.epoch;
                                 while sync.epoch == epoch_before {
                                     sync = cvar.wait(sync).unwrap();
                                 }
                             }
 
-                            // Read reset before releasing the lock
                             let my_reset = sync.slots[core_id].reset_to;
                             drop(sync);
 
                             if let Some(new_a) = my_reset {
                                 a = new_a;
-                                cost = evaluate(&a);
+                                cost = evaluate(&a, &w8);
                                 best_a = new_a;
                                 best_cost = cost.total;
-                                temp = t0 * 0.3;
+                                temp = t0;
+                                cool_offset = i;
                             }
                         }
                     }
 
-                    // Run complete — update shared bests
-                    let final_cost = evaluate(&best_a);
+                    let final_cost = evaluate(&best_a, &w8);
                     {
                         let mut br = best_results.lock().unwrap();
                         let is_new_overall = br.overall.as_ref()

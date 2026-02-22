@@ -1,0 +1,16 @@
+[weights]
+matchup_zero = 60
+matchup_triple = 40
+consecutive_opponents = 10
+early_late_balance = 20.0
+early_late_alternation = 25
+lane_balance = 15.0
+lane_switch = 5.0
+
+[solver]
+t0 = 30.0
+max_iterations = 6_000_000_000
+progress_interval = 10_000_000
+sync_interval = 50_000_000
+restart_interval = 100_000
+stagnation_threshold = 20
