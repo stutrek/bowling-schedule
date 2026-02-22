@@ -199,7 +199,7 @@ export function solveSchedule(
             const rand = Math.random();
             let revertFn: (() => void) | null = null;
 
-            if (rand < 0.40) {
+            if (rand < 0.4) {
                 // Inter-group swap: swap two teams between different quadrants in the same week
                 const w = Math.floor(Math.random() * W);
                 const q1 = Math.floor(Math.random() * 4);
@@ -293,7 +293,10 @@ export function solveSchedule(
                     bestCost = newCost.total;
                     bestA = cloneAssignment(a);
                     if (verbose && bestCost % 50 === 0) {
-                        console.log(`[run ${run}, iter ${i}] cost=${bestCost}`, newCost);
+                        console.log(
+                            `[run ${run}, iter ${i}] cost=${bestCost}`,
+                            newCost,
+                        );
                     }
                 }
             } else if (revertFn) {

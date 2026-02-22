@@ -2,7 +2,7 @@
 
 import { useState, useRef, useEffect } from 'react';
 import { Schedule } from '../../../src/Schedule';
-import { solveSchedule, evaluateSchedule } from '../../../src/solver';
+import { evaluateSchedule } from '../../../src/solver';
 import type { CostBreakdown } from '../../../src/solver';
 import type { Config, Game } from '../../../src/types';
 import { pinsetter as pinsetter1 } from '../../../src/pinsetter1';
@@ -120,9 +120,7 @@ function analyzeSchedule(schedule: Schedule): Analysis {
     const slotCounts = Array.from({ length: timeSlots }, () =>
         new Array(teams).fill(0),
     );
-    const groups = Array.from({ length: teams }, () =>
-        new Array(days).fill(0),
-    );
+    const groups = Array.from({ length: teams }, () => new Array(days).fill(0));
 
     for (const game of schedule.schedule) {
         if (game.teams[0] === -1 || game.teams[1] === -1) continue;
@@ -198,7 +196,10 @@ function computeViolations(schedule: Schedule): Violations {
 }
 
 function cloneGames(games: Game[]): Game[] {
-    return games.map((g) => ({ ...g, teams: [...g.teams] as [number, number] }));
+    return games.map((g) => ({
+        ...g,
+        teams: [...g.teams] as [number, number],
+    }));
 }
 
 function swapTeamsInGames(
@@ -227,6 +228,40 @@ function rebuildSchedule(games: Game[]): Schedule {
     return s;
 }
 
+function applyAssignmentToSchedule(flat: number[]): Schedule {
+    const s = new Schedule(config);
+    s.schedule = [];
+    s.createSchedule();
+    let idx = 0;
+    for (let w = 0; w < config.days; w++) {
+        for (let q = 0; q < 4; q++) {
+            const a = flat[idx++];
+            const b = flat[idx++];
+            const c = flat[idx++];
+            const d = flat[idx++];
+            const slot = q < 2 ? 0 : 2;
+            const lane = (q % 2) * 2;
+            s.setGame(a, b, w, slot, lane);
+            s.setGame(c, d, w, slot, lane + 1);
+            s.setGame(a, d, w, slot + 1, lane);
+            s.setGame(c, b, w, slot + 1, lane + 1);
+        }
+    }
+    return s;
+}
+
+interface WorkerProgress {
+    iteration: number;
+    maxIterations: number;
+    bestCost: number;
+    done: boolean;
+}
+
+interface SolverProgress {
+    workers: WorkerProgress[];
+    globalBestCost: number | null;
+}
+
 function gameHasConsecutiveViolation(
     violations: Violations,
     game: Game,
@@ -253,6 +288,10 @@ export default function Page() {
     } | null>(null);
     const [editHistory, setEditHistory] = useState<Game[][]>([]);
     const [highlightInput, setHighlightInput] = useState('');
+    const [solverProgress, setSolverProgress] = useState<SolverProgress | null>(
+        null,
+    );
+    const workersRef = useRef<Worker[]>([]);
 
     const highlightedTeams = new Set(
         highlightInput
@@ -273,22 +312,122 @@ export default function Page() {
         setGenerating(true);
         setSelectedTeam(null);
         setEditHistory([]);
-        setTimeout(() => {
-            const s = new Schedule(config);
-            s.createSchedule();
-            let c: CostBreakdown;
-            if (algorithm === 'solver') {
-                c = solveSchedule(s, { maxIterations: 1_000_000 });
-            } else {
-                pinsetterFns[algorithm](s);
-                c = evaluateSchedule(s);
+        setSolverProgress(null);
+
+        if (algorithm === 'solver') {
+            for (const w of workersRef.current) w.terminate();
+            workersRef.current = [];
+
+            const numWorkers = navigator.hardwareConcurrency || 4;
+            const iterationsPerWorker = 200_000_000;
+            const basePath =
+                typeof window !== 'undefined'
+                    ? window.location.pathname.replace(/\/+$/, '')
+                    : '';
+
+            let bestCost = Number.POSITIVE_INFINITY;
+            let bestResult: { cost: CostBreakdown; assignment: number[] } | null = null;
+            const workerStates: WorkerProgress[] = Array.from({ length: numWorkers }, () => ({
+                iteration: 0,
+                maxIterations: iterationsPerWorker,
+                bestCost: Number.POSITIVE_INFINITY,
+                done: false,
+            }));
+            let doneCount = 0;
+
+            setSolverProgress({ workers: [...workerStates], globalBestCost: null });
+
+            for (let i = 0; i < numWorkers; i++) {
+                const worker = new Worker(`${basePath}/solver-worker.js`, { type: 'module' });
+                workersRef.current.push(worker);
+                const workerIdx = i;
+
+                worker.onmessage = (e: MessageEvent) => {
+                    const msg = e.data;
+                    if (msg.type === 'progress') {
+                        workerStates[workerIdx] = {
+                            iteration: msg.iteration,
+                            maxIterations: msg.maxIterations,
+                            bestCost: msg.bestCost,
+                            done: false,
+                        };
+                        const globalBest = Math.min(...workerStates.map((w) => w.bestCost));
+                        setSolverProgress({
+                            workers: [...workerStates],
+                            globalBestCost: globalBest === Number.POSITIVE_INFINITY ? null : globalBest,
+                        });
+                    } else if (msg.type === 'done') {
+                        workerStates[workerIdx].done = true;
+                        workerStates[workerIdx].iteration = iterationsPerWorker;
+                        doneCount++;
+                        if (msg.cost.total < bestCost) {
+                            bestCost = msg.cost.total;
+                            bestResult = { cost: msg.cost, assignment: msg.assignment };
+                        }
+                        const globalBest = Math.min(...workerStates.map((w) => w.bestCost));
+                        setSolverProgress({
+                            workers: [...workerStates],
+                            globalBestCost: globalBest === Number.POSITIVE_INFINITY ? null : globalBest,
+                        });
+
+                        if (doneCount === numWorkers) {
+                            if (bestResult) {
+                                const s = applyAssignmentToSchedule(bestResult.assignment);
+                                setSchedule(s);
+                                setCost(bestResult.cost);
+                                setAnalysis(analyzeSchedule(s));
+                                setViolations(computeViolations(s));
+                            }
+                            setGenerating(false);
+                            setSolverProgress(null);
+                            for (const w of workersRef.current) w.terminate();
+                            workersRef.current = [];
+                        }
+                    } else if (msg.type === 'error') {
+                        console.error('Solver worker error:', msg.message);
+                        workerStates[workerIdx].done = true;
+                        doneCount++;
+                        if (doneCount === numWorkers) {
+                            if (bestResult) {
+                                const s = applyAssignmentToSchedule(bestResult.assignment);
+                                setSchedule(s);
+                                setCost(bestResult.cost);
+                                setAnalysis(analyzeSchedule(s));
+                                setViolations(computeViolations(s));
+                            }
+                            setGenerating(false);
+                            setSolverProgress(null);
+                            for (const w of workersRef.current) w.terminate();
+                            workersRef.current = [];
+                        }
+                    }
+                };
+
+                worker.postMessage({ type: 'solve', maxIterations: iterationsPerWorker });
             }
-            setSchedule(s);
-            setCost(c);
-            setAnalysis(analyzeSchedule(s));
-            setViolations(computeViolations(s));
-            setGenerating(false);
-        }, 50);
+        } else {
+            setTimeout(() => {
+                const s = new Schedule(config);
+                s.createSchedule();
+                pinsetterFns[algorithm](s);
+                const c = evaluateSchedule(s);
+                setSchedule(s);
+                setCost(c);
+                setAnalysis(analyzeSchedule(s));
+                setViolations(computeViolations(s));
+                setGenerating(false);
+            }, 50);
+        }
+    }
+
+    function cancelSolve() {
+        for (const w of workersRef.current) {
+            w.postMessage({ type: 'cancel' });
+            w.terminate();
+        }
+        workersRef.current = [];
+        setGenerating(false);
+        setSolverProgress(null);
     }
 
     function handleTeamClick(team: number, day: number) {
@@ -304,10 +443,7 @@ export default function Page() {
             return;
         }
 
-        const days =
-            selectedTeam.day === day
-                ? [day]
-                : [selectedTeam.day, day];
+        const days = selectedTeam.day === day ? [day] : [selectedTeam.day, day];
 
         setEditHistory((h) => [...h, cloneGames(schedule.schedule)]);
 
@@ -348,7 +484,9 @@ export default function Page() {
     function teamButtonClass(team: number, day: number): string {
         const base =
             'px-1 py-0.5 rounded text-xs font-mono cursor-pointer transition-colors';
-        const hl = highlightedTeams.has(team) ? ' ring-2 ring-amber-400 bg-amber-50' : '';
+        const hl = highlightedTeams.has(team)
+            ? ' ring-2 ring-amber-400 bg-amber-50'
+            : '';
         if (
             selectedTeam &&
             selectedTeam.team === team &&
@@ -367,7 +505,9 @@ export default function Page() {
     return (
         <div className="flex min-h-screen">
             {/* Main content — scrolls normally */}
-            <div className={`flex-1 p-4 overflow-y-auto ${hasSchedule ? 'pr-2' : ''}`}>
+            <div
+                className={`flex-1 p-4 overflow-y-auto ${hasSchedule ? 'pr-2' : ''}`}
+            >
                 <div className="prose max-w-none">
                     <h1>Bowling Schedule Generator</h1>
                     <p>
@@ -384,6 +524,7 @@ export default function Page() {
                                 setAlgorithm(e.target.value as AlgorithmId)
                             }
                             className="px-3 py-3 rounded-lg border border-gray-300 bg-white text-sm"
+                            disabled={generating}
                         >
                             {algorithms.map((a) => (
                                 <option key={a.id} value={a.id}>
@@ -397,9 +538,67 @@ export default function Page() {
                             disabled={generating}
                             className="px-6 py-3 rounded-lg font-semibold text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:cursor-wait transition-colors"
                         >
-                            {generating ? 'Generating...' : 'Generate'}
+                            {generating
+                                ? algorithm === 'solver'
+                                    ? 'Solving (WASM)...'
+                                    : 'Generating...'
+                                : 'Generate'}
                         </button>
+                        {generating && algorithm === 'solver' && (
+                            <button
+                                type="button"
+                                onClick={cancelSolve}
+                                className="px-4 py-3 rounded-lg font-semibold text-white bg-red-500 hover:bg-red-600 transition-colors"
+                            >
+                                Cancel
+                            </button>
+                        )}
                     </div>
+
+                    {solverProgress && (() => {
+                        const { workers, globalBestCost } = solverProgress;
+                        const totalIter = workers.reduce((s, w) => s + w.iteration, 0);
+                        const totalMax = workers.reduce((s, w) => s + w.maxIterations, 0);
+                        const pct = totalMax > 0 ? (totalIter / totalMax) * 100 : 0;
+                        const doneCount = workers.filter((w) => w.done).length;
+                        return (
+                            <div className="not-prose mt-3 p-3 rounded-lg bg-blue-50 border border-blue-200 text-sm font-mono space-y-2">
+                                <div className="flex justify-between">
+                                    <span>
+                                        {workers.length} cores &middot; {doneCount} finished &middot;{' '}
+                                        {(totalIter / 1_000_000).toFixed(0)}M / {(totalMax / 1_000_000).toFixed(0)}M iter
+                                    </span>
+                                    <span className="font-bold">
+                                        {globalBestCost != null
+                                            ? `Best cost: ${globalBestCost}`
+                                            : 'Starting...'}
+                                    </span>
+                                </div>
+                                <div className="w-full bg-blue-200 rounded-full h-2">
+                                    <div
+                                        className="bg-blue-600 h-2 rounded-full transition-all duration-300"
+                                        style={{ width: `${pct}%` }}
+                                    />
+                                </div>
+                                <div className="grid gap-1" style={{ gridTemplateColumns: `repeat(${Math.min(workers.length, 12)}, 1fr)` }}>
+                                    {workers.map((w, i) => {
+                                        const wp = w.maxIterations > 0 ? (w.iteration / w.maxIterations) * 100 : 0;
+                                        return (
+                                            // biome-ignore lint/suspicious/noArrayIndexKey: stable worker indices
+                                            <div key={i} title={`Core ${i + 1}: ${(w.iteration / 1_000_000).toFixed(0)}M iter, best ${w.bestCost === Number.POSITIVE_INFINITY ? '–' : w.bestCost}`}>
+                                                <div className="bg-blue-200 rounded-full h-1.5">
+                                                    <div
+                                                        className={`h-1.5 rounded-full transition-all duration-300 ${w.done ? 'bg-green-500' : 'bg-blue-500'}`}
+                                                        style={{ width: `${wp}%` }}
+                                                    />
+                                                </div>
+                                            </div>
+                                        );
+                                    })}
+                                </div>
+                            </div>
+                        );
+                    })()}
 
                     {hasSchedule && (
                         <>
@@ -496,6 +695,11 @@ export default function Page() {
                                                                       matchup
                                                                   ]
                                                         }
+                                                        title={
+                                                            i !== j
+                                                                ? `Teams ${i + 1} & ${j + 1}: ${matchup} matchup${matchup !== 1 ? 's' : ''} (expect 1–2)`
+                                                                : undefined
+                                                        }
                                                     >
                                                         {i === j
                                                             ? ' '
@@ -535,6 +739,7 @@ export default function Page() {
                                                         className={
                                                             lanesColors[count]
                                                         }
+                                                        title={`Team ${j + 1} on lane ${i + 1}: ${count}× (expect 6)`}
                                                     >
                                                         {count}
                                                     </td>
@@ -572,6 +777,7 @@ export default function Page() {
                                                         className={
                                                             lanesColors[count]
                                                         }
+                                                        title={`Team ${j + 1} in ${slotNames[i]}: ${count}× (expect 6)`}
                                                     >
                                                         {count}
                                                     </td>
@@ -621,6 +827,11 @@ export default function Page() {
                                                             // biome-ignore lint/suspicious/noArrayIndexKey: sequential
                                                             key={j}
                                                             className={bg}
+                                                            title={
+                                                                isViolation
+                                                                    ? `Team ${i + 1}: 3+ consecutive ${group < 3 ? 'early' : 'late'} weeks`
+                                                                    : undefined
+                                                            }
                                                         >
                                                             {group}
                                                         </td>
@@ -648,7 +859,8 @@ export default function Page() {
 
             {/* Sidebar — sticky schedule editor */}
             {hasSchedule && (
-                <aside className="sticky top-0 h-screen overflow-y-auto border-l border-gray-200 bg-gray-50 flex-shrink-0 p-3 flex flex-col gap-3"
+                <aside
+                    className="sticky top-0 h-screen overflow-y-auto border-l border-gray-200 bg-gray-50 flex-shrink-0 p-3 flex flex-col gap-3"
                     style={{ width: '480px' }}
                 >
                     <div className="flex items-center gap-2 flex-wrap">
@@ -658,7 +870,10 @@ export default function Page() {
                             disabled={editHistory.length === 0}
                             className="px-3 py-1.5 rounded font-medium border border-gray-300 hover:bg-gray-100 disabled:opacity-40 disabled:cursor-default disabled:hover:bg-white transition-colors text-sm bg-white"
                         >
-                            Undo{editHistory.length > 0 ? ` (${editHistory.length})` : ''}
+                            Undo
+                            {editHistory.length > 0
+                                ? ` (${editHistory.length})`
+                                : ''}
                         </button>
                         <span className="text-xs text-gray-500 font-bold">
                             Total: {cost.total}
@@ -666,7 +881,10 @@ export default function Page() {
                     </div>
 
                     <div>
-                        <label htmlFor="highlight-teams" className="text-xs text-gray-500 block mb-1">
+                        <label
+                            htmlFor="highlight-teams"
+                            className="text-xs text-gray-500 block mb-1"
+                        >
                             Highlight teams (comma-separated)
                         </label>
                         <input
@@ -682,8 +900,8 @@ export default function Page() {
                     {selectedTeam && (
                         <p className="text-xs text-blue-600 m-0">
                             Team {selectedTeam.team + 1} selected (week{' '}
-                            {selectedTeam.day + 1}). Click another team to
-                            swap. Escape to cancel.
+                            {selectedTeam.day + 1}). Click another team to swap.
+                            Escape to cancel.
                         </p>
                     )}
 
@@ -700,118 +918,121 @@ export default function Page() {
                                 </tr>
                             </thead>
                             <tbody>
-                                {Array.from(
-                                    { length: config.days },
-                                    (_, day) =>
-                                        Array.from(
-                                            { length: config.timeSlots },
-                                            (_, slot) => (
-                                                <tr
-                                                    key={`${day}-${slot}`}
-                                                    className={
-                                                        slot === 0
-                                                            ? 'border-t border-gray-300'
-                                                            : ''
-                                                    }
-                                                >
-                                                    {slot === 0 && (
-                                                        <td
-                                                            rowSpan={
-                                                                config.timeSlots
-                                                            }
-                                                            className="font-bold align-middle text-center px-1"
-                                                        >
-                                                            {day + 1}
-                                                        </td>
-                                                    )}
+                                {Array.from({ length: config.days }, (_, day) =>
+                                    Array.from(
+                                        { length: config.timeSlots },
+                                        (_, slot) => (
+                                            <tr
+                                                key={`${day}-${slot}`}
+                                                className={
+                                                    slot === 0
+                                                        ? 'border-t border-gray-300'
+                                                        : ''
+                                                }
+                                            >
+                                                {slot === 0 && (
                                                     <td
-                                                        className={`px-1 whitespace-nowrap ${
-                                                            slot < 2
-                                                                ? 'bg-sky-50'
-                                                                : 'bg-amber-50'
-                                                        }`}
+                                                        rowSpan={
+                                                            config.timeSlots
+                                                        }
+                                                        className="font-bold align-middle text-center px-1"
                                                     >
-                                                        {slotNames[slot]}
+                                                        {day + 1}
                                                     </td>
-                                                    {Array.from(
-                                                        {
-                                                            length: config.lanes,
-                                                        },
-                                                        (_, lane) => {
-                                                            const game =
-                                                                findGame(
-                                                                    schedule.schedule,
-                                                                    day,
-                                                                    slot,
-                                                                    lane,
-                                                                );
-                                                            const hasViolation =
-                                                                game
-                                                                    ? gameHasConsecutiveViolation(
-                                                                          violations,
-                                                                          game,
-                                                                      )
-                                                                    : false;
-                                                            return (
-                                                                <td
-                                                                    key={`${day}-${slot}-${lane}`}
-                                                                    className={`text-center whitespace-nowrap px-0.5 ${hasViolation ? 'bg-red-100 border-l-2 border-red-500' : ''}`}
-                                                                >
-                                                                    {game &&
+                                                )}
+                                                <td
+                                                    className={`px-1 whitespace-nowrap ${
+                                                        slot < 2
+                                                            ? 'bg-sky-50'
+                                                            : 'bg-amber-50'
+                                                    }`}
+                                                >
+                                                    {slotNames[slot]}
+                                                </td>
+                                                {Array.from(
+                                                    {
+                                                        length: config.lanes,
+                                                    },
+                                                    (_, lane) => {
+                                                        const game = findGame(
+                                                            schedule.schedule,
+                                                            day,
+                                                            slot,
+                                                            lane,
+                                                        );
+                                                        const hasViolation =
+                                                            game
+                                                                ? gameHasConsecutiveViolation(
+                                                                      violations,
+                                                                      game,
+                                                                  )
+                                                                : false;
+                                                        return (
+                                                            <td
+                                                                key={`${day}-${slot}-${lane}`}
+                                                                className={`text-center whitespace-nowrap px-0.5 ${hasViolation ? 'bg-red-100 border-l-2 border-red-500' : ''}`}
+                                                                title={
+                                                                    hasViolation &&
                                                                     game
-                                                                        .teams[0] !==
-                                                                        -1 ? (
-                                                                        <>
-                                                                            <button
-                                                                                type="button"
-                                                                                onClick={() =>
-                                                                                    handleTeamClick(
-                                                                                        game
-                                                                                            .teams[0],
-                                                                                        day,
-                                                                                    )
-                                                                                }
-                                                                                className={teamButtonClass(
+                                                                        ? `Teams ${game.teams[0] + 1} & ${game.teams[1] + 1} also play in week ${day > 0 && violations.consecutivePairs.has(`${day - 1}-${Math.min(...game.teams)}-${Math.max(...game.teams)}`) ? day : day + 2}`
+                                                                        : undefined
+                                                                }
+                                                            >
+                                                                {game &&
+                                                                game
+                                                                    .teams[0] !==
+                                                                    -1 ? (
+                                                                    <>
+                                                                        <button
+                                                                            type="button"
+                                                                            onClick={() =>
+                                                                                handleTeamClick(
                                                                                     game
                                                                                         .teams[0],
                                                                                     day,
-                                                                                )}
-                                                                            >
-                                                                                {game
-                                                                                    .teams[0] +
-                                                                                    1}
-                                                                            </button>
-                                                                            <span className="text-gray-400">
-                                                                                v
-                                                                            </span>
-                                                                            <button
-                                                                                type="button"
-                                                                                onClick={() =>
-                                                                                    handleTeamClick(
-                                                                                        game
-                                                                                            .teams[1],
-                                                                                        day,
-                                                                                    )
-                                                                                }
-                                                                                className={teamButtonClass(
+                                                                                )
+                                                                            }
+                                                                            className={teamButtonClass(
+                                                                                game
+                                                                                    .teams[0],
+                                                                                day,
+                                                                            )}
+                                                                        >
+                                                                            {game
+                                                                                .teams[0] +
+                                                                                1}
+                                                                        </button>
+                                                                        <span className="text-gray-400">
+                                                                            v
+                                                                        </span>
+                                                                        <button
+                                                                            type="button"
+                                                                            onClick={() =>
+                                                                                handleTeamClick(
                                                                                     game
                                                                                         .teams[1],
                                                                                     day,
-                                                                                )}
-                                                                            >
-                                                                                {game
-                                                                                    .teams[1] +
-                                                                                    1}
-                                                                            </button>
-                                                                        </>
-                                                                    ) : null}
-                                                                </td>
-                                                            );
-                                                        },
-                                                    )}
-                                                </tr>
-                                            ),
+                                                                                )
+                                                                            }
+                                                                            className={teamButtonClass(
+                                                                                game
+                                                                                    .teams[1],
+                                                                                day,
+                                                                            )}
+                                                                        >
+                                                                            {game
+                                                                                .teams[1] +
+                                                                                1}
+                                                                        </button>
+                                                                    </>
+                                                                ) : null}
+                                                            </td>
+                                                        );
+                                                    },
+                                                )}
+                                            </tr>
                                         ),
+                                    ),
                                 )}
                             </tbody>
                         </table>

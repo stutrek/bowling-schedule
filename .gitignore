@@ -132,3 +132,7 @@ dist
 .devcontainer/.bash_history
 .devcontainer/.zsh_history
 .DS_Store
+
+# Rust/WASM build artifacts
+solver-wasm/target/
+solver-wasm/pkg/
