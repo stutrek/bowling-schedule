@@ -62,25 +62,29 @@ class PinsetterAlgorithm {
         this.fillDay(this.highsVsLows(2), true);
         this.fillDay(this.highsVsLows(3));
 
+        this.fillDay(this.schedule.getNewTeamList(), true);
+        this.fillDay([0, 1, 3, 2, 5, 4, 6, 7, 8, 9, 11, 10, 12, 13, 15, 14]);
+        this.fillDay(
+            [
+                // hi
+                0, 6, 1, 7, 2, 4, 3, 5, 8, 14, 9, 15, 10, 12, 11, 13,
+            ],
+            true,
+        );
+
         this.fillDay(
             [
                 // hi
                 0, 4, 1, 5, 2, 6, 3, 7, 8, 12, 9, 13, 10, 14, 11, 15,
             ],
-            true,
+            false,
         );
-        this.fillDay([
-            // hi
-            0, 6, 1, 7, 2, 4, 3, 5, 8, 14, 9, 15, 10, 12, 11, 13,
-        ]);
-
-        this.fillDay(this.schedule.getNewTeamList(), true);
-        this.fillDay([0, 1, 3, 2, 5, 4, 6, 7, 8, 9, 11, 10, 12, 13, 15, 14]);
 
         // fill remaining four weeks, after all teams have played each other once.
-        this.fillDay(this.highsVsLows(3), true);
-        this.fillDay(this.highsVsLows(2));
+
         this.fillDay(this.highsVsLows(1), true);
+        this.fillDay(this.highsVsLows(2));
+        this.fillDay(this.highsVsLows(3), true);
         this.fillDay(this.highsVsLows(0));
     }
 }

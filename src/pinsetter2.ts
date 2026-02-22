@@ -1,4 +1,4 @@
-import { groupBy } from 'lodash';
+import { get, groupBy } from 'lodash';
 import type { Schedule } from './Schedule';
 
 import chunk from 'lodash/chunk';
@@ -14,31 +14,32 @@ function shiftByTwo(arr: number[]) {
 class PinsetterAlgorithm {
     schedule: Schedule;
     daysFilled = 0;
-    groupShares: number[][];
-
     constructor(schedule: Schedule) {
         this.schedule = schedule;
-        this.groupShares = new Array(schedule.config.teams)
-            .fill(0)
-            .map(() => new Array(schedule.config.teams).fill(0));
     }
 
     fillGroup(teams: number[], day: number, slot: number, lane: number) {
-        console.log('filling', teams);
         this.schedule.setGame(teams[0], teams[1], day, slot, lane);
         this.schedule.setGame(teams[2], teams[3], day, slot, lane + 1);
         this.schedule.setGame(teams[0], teams[3], day, slot + 1, lane);
         this.schedule.setGame(teams[2], teams[1], day, slot + 1, lane + 1);
-
-        for (let i = 0; i < teams.length; i++) {
-            for (let j = 0; j < teams.length; j++) {
-                this.groupShares[teams[i]][teams[j]]++;
-            }
-        }
     }
 
-    fillDay(groups: number[][]) {
+    fillDay(teams: number[], swapSlots = false) {
         const day = this.daysFilled++;
+        let groups = chunk(teams, 4);
+        if (swapSlots) {
+            groups.reverse();
+            groups.forEach((group) => group.reverse());
+        }
+
+        if (day % 3 === 0) {
+            groups = groups.map((group, i) => {
+                const [a, b, c, d] = group;
+                return [c, d, a, b];
+            });
+        }
+
         groups.forEach((group, i) => {
             const slot = i > 1 ? 2 : 0;
             const lane = (i % (this.schedule.config.lanes / 2)) * 2;
@@ -46,83 +47,60 @@ class PinsetterAlgorithm {
         });
     }
 
-    selectGroup(
-        cornerstoneTeam: number,
-        alreadySelected: number[],
-        slot: number,
-        lane: number,
-    ) {
-        const teamsByFewestPlays = this.schedule
-            .getMostCompatibleTeams(cornerstoneTeam, slot, lane)
-            .filter((teamMeta) => !alreadySelected.includes(teamMeta.team));
-
-        const opponentTeams = teamsByFewestPlays
-            .splice(0, 2)
-            .map((team) => team.team);
-
-        const mostCompatibleWithFirstOpponent = this.schedule
-            .getMostCompatibleTeams(opponentTeams[0], slot, lane + 1)
-            .filter(
-                (teamMeta) =>
-                    !alreadySelected.includes(teamMeta.team) &&
-                    teamMeta.team !== opponentTeams[1],
+    getRotations(arr: number[][]) {
+        const rotations = new Array(2)
+            .fill(0)
+            .map(() =>
+                new Array(arr.length)
+                    .fill(0)
+                    .map(() => new Array(arr.length).fill(0)),
             );
-
-        const mostCompatibleWithSecondOpponent = this.schedule
-            .getMostCompatibleTeams(opponentTeams[0], slot, lane + 1)
-            .filter(
-                (teamMeta) =>
-                    !alreadySelected.includes(teamMeta.team) &&
-                    teamMeta.team !== opponentTeams[0],
-            );
-
-        let mostCompatibleWithOpponents: number = opponentTeams[3];
-        let mostCompatibleScore = Number.POSITIVE_INFINITY;
-        for (let i = 0; i < mostCompatibleWithFirstOpponent.length; i++) {
-            for (let j = 0; j < mostCompatibleWithSecondOpponent.length; j++) {
-                if (
-                    mostCompatibleWithFirstOpponent[i].team ===
-                    mostCompatibleWithSecondOpponent[j].team
-                ) {
-                    const compatibility = i + j;
-                    if (compatibility < mostCompatibleScore) {
-                        mostCompatibleScore = compatibility;
-                        mostCompatibleWithOpponents =
-                            mostCompatibleWithFirstOpponent[i].team;
-                    }
-                    break;
+        for (let i = 0; i < 2; i++) {
+            for (let j = 0; j < arr.length; j++) {
+                for (let k = 0; k < arr.length; k++) {
+                    rotations[i][j][k] = arr[k][(k * i + j) % arr.length];
                 }
             }
-            if (i > mostCompatibleScore) {
-                break;
-            }
         }
+        rotations.unshift(arr);
+        return rotations;
+    }
 
-        return [
-            cornerstoneTeam,
-            opponentTeams[0],
-            mostCompatibleWithOpponents,
-            opponentTeams[1],
-        ];
+    highsVsLows(shiftAmount: number) {
+        const teams = this.schedule.getNewTeamList();
+        const chunks = chunk(teams, teams.length / 2);
+        for (let i = 0; i < shiftAmount; i++) {
+            shiftByTwo(chunks[1]);
+        }
+        return zip(...chunks).flat() as number[];
     }
 
     fill() {
-        for (let i = 0; i < this.schedule.config.days; i++) {
-            const anchorTeams = [0, 4, 8, 12].map((n) => n + (i % 4));
-            const teamsSoFar = [...anchorTeams];
-            const groups: number[][] = [];
-            for (let j = 0; j < anchorTeams.length; j++) {
-                const team = anchorTeams[j];
-                const group = this.selectGroup(
-                    team,
-                    teamsSoFar,
-                    Math.floor(j / 2),
-                    (j % 2) * 2,
-                );
-                teamsSoFar.push(...group);
-                groups.push(group);
-            }
-            this.fillDay(groups);
+        const perm1 = this.getRotations([
+            [0, 1, 2, 3],
+            [4, 5, 6, 7],
+            [8, 9, 10, 11],
+            [12, 13, 14, 15],
+        ]);
+        this.fillDay(perm1[0].flat());
+        for (const permutation of perm1) {
+            const flattened = permutation.flat();
+            this.fillDay(flattened);
+        }
+
+        const perm2 = this.getRotations(perm1[1]);
+        for (const permutation of perm2) {
+            this.fillDay(permutation.flat());
+        }
+
+        const perm3 = this.getRotations(chunk(this.highsVsLows(1), 4));
+        for (const permutation of perm3) {
+            this.fillDay(permutation.flat());
+        }
+
+        const perm4 = this.getRotations(chunk(this.highsVsLows(3), 4));
+        for (const permutation of perm4) {
+            this.fillDay(permutation.flat());
         }
     }
 }
