@@ -3,6 +3,7 @@ use rand::rngs::SmallRng;
 use rand::{Rng, SeedableRng};
 use serde::Deserialize;
 use std::fs;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -40,9 +41,16 @@ struct SolverParams {
     sync_interval: u64,
     restart_interval: u64,
     stagnation_threshold: u32,
+    #[serde(default = "default_max_perturb")]
+    max_perturb: f64,
+    #[serde(default = "default_sync_ratio")]
+    sync_ratio: f64,
     #[serde(default)]
     cores: f64,
 }
+
+fn default_max_perturb() -> f64 { 100.0 }
+fn default_sync_ratio() -> f64 { 0.5 }
 
 #[derive(Clone)]
 struct CostBreakdown {
@@ -277,6 +285,52 @@ fn cost_label(c: &CostBreakdown) -> String {
     )
 }
 
+fn parse_tsv(content: &str) -> Option<Assignment> {
+    let mut a: Assignment = [[[0u8; POS]; QUADS]; WEEKS];
+    let lines: Vec<&str> = content.lines().collect();
+    if lines.len() < 2 { return None; }
+
+    for w in 0..WEEKS {
+        let base = 1 + w * 4;
+        if base + 3 >= lines.len() { return None; }
+
+        // Early 1 row -> quads 0 and 1, positions [pa, pb] and [pc, pd]
+        let e1: Vec<&str> = lines[base].split('\t').collect();
+        let l1: Vec<&str> = lines[base + 2].split('\t').collect();
+        if e1.len() < 6 || l1.len() < 6 { return None; }
+
+        // Parse "X v Y" into (X-1, Y-1)
+        let parse_match = |s: &str| -> Option<(u8, u8)> {
+            let parts: Vec<&str> = s.split(" v ").collect();
+            if parts.len() != 2 { return None; }
+            let a = parts[0].trim().parse::<u8>().ok()? - 1;
+            let b = parts[1].trim().parse::<u8>().ok()? - 1;
+            Some((a, b))
+        };
+
+        // Quad 0: Early, Lanes 1-2. Early 1 row: lane1 = pa v pb, lane2 = pc v pd
+        let (pa, pb) = parse_match(e1[2])?;
+        let (pc, pd) = parse_match(e1[3])?;
+        a[w][0] = [pa, pb, pc, pd];
+
+        // Quad 1: Early, Lanes 3-4. Early 1 row: lane3 = pa v pb, lane4 = pc v pd
+        let (pa, pb) = parse_match(e1[4])?;
+        let (pc, pd) = parse_match(e1[5])?;
+        a[w][1] = [pa, pb, pc, pd];
+
+        // Quad 2: Late, Lanes 1-2
+        let (pa, pb) = parse_match(l1[2])?;
+        let (pc, pd) = parse_match(l1[3])?;
+        a[w][2] = [pa, pb, pc, pd];
+
+        // Quad 3: Late, Lanes 3-4
+        let (pa, pb) = parse_match(l1[4])?;
+        let (pc, pd) = parse_match(l1[5])?;
+        a[w][3] = [pa, pb, pc, pd];
+    }
+    Some(a)
+}
+
 fn now_iso() -> String {
     Local::now().format("%Y-%m-%dT%H:%M:%S%:z").to_string()
 }
@@ -315,11 +369,27 @@ fn save_assignment(
 }
 
 fn main() {
-    let config_path = std::env::args().nth(1).unwrap_or_else(|| "config.toml".to_string());
-    let config_str = fs::read_to_string(&config_path)
+    let args: Vec<String> = std::env::args().collect();
+    let config_path = args.get(1).map(|s| s.as_str()).unwrap_or("config.toml");
+    let config_str = fs::read_to_string(config_path)
         .unwrap_or_else(|e| panic!("Failed to read {}: {}", config_path, e));
     let config: Config = toml::from_str(&config_str)
         .unwrap_or_else(|e| panic!("Failed to parse {}: {}", config_path, e));
+
+    let w8_for_seeds = Arc::new(config.weights.clone());
+    let seeds: Vec<Assignment> = args.iter().skip(2)
+        .filter_map(|path| {
+            let content = fs::read_to_string(path)
+                .map_err(|e| eprintln!("Warning: could not read seed file {}: {}", path, e))
+                .ok()?;
+            let a = parse_tsv(&content)
+                .or_else(|| { eprintln!("Warning: could not parse seed file {}", path); None })?;
+            let cost = evaluate(&a, &w8_for_seeds);
+            eprintln!("[{}] Loaded seed: {} ({})", now_iso(), path, cost_label(&cost));
+            Some(a)
+        })
+        .collect();
+    let seeds = Arc::new(seeds);
 
     let results_dir = "results";
     fs::create_dir_all(results_dir).expect("Failed to create results directory");
@@ -340,6 +410,8 @@ fn main() {
     let sync_interval = config.solver.sync_interval;
     let restart_interval = config.solver.restart_interval;
     let stagnation_threshold = config.solver.stagnation_threshold;
+    let base_max_perturb = config.solver.max_perturb;
+    let sync_ratio = config.solver.sync_ratio;
     let t0 = config.solver.t0;
     let weights = Arc::new(config.weights);
 
@@ -376,6 +448,19 @@ fn main() {
         matchup_dirty: false,
     }));
 
+    let shutdown = Arc::new(AtomicBool::new(false));
+    {
+        let shutdown = Arc::clone(&shutdown);
+        ctrlc::set_handler(move || {
+            if shutdown.load(Ordering::SeqCst) {
+                eprintln!("\n[{}] Force exit.", now_iso());
+                std::process::exit(1);
+            }
+            shutdown.store(true, Ordering::SeqCst);
+            eprintln!("\n[{}] Ctrl+C received, finishing up... (press again to force exit)", now_iso());
+        }).expect("Failed to set Ctrl+C handler");
+    }
+
     eprintln!(
         "[{}] Starting solver: {} cores, {:.1}B iterations/run, sync every {}M, stagnation threshold {}. Ctrl+C to stop.",
         now_iso(), num_cores, max_iterations as f64 / 1e9, sync_interval / 1_000_000, stagnation_threshold,
@@ -388,6 +473,7 @@ fn main() {
 
     let saver_best = Arc::clone(&best_results);
     let saver_sync = Arc::clone(&sync_pair);
+    let saver_shutdown = Arc::clone(&shutdown);
     let saver_handle = thread::spawn(move || {
         let mut last_overall: Option<Assignment> = None;
         let mut last_matchup: Option<Assignment> = None;
@@ -413,7 +499,7 @@ fn main() {
                 state.matchup_dirty = false;
             }
 
-            if done {
+            if done || saver_shutdown.load(Ordering::SeqCst) {
                 return;
             }
         }
@@ -425,15 +511,24 @@ fn main() {
             let best_results = Arc::clone(&best_results);
             let base_dir = results_dir.to_string();
             let w8 = Arc::clone(&weights);
+            let shutdown = Arc::clone(&shutdown);
+            let seeds = Arc::clone(&seeds);
             thread::spawn(move || {
                 let mut rng = SmallRng::from_os_rng();
                 let mut last_perfect: Option<Assignment> = None;
                 let mut last_sync: Option<Assignment> = None;
                 let mut last_gen_best: Option<Assignment> = None;
+                let mut first_run = true;
 
                 loop {
                     let cool_rate: f64 = (0.005_f64 / t0).ln() / max_iterations as f64;
-                    let mut a = random_assignment(&mut rng);
+                    let mut a = if first_run && core_id < seeds.len() {
+                        first_run = false;
+                        seeds[core_id]
+                    } else {
+                        first_run = false;
+                        random_assignment(&mut rng)
+                    };
                     let mut cost = evaluate(&a, &w8);
                     let mut best_a = a;
                     let mut best_cost = cost.total;
@@ -472,9 +567,75 @@ fn main() {
                             cool_offset = i;
                         }
 
+                        // Compound moves become more likely and larger as cost drops
+                        let compound_prob = ((1000.0 - cost.total as f64) / 800.0).clamp(0.0, 0.5);
+                        if rng.random::<f64>() < compound_prob {
+                            let saved = a;
+                            let max_swaps = if cost.total < 200 { 12 } else if cost.total < 400 { 6 } else { 4 };
+                            let num_swaps = rng.random_range(2..=max_swaps);
+                            for _ in 0..num_swaps {
+                                let w = rng.random_range(0..WEEKS);
+                                let q1 = rng.random_range(0..QUADS);
+                                let mut q2 = rng.random_range(0..(QUADS - 1));
+                                if q2 >= q1 { q2 += 1; }
+                                let p1 = rng.random_range(0..POS);
+                                let p2 = rng.random_range(0..POS);
+                                let tmp = a[w][q1][p1];
+                                a[w][q1][p1] = a[w][q2][p2];
+                                a[w][q2][p2] = tmp;
+                            }
+                            let new_cost = evaluate(&a, &w8);
+                            let delta = new_cost.total as i64 - cost.total as i64;
+                            if delta <= 0 || rng.random::<f64>() < (-delta as f64 / temp).exp() {
+                                cost = new_cost;
+                                if cost.total < best_cost { best_cost = cost.total; best_a = a; }
+                            } else {
+                                a = saved;
+                            }
+                        } else {
+
+                        // Move E: Two-week exhaustive search (periodic, only when matchups need fixing)
+                        if i > 0 && i % 100_000 == 0 && cost.matchup_balance > 0 {
+                            let ew1 = rng.random_range(0..WEEKS);
+                            let mut ew2 = rng.random_range(0..(WEEKS - 1));
+                            if ew2 >= ew1 { ew2 += 1; }
+                            let mut best_delta = 0i64;
+                            let mut best_swap: Option<(usize, usize, usize, usize)> = None;
+                            for eq1 in 0..QUADS {
+                                for ep1 in 0..POS {
+                                    for eq2 in 0..QUADS {
+                                        for ep2 in 0..POS {
+                                            let tmp1 = a[ew1][eq1][ep1];
+                                            let tmp2 = a[ew2][eq2][ep2];
+                                            if tmp1 == tmp2 { continue; }
+                                            a[ew1][eq1][ep1] = tmp2;
+                                            a[ew2][eq2][ep2] = tmp1;
+                                            let nc = evaluate(&a, &w8);
+                                            let d = nc.total as i64 - cost.total as i64;
+                                            if d < best_delta {
+                                                best_delta = d;
+                                                best_swap = Some((eq1, ep1, eq2, ep2));
+                                            }
+                                            a[ew1][eq1][ep1] = tmp1;
+                                            a[ew2][eq2][ep2] = tmp2;
+                                        }
+                                    }
+                                }
+                            }
+                            if let Some((eq1, ep1, eq2, ep2)) = best_swap {
+                                let tmp = a[ew1][eq1][ep1];
+                                a[ew1][eq1][ep1] = a[ew2][eq2][ep2];
+                                a[ew2][eq2][ep2] = tmp;
+                                cost = evaluate(&a, &w8);
+                                if cost.total < best_cost { best_cost = cost.total; best_a = a; }
+                            }
+                        }
+
+                        // Single-move selection: 30/18/15/10/7/7/6/7
                         let rand_val: f64 = rng.random();
 
-                        if rand_val < 0.4 {
+                        if rand_val < 0.30 {
+                            // Inter-quad player swap
                             let w = rng.random_range(0..WEEKS);
                             let q1 = rng.random_range(0..QUADS);
                             let mut q2 = rng.random_range(0..(QUADS - 1));
@@ -494,7 +655,8 @@ fn main() {
                                 a[w][q2][p2] = a[w][q1][p1];
                                 a[w][q1][p1] = tmp;
                             }
-                        } else if rand_val < 0.65 {
+                        } else if rand_val < 0.48 {
+                            // Intra-quad player swap
                             let w = rng.random_range(0..WEEKS);
                             let q = rng.random_range(0..QUADS);
                             let p1 = rng.random_range(0..POS);
@@ -513,7 +675,8 @@ fn main() {
                                 a[w][q][p2] = a[w][q][p1];
                                 a[w][q][p1] = tmp;
                             }
-                        } else if rand_val < 0.85 {
+                        } else if rand_val < 0.63 {
+                            // Team cross-week swap
                             let team = rng.random_range(0..TEAMS) as u8;
                             let w1 = rng.random_range(0..WEEKS);
                             let mut w2 = rng.random_range(0..(WEEKS - 1));
@@ -553,7 +716,8 @@ fn main() {
                                     a[w2][qi2][pi2] = save.3;
                                 }
                             }
-                        } else {
+                        } else if rand_val < 0.73 {
+                            // Quad swap
                             let w = rng.random_range(0..WEEKS);
                             let q1 = rng.random_range(0..QUADS);
                             let mut q2 = rng.random_range(0..(QUADS - 1));
@@ -571,6 +735,75 @@ fn main() {
                                 a[w][q2] = a[w][q1];
                                 a[w][q1] = tmp;
                             }
+                        } else if rand_val < 0.80 {
+                            // Move A: Week swap
+                            let w1 = rng.random_range(0..WEEKS);
+                            let mut w2 = rng.random_range(0..(WEEKS - 1));
+                            if w2 >= w1 { w2 += 1; }
+                            let tmp = a[w1];
+                            a[w1] = a[w2];
+                            a[w2] = tmp;
+
+                            let new_cost = evaluate(&a, &w8);
+                            let delta = new_cost.total as i64 - cost.total as i64;
+                            if delta <= 0 || rng.random::<f64>() < (-delta as f64 / temp).exp() {
+                                cost = new_cost;
+                                if cost.total < best_cost { best_cost = cost.total; best_a = a; }
+                            } else {
+                                a[w2] = a[w1];
+                                a[w1] = tmp;
+                            }
+                        } else if rand_val < 0.87 {
+                            // Move B: Early/late flip
+                            let w = rng.random_range(0..WEEKS);
+                            let tmp0 = a[w][0]; let tmp1 = a[w][1];
+                            a[w][0] = a[w][2]; a[w][2] = tmp0;
+                            a[w][1] = a[w][3]; a[w][3] = tmp1;
+
+                            let new_cost = evaluate(&a, &w8);
+                            let delta = new_cost.total as i64 - cost.total as i64;
+                            if delta <= 0 || rng.random::<f64>() < (-delta as f64 / temp).exp() {
+                                cost = new_cost;
+                                if cost.total < best_cost { best_cost = cost.total; best_a = a; }
+                            } else {
+                                let tmp0 = a[w][0]; let tmp1 = a[w][1];
+                                a[w][0] = a[w][2]; a[w][2] = tmp0;
+                                a[w][1] = a[w][3]; a[w][3] = tmp1;
+                            }
+                        } else if rand_val < 0.93 {
+                            // Move C: Lane pair swap
+                            let w = rng.random_range(0..WEEKS);
+                            let tmp0 = a[w][0]; let tmp2 = a[w][2];
+                            a[w][0] = a[w][1]; a[w][1] = tmp0;
+                            a[w][2] = a[w][3]; a[w][3] = tmp2;
+
+                            let new_cost = evaluate(&a, &w8);
+                            let delta = new_cost.total as i64 - cost.total as i64;
+                            if delta <= 0 || rng.random::<f64>() < (-delta as f64 / temp).exp() {
+                                cost = new_cost;
+                                if cost.total < best_cost { best_cost = cost.total; best_a = a; }
+                            } else {
+                                let tmp1 = a[w][1]; let tmp3 = a[w][3];
+                                a[w][1] = a[w][0]; a[w][0] = tmp1;
+                                a[w][3] = a[w][2]; a[w][2] = tmp3;
+                            }
+                        } else {
+                            // Move D: Stay/switch rotation
+                            let w = rng.random_range(0..WEEKS);
+                            let q = rng.random_range(0..QUADS);
+                            a[w][q].swap(0, 1);
+                            a[w][q].swap(2, 3);
+
+                            let new_cost = evaluate(&a, &w8);
+                            let delta = new_cost.total as i64 - cost.total as i64;
+                            if delta <= 0 || rng.random::<f64>() < (-delta as f64 / temp).exp() {
+                                cost = new_cost;
+                                if cost.total < best_cost { best_cost = cost.total; best_a = a; }
+                            } else {
+                                a[w][q].swap(0, 1);
+                                a[w][q].swap(2, 3);
+                            }
+                        }
                         }
 
                         if i > 0 && i % restart_interval == 0 && cost.total > best_cost {
@@ -596,9 +829,13 @@ fn main() {
                                 "[{}] core {} @ {} | best: {} | temp: {:.2}",
                                 now_iso(), core_id, label, cost_label(&best_breakdown), temp,
                             );
+
+                            if shutdown.load(Ordering::Relaxed) {
+                                break;
+                            }
                         }
 
-                        if i > 0 && i % sync_interval == 0 {
+                        if sync_ratio > 0.0 && i > 0 && i % sync_interval == 0 {
                             let (lock, cvar) = &*sync_pair;
                             let mut sync = lock.lock().unwrap();
 
@@ -693,7 +930,7 @@ fn main() {
                                         .collect();
                                     ranked.sort_by(|a, b| b.1.cmp(&a.1));
 
-                                    let num_reset = num_cores / 2;
+                                    let num_reset = (num_cores as f64 * sync_ratio).round() as usize;
                                     let mut reset_set: Vec<usize> = Vec::new();
                                     let mut reset_info: Vec<(usize, usize, &str)> = Vec::new();
 
@@ -712,7 +949,7 @@ fn main() {
 
                                     // Stagnation drives perturbation intensity; temperature scales with perturbation
                                     let stag_ratio = sync.stagnation_epochs as f64 / stagnation_threshold as f64;
-                                    let max_perturbations = (100.0 * (1.0 + stag_ratio)) as usize;
+                                    let max_perturbations = (base_max_perturb * (1.0 + stag_ratio)) as usize;
 
                                     let max_perturb = if reset_set.len() <= 1 { 0 } else { reset_set.len() - 1 };
                                     for (rank, &cid) in reset_set.iter().enumerate() {
@@ -759,18 +996,25 @@ fn main() {
                                 cvar.notify_all();
                             } else {
                                 let epoch_before = sync.epoch;
-                                while sync.epoch == epoch_before {
-                                    sync = cvar.wait(sync).unwrap();
+                                loop {
+                                    if shutdown.load(Ordering::Relaxed) {
+                                        break;
+                                    }
+                                    let (guard, _timeout) = cvar.wait_timeout(sync, Duration::from_millis(500)).unwrap();
+                                    sync = guard;
+                                    if sync.epoch != epoch_before {
+                                        break;
+                                    }
                                 }
                             }
 
-                            let done = sync.generation_complete;
+                            let done = sync.generation_complete || shutdown.load(Ordering::Relaxed);
                             let my_reset = sync.slots[core_id].reset_to;
                             let my_reset_temp = sync.slots[core_id].reset_temp;
                             drop(sync);
 
                             if done {
-                                return;
+                                break;
                             }
 
                             if let Some(new_a) = my_reset {
@@ -785,6 +1029,19 @@ fn main() {
                     }
 
                     let final_cost = evaluate(&best_a, &w8);
+                    eprintln!(
+                        "[{}] core {} finished {:.2}B iterations | best: {}",
+                        now_iso(), core_id, max_iterations as f64 / 1e9, cost_label(&final_cost),
+                    );
+                    let gen_dir = {
+                        let sync = sync_pair.0.lock().unwrap();
+                        sync.generation_dir.clone()
+                    };
+                    let mut dummy_last: Option<Assignment> = None;
+                    save_assignment(
+                        &gen_dir, &format!("core{}", core_id),
+                        final_cost.total, &best_a, &final_cost, &mut dummy_last,
+                    );
                     {
                         let mut br = best_results.lock().unwrap();
                         let is_new_overall = br.overall.as_ref()
@@ -808,6 +1065,10 @@ fn main() {
                             br.best_matchup = Some((best_a, final_cost));
                             br.matchup_dirty = true;
                         }
+                    }
+
+                    if shutdown.load(Ordering::Relaxed) {
+                        return;
                     }
                 }
             })

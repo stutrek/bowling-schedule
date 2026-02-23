@@ -11,7 +11,7 @@
         "format": "biome format --write .",
         "lint": "biome lint ./src",
         "prepare": "husky",
-        "solve": "while true; do ./solver-native/target/release/solver-native ./solver-native/config.toml; echo 'Restarting...'; done",
+        "solve": "./solve.sh",
         "test": "jest",
         "test:watch": "jest --watch"
     },

@@ -9,9 +9,11 @@ lane_switch = 5.0
 
 [solver]
 t0 = 30.0
-max_iterations = 10_000_000_000
+max_iterations = 6_000_000_000
 progress_interval = 10_000_000
-sync_interval = 50_000_000
+sync_interval = 30_000_000
 restart_interval = 100_000
 stagnation_threshold = 25
-cores = 0.5
+max_perturb = 50
+sync_ratio = 0
+cores = 0
