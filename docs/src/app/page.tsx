@@ -107,7 +107,10 @@ function parseTSV(tsv: string): Schedule | null {
     if (lines.length < 2) return null;
 
     const slotMap: Record<string, number> = {
-        'early 1': 0, 'early 2': 1, 'late 1': 2, 'late 2': 3,
+        'early 1': 0,
+        'early 2': 1,
+        'late 1': 2,
+        'late 2': 3,
     };
 
     const s = new Schedule(config);
@@ -576,7 +579,9 @@ export default function Page() {
             setEditHistory([]);
             setSelectedTeam(null);
         } catch {
-            alert('Could not read clipboard. Try pasting into the text area instead.');
+            alert(
+                'Could not read clipboard. Try pasting into the text area instead.',
+            );
         }
     }
 
@@ -915,9 +920,19 @@ export default function Page() {
                                                         // biome-ignore lint/suspicious/noArrayIndexKey: sequential
                                                         key={`stay-${i}`}
                                                         className={
-                                                            Math.abs(config.days - sw - config.days / 2) === 0
+                                                            Math.abs(
+                                                                config.days -
+                                                                    sw -
+                                                                    config.days /
+                                                                        2,
+                                                            ) === 0
                                                                 ? 'bg-green-100'
-                                                                : Math.abs(config.days - sw - config.days / 2) <= 1
+                                                                : Math.abs(
+                                                                        config.days -
+                                                                            sw -
+                                                                            config.days /
+                                                                                2,
+                                                                    ) <= 1
                                                                   ? 'bg-yellow-100'
                                                                   : 'bg-red-100'
                                                         }
@@ -936,9 +951,17 @@ export default function Page() {
                                                         // biome-ignore lint/suspicious/noArrayIndexKey: sequential
                                                         key={`switch-${i}`}
                                                         className={
-                                                            Math.abs(sw - config.days / 2) === 0
+                                                            Math.abs(
+                                                                sw -
+                                                                    config.days /
+                                                                        2,
+                                                            ) === 0
                                                                 ? 'bg-green-100'
-                                                                : Math.abs(sw - config.days / 2) <= 1
+                                                                : Math.abs(
+                                                                        sw -
+                                                                            config.days /
+                                                                                2,
+                                                                    ) <= 1
                                                                   ? 'bg-yellow-100'
                                                                   : 'bg-red-100'
                                                         }

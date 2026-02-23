@@ -14,4 +14,4 @@ progress_interval = 10_000_000
 sync_interval = 50_000_000
 restart_interval = 100_000
 stagnation_threshold = 25
-cores = 0
+cores = 0.5
