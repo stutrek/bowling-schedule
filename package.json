@@ -3,7 +3,9 @@
     "version": "0.0.1",
     "description": "Stu's Template",
     "main": "dist/index.js",
-    "files": ["dist"],
+    "files": [
+        "dist"
+    ],
     "scripts": {
         "build": "tsc",
         "build:watch": "tsc -w",
@@ -11,6 +13,7 @@
         "format": "biome format --write .",
         "lint": "biome lint ./src",
         "prepare": "husky",
+        "solve": "while true; do ../target/release/solver-native; echo 'Restarting...'; done",
         "test": "jest",
         "test:watch": "jest --watch"
     },

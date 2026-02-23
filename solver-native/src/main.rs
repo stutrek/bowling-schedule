@@ -40,6 +40,8 @@ struct SolverParams {
     sync_interval: u64,
     restart_interval: u64,
     stagnation_threshold: u32,
+    #[serde(default)]
+    cores: f64,
 }
 
 #[derive(Clone)]
@@ -76,6 +78,7 @@ struct SyncState {
     stagnation_epochs: u32,
     prev_global_best_cost: u32,
     generation_dir: String,
+    generation_complete: bool,
 }
 
 fn random_assignment(rng: &mut SmallRng) -> Assignment {
@@ -321,9 +324,17 @@ fn main() {
     let results_dir = "results";
     fs::create_dir_all(results_dir).expect("Failed to create results directory");
 
-    let num_cores = thread::available_parallelism()
+    let available = thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4);
+    let cores_cfg = config.solver.cores;
+    let num_cores = if cores_cfg <= 0.0 {
+        available
+    } else if cores_cfg < 1.0 {
+        (available as f64 * cores_cfg).round().max(1.0) as usize
+    } else {
+        (cores_cfg as usize).min(available)
+    };
     let max_iterations = config.solver.max_iterations;
     let progress_interval = config.solver.progress_interval;
     let sync_interval = config.solver.sync_interval;
@@ -353,6 +364,7 @@ fn main() {
             stagnation_epochs: 0,
             prev_global_best_cost: u32::MAX,
             generation_dir: initial_gen_dir,
+            generation_complete: false,
         }),
         Condvar::new(),
     ));
@@ -376,14 +388,14 @@ fn main() {
 
     let saver_best = Arc::clone(&best_results);
     let saver_sync = Arc::clone(&sync_pair);
-    thread::spawn(move || {
+    let saver_handle = thread::spawn(move || {
         let mut last_overall: Option<Assignment> = None;
         let mut last_matchup: Option<Assignment> = None;
         loop {
             thread::sleep(Duration::from_secs(1));
-            let gen_dir = {
+            let (gen_dir, done) = {
                 let sync = saver_sync.0.lock().unwrap();
-                sync.generation_dir.clone()
+                (sync.generation_dir.clone(), sync.generation_complete)
             };
             let mut state = saver_best.lock().unwrap();
 
@@ -399,6 +411,10 @@ fn main() {
                     save_assignment(&gen_dir, "best-matchup", c.matchup_balance, a, c, &mut last_matchup);
                 }
                 state.matchup_dirty = false;
+            }
+
+            if done {
+                return;
             }
         }
     });
@@ -640,14 +656,8 @@ fn main() {
                                 );
 
                                 if generational_restart {
-                                    let mut gen_rng = SmallRng::seed_from_u64(sync.epoch.wrapping_mul(97));
-                                    for slot in &mut sync.slots {
-                                        slot.reset_to = Some(random_assignment(&mut gen_rng));
-                                        slot.reset_temp = Some(t0);
-                                    }
-
                                     eprintln!(
-                                        "[{}] GENERATION COMPLETE epoch {} | best: {} ({}) | stagnant {} epochs | restarting all cores",
+                                        "[{}] GENERATION COMPLETE epoch {} | best: {} ({}) | stagnant {} epochs",
                                         now_iso(),
                                         sync.epoch,
                                         sync.global_best_cost,
@@ -664,14 +674,7 @@ fn main() {
                                         &mut last_gen_best,
                                     );
 
-                                    sync.generation_dir = new_generation_dir(&base_dir);
-                                    eprintln!("[{}] New generation output: {}", now_iso(), sync.generation_dir);
-                                    last_sync = None;
-
-                                    sync.stagnation_epochs = 0;
-                                    sync.global_best_cost = u32::MAX;
-                                    sync.prev_global_best_cost = u32::MAX;
-                                    sync.global_best_assignment = [[[0u8; POS]; QUADS]; WEEKS];
+                                    sync.generation_complete = true;
                                 } else {
                                     let mut dedup_resets: Vec<usize> = Vec::new();
                                     for ci in 0..num_cores {
@@ -707,16 +710,21 @@ fn main() {
                                         }
                                     }
 
-                                    // Escalate temperature with stagnation: t0 at low stagnation, up to 2*t0 near threshold
+                                    // Stagnation drives perturbation intensity; temperature scales with perturbation
                                     let stag_ratio = sync.stagnation_epochs as f64 / stagnation_threshold as f64;
-                                    let reset_temp_val = t0 * (1.0 + stag_ratio);
+                                    let max_perturbations = (100.0 * (1.0 + stag_ratio)) as usize;
 
                                     let max_perturb = if reset_set.len() <= 1 { 0 } else { reset_set.len() - 1 };
                                     for (rank, &cid) in reset_set.iter().enumerate() {
                                         let perturbations = if max_perturb == 0 {
                                             0
                                         } else {
-                                            rank * 100 / max_perturb
+                                            rank * max_perturbations / max_perturb
+                                        };
+                                        let core_temp = if max_perturbations == 0 {
+                                            t0 * 0.1
+                                        } else {
+                                            t0 * (perturbations as f64 / max_perturbations as f64).max(0.1)
                                         };
                                         let mut new_a = sync.global_best_assignment;
                                         if perturbations > 0 {
@@ -725,7 +733,7 @@ fn main() {
                                             perturb(&mut new_a, &mut prng, perturbations);
                                         }
                                         sync.slots[cid].reset_to = Some(new_a);
-                                        sync.slots[cid].reset_temp = Some(reset_temp_val);
+                                        sync.slots[cid].reset_temp = Some(core_temp);
                                         let reason = if dedup_resets.contains(&cid) { "dedup" } else { "worst50" };
                                         reset_info.push((cid, perturbations, reason));
                                     }
@@ -734,14 +742,14 @@ fn main() {
                                         .map(|(cid, p, reason)| format!("core{}({}perturb,{})", cid, p, reason))
                                         .collect();
                                     eprintln!(
-                                        "[{}] SYNC epoch {} | global best: {} ({}) | stagnation: {}/{} | reset_temp: {:.1} | reset: [{}]",
+                                        "[{}] SYNC epoch {} | global best: {} ({}) | stagnation: {}/{} | max_perturb: {} | reset: [{}]",
                                         now_iso(),
                                         sync.epoch,
                                         sync.global_best_cost,
                                         cost_label(&global_cost),
                                         sync.stagnation_epochs,
                                         stagnation_threshold,
-                                        reset_temp_val,
+                                        max_perturbations,
                                         reset_desc.join(", "),
                                     );
                                 }
@@ -756,9 +764,14 @@ fn main() {
                                 }
                             }
 
+                            let done = sync.generation_complete;
                             let my_reset = sync.slots[core_id].reset_to;
                             let my_reset_temp = sync.slots[core_id].reset_temp;
                             drop(sync);
+
+                            if done {
+                                return;
+                            }
 
                             if let Some(new_a) = my_reset {
                                 a = new_a;
@@ -804,4 +817,6 @@ fn main() {
     for h in handles {
         h.join().unwrap();
     }
+    saver_handle.join().unwrap();
+    eprintln!("[{}] Generation finished, exiting.", now_iso());
 }
