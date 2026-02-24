@@ -1,7 +1,8 @@
 use rand::rngs::SmallRng;
 use rand::{Rng, SeedableRng};
 use std::fs;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::io::{self, BufRead};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::Instant;
@@ -91,7 +92,7 @@ impl EarlyLateCsp {
             for prev in 0..team {
                 let prev_pat = &self.patterns[self.team_patterns[prev]];
                 let mut reachable = false;
-                for w in 0..WEEKS {
+                for w in 0..COVERAGE_WEEKS {
                     if pattern[w] == prev_pat[w] {
                         reachable = true;
                         break;
@@ -142,7 +143,7 @@ impl EarlyLateCsp {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Phase 2: Backtracking CSP for matchup assignment
+// Phase 2: Lane-aware backtracking CSP
 // ═══════════════════════════════════════════════════════════════════════════
 
 fn pair_idx(a: u8, b: u8) -> usize {
@@ -175,6 +176,23 @@ fn quad_positions(teams: &[u8; 4], config: u8) -> [u8; 4] {
     }
 }
 
+/// All 8 arrangements of a quad that preserve matchups:
+/// 4 flip variants (identity, swap 0↔2, swap 1↔3, swap both)
+/// × 2 orientation variants (identity, toggle stayer/switcher)
+fn lane_variants(base: [u8; 4]) -> [[u8; 4]; 8] {
+    let [p0, p1, p2, p3] = base;
+    [
+        [p0, p1, p2, p3],
+        [p2, p1, p0, p3],
+        [p0, p3, p2, p1],
+        [p2, p3, p0, p1],
+        [p1, p0, p3, p2],
+        [p3, p0, p1, p2],
+        [p1, p2, p3, p0],
+        [p3, p2, p1, p0],
+    ]
+}
+
 fn generate_partitions(group: &[u8; 8]) -> Vec<([u8; 4], [u8; 4])> {
     let mut result = Vec::with_capacity(70);
     let n = group.len();
@@ -203,44 +221,53 @@ fn generate_partitions(group: &[u8; 8]) -> Vec<([u8; 4], [u8; 4])> {
 struct CspState {
     matchup_counts: [u8; TEAMS * TEAMS],
     last_week_matchups: [bool; TEAMS * TEAMS],
+    lane_counts: [i16; TEAMS * LANES],
+    stay_counts: [i16; TEAMS],
     assignment: Assignment,
 }
 
-fn precompute_pair_futures(halves: &[([u8; 8], [u8; 8]); WEEKS]) -> [[bool; WEEKS]; TEAMS * TEAMS] {
-    let mut futures = [[false; WEEKS]; TEAMS * TEAMS];
-    for w in 0..WEEKS {
-        for group in [&halves[w].0, &halves[w].1] {
-            for i in 0..8 {
-                for j in (i + 1)..8 {
-                    futures[pair_idx(group[i], group[j])][w] = true;
-                }
-            }
-        }
-    }
-    futures
+fn apply_quad_lanes(state: &mut CspState, pos: &[u8; 4], q_idx: usize) {
+    let lo = (q_idx % 2) * 2;
+    let [p0, p1, p2, p3] = *pos;
+    state.lane_counts[p0 as usize * LANES + lo] += 2;
+    state.lane_counts[p1 as usize * LANES + lo] += 1;
+    state.lane_counts[p1 as usize * LANES + lo + 1] += 1;
+    state.lane_counts[p2 as usize * LANES + lo + 1] += 2;
+    state.lane_counts[p3 as usize * LANES + lo + 1] += 1;
+    state.lane_counts[p3 as usize * LANES + lo] += 1;
+    state.stay_counts[p0 as usize] += 1;
+    state.stay_counts[p2 as usize] += 1;
 }
 
-fn forward_check(
-    state: &CspState,
-    week: usize,
-    pair_futures: &[[bool; WEEKS]; TEAMS * TEAMS],
-) -> bool {
-    for i in 0..TEAMS {
-        for j in (i + 1)..TEAMS {
-            let idx = i * TEAMS + j;
-            if state.matchup_counts[idx] == 0 {
-                let mut reachable = false;
-                for w in (week + 1)..WEEKS {
-                    if pair_futures[idx][w] {
-                        reachable = true;
-                        break;
-                    }
-                }
-                if !reachable {
-                    return false;
-                }
-            }
-        }
+fn undo_quad_lanes(state: &mut CspState, pos: &[u8; 4], q_idx: usize) {
+    let lo = (q_idx % 2) * 2;
+    let [p0, p1, p2, p3] = *pos;
+    state.lane_counts[p0 as usize * LANES + lo] -= 2;
+    state.lane_counts[p1 as usize * LANES + lo] -= 1;
+    state.lane_counts[p1 as usize * LANES + lo + 1] -= 1;
+    state.lane_counts[p2 as usize * LANES + lo + 1] -= 2;
+    state.lane_counts[p3 as usize * LANES + lo + 1] -= 1;
+    state.lane_counts[p3 as usize * LANES + lo] -= 1;
+    state.stay_counts[p0 as usize] -= 1;
+    state.stay_counts[p2 as usize] -= 1;
+}
+
+/// Max lane/stay counts allowed during the first COVERAGE_WEEKS,
+/// reserving at least 1 for the remaining weeks.
+const COVERAGE_LANE_CAP: i16 = TARGET_LANE - 1;
+const COVERAGE_STAY_CAP: i16 = TARGET_STAY - 1;
+
+/// Quick check after applying one quad's lanes: prune if any affected team
+/// already exceeds the lane or stay target by more than the allowed slack.
+fn quad_lanes_ok(state: &CspState, pos: &[u8; 4], q_idx: usize, week: usize) -> bool {
+    let lo = (q_idx % 2) * 2;
+    let lane_cap = if week < COVERAGE_WEEKS { COVERAGE_LANE_CAP } else { TARGET_LANE + LANE_SLACK };
+    let stay_cap = if week < COVERAGE_WEEKS { COVERAGE_STAY_CAP } else { TARGET_STAY + STAY_SLACK };
+    for &p in pos {
+        let t = p as usize;
+        if state.lane_counts[t * LANES + lo] > lane_cap { return false; }
+        if state.lane_counts[t * LANES + lo + 1] > lane_cap { return false; }
+        if state.stay_counts[t] > stay_cap { return false; }
     }
     true
 }
@@ -253,7 +280,11 @@ struct HalfChoice {
     matchups: [(u8, u8); 8],
 }
 
-fn enumerate_half_choices(group: &[u8; 8], state: &CspState) -> Vec<HalfChoice> {
+/// Week before COVERAGE_WEEKS where repeats become unavoidable (128 slots, 120 pairs).
+const REPEAT_WEEK: usize = COVERAGE_WEEKS - 1;
+
+fn enumerate_half_choices(group: &[u8; 8], state: &CspState, week: usize) -> Vec<HalfChoice> {
+    let max_count: u8 = if week < REPEAT_WEEK { 1 } else { 2 };
     let partitions = generate_partitions(group);
     let mut choices = Vec::new();
 
@@ -263,7 +294,9 @@ fn enumerate_half_choices(group: &[u8; 8], state: &CspState) -> Vec<HalfChoice> 
             let mut ok = true;
             for &(lo, hi) in &m_a {
                 let idx = pair_idx(lo, hi);
-                if state.matchup_counts[idx] >= 2 || state.last_week_matchups[idx] {
+                if state.matchup_counts[idx] >= max_count
+                    || (BAN_REPEAT_OPPONENTS && state.last_week_matchups[idx])
+                {
                     ok = false;
                     break;
                 }
@@ -275,7 +308,9 @@ fn enumerate_half_choices(group: &[u8; 8], state: &CspState) -> Vec<HalfChoice> 
                 let mut ok = true;
                 for &(lo, hi) in &m_b {
                     let idx = pair_idx(lo, hi);
-                    if state.matchup_counts[idx] >= 2 || state.last_week_matchups[idx] {
+                    if state.matchup_counts[idx] >= max_count
+                        || (BAN_REPEAT_OPPONENTS && state.last_week_matchups[idx])
+                    {
                         ok = false;
                         break;
                     }
@@ -308,6 +343,72 @@ fn enumerate_half_choices(group: &[u8; 8], state: &CspState) -> Vec<HalfChoice> 
     choices
 }
 
+fn precompute_pair_futures(halves: &[([u8; 8], [u8; 8]); WEEKS]) -> [[bool; WEEKS]; TEAMS * TEAMS] {
+    let mut futures = [[false; WEEKS]; TEAMS * TEAMS];
+    for w in 0..WEEKS {
+        for group in [&halves[w].0, &halves[w].1] {
+            for i in 0..8 {
+                for j in (i + 1)..8 {
+                    futures[pair_idx(group[i], group[j])][w] = true;
+                }
+            }
+        }
+    }
+    futures
+}
+
+const LANE_SLACK: i16 = 6;
+const STAY_SLACK: i16 = 6;
+const BAN_REPEAT_OPPONENTS: bool = false;
+const TARGET_LANE: i16 = (WEEKS as i16 * 2) / LANES as i16;
+const TARGET_STAY: i16 = WEEKS as i16 / 2;
+
+/// All 120 pairs must be covered by this week (0-indexed, exclusive).
+const COVERAGE_WEEKS: usize = 8;
+
+fn forward_check(
+    state: &CspState,
+    week: usize,
+    pair_futures: &[[bool; WEEKS]; TEAMS * TEAMS],
+) -> bool {
+    let remaining = (WEEKS - week - 1) as i16;
+
+    // Coverage deadline: uncovered pairs must be reachable within the first COVERAGE_WEEKS
+    let coverage_horizon = if week < COVERAGE_WEEKS { COVERAGE_WEEKS } else { WEEKS };
+    for i in 0..TEAMS {
+        for j in (i + 1)..TEAMS {
+            let idx = i * TEAMS + j;
+            if state.matchup_counts[idx] == 0 {
+                let mut reachable = false;
+                for w in (week + 1)..coverage_horizon {
+                    if pair_futures[idx][w] {
+                        reachable = true;
+                        break;
+                    }
+                }
+                if !reachable {
+                    return false;
+                }
+            }
+        }
+    }
+
+    let lane_cap = if week < COVERAGE_WEEKS { COVERAGE_LANE_CAP } else { TARGET_LANE + LANE_SLACK };
+    let stay_cap = if week < COVERAGE_WEEKS { COVERAGE_STAY_CAP } else { TARGET_STAY + STAY_SLACK };
+    for t in 0..TEAMS {
+        for l in 0..LANES {
+            let c = state.lane_counts[t * LANES + l];
+            if c > lane_cap { return false; }
+            if c + remaining * 2 < TARGET_LANE - LANE_SLACK { return false; }
+        }
+        let s = state.stay_counts[t];
+        if s > stay_cap { return false; }
+        if s + remaining < TARGET_STAY - STAY_SLACK { return false; }
+    }
+
+    true
+}
+
 fn shuffle<T>(v: &mut [T], rng: &mut SmallRng) {
     for i in (1..v.len()).rev() {
         let j = rng.random_range(0..=i);
@@ -315,19 +416,76 @@ fn shuffle<T>(v: &mut [T], rng: &mut SmallRng) {
     }
 }
 
+fn lane_variant_score(state: &CspState, v: &[u8; 4], q_idx: usize) -> i32 {
+    let lo = (q_idx % 2) * 2;
+    let [p0, p1, p2, p3] = *v;
+    let mut s = 0i32;
+    let tl = TARGET_LANE as i32;
+    let ts = TARGET_STAY as i32;
+
+    s += (state.lane_counts[p0 as usize * LANES + lo] as i32 + 2 - tl).pow(2);
+    s += (state.stay_counts[p0 as usize] as i32 + 1 - ts).pow(2);
+
+    s += (state.lane_counts[p1 as usize * LANES + lo] as i32 + 1 - tl).pow(2);
+    s += (state.lane_counts[p1 as usize * LANES + lo + 1] as i32 + 1 - tl).pow(2);
+
+    s += (state.lane_counts[p2 as usize * LANES + lo + 1] as i32 + 2 - tl).pow(2);
+    s += (state.stay_counts[p2 as usize] as i32 + 1 - ts).pow(2);
+
+    s += (state.lane_counts[p3 as usize * LANES + lo + 1] as i32 + 1 - tl).pow(2);
+    s += (state.lane_counts[p3 as usize * LANES + lo] as i32 + 1 - tl).pow(2);
+
+    s
+}
+
+fn top_n_variants(state: &CspState, variants: &[[u8; 4]; 8], q_idx: usize) -> [[u8; 4]; 6] {
+    let mut scored: [([u8; 4], i32); 8] = std::array::from_fn(|i| {
+        (variants[i], lane_variant_score(state, &variants[i], q_idx))
+    });
+    scored.sort_by_key(|&(_, s)| s);
+    [scored[0].0, scored[1].0, scored[2].0, scored[3].0, scored[4].0, scored[5].0]
+}
+
+const DEPTH_TIMEOUT_SECS: [u64; 13] = [
+    100,      // week 0
+    100,      // week 1
+    100,      // week 2
+    200,      // week 3
+    300,      // week 4
+    3600,     // week 5   (1 hr)
+    14400,    // week 6   (4 hr)
+    43200,    // week 7   (12 hr)
+    86400,    // week 8   (24 hr)
+    172800,   // week 9   (48 hr)
+    259200,   // week 10  (72 hr)
+    604800,   // week 11  (1 week)
+    604800,   // week 12  (1 week)
+];
+
 fn solve_csp(
     halves: &[([u8; 8], [u8; 8]); WEEKS],
     pair_futures: &[[bool; WEEKS]; TEAMS * TEAMS],
     state: &mut CspState,
     week: usize,
     rng: &mut SmallRng,
-    deadline: &Instant,
+    attempt_start: &Instant,
+    max_week: &AtomicUsize,
+    current_week: &AtomicUsize,
 ) -> bool {
-    if Instant::now() > *deadline {
+    current_week.store(week, Ordering::Relaxed);
+    let prev_max = max_week.fetch_max(week, Ordering::Relaxed);
+    let high_water = prev_max.max(week);
+    let timeout = std::time::Duration::from_secs(DEPTH_TIMEOUT_SECS[high_water]);
+    if attempt_start.elapsed() > timeout {
         return false;
     }
 
     if week == WEEKS {
+        return true;
+    }
+
+    // Hard gate: all 120 pairs must be covered by COVERAGE_WEEKS
+    if week == COVERAGE_WEEKS {
         for i in 0..TEAMS {
             for j in (i + 1)..TEAMS {
                 if state.matchup_counts[i * TEAMS + j] == 0 {
@@ -335,11 +493,10 @@ fn solve_csp(
                 }
             }
         }
-        return true;
     }
 
     let (early, late) = &halves[week];
-    let mut early_choices = enumerate_half_choices(early, state);
+    let mut early_choices = enumerate_half_choices(early, state, week);
     shuffle(&mut early_choices, rng);
 
     for ec in &early_choices {
@@ -350,18 +507,21 @@ fn solve_csp(
             applied_e.push(idx);
         }
 
-        let mut late_choices = enumerate_half_choices(late, state);
+        let mut late_choices = enumerate_half_choices(late, state, week);
         shuffle(&mut late_choices, rng);
 
+        let ea_vars = lane_variants(quad_positions(&ec.qa_teams, ec.qa_mc));
+        let eb_vars = lane_variants(quad_positions(&ec.qb_teams, ec.qb_mc));
+
         for lc in &late_choices {
-            let mut ok = true;
+            let mut m_ok = true;
             for &(lo, hi) in &lc.matchups {
                 if state.matchup_counts[pair_idx(lo, hi)] >= 2 {
-                    ok = false;
+                    m_ok = false;
                     break;
                 }
             }
-            if !ok { continue; }
+            if !m_ok { continue; }
 
             let mut applied_l = Vec::with_capacity(8);
             for &(lo, hi) in &lc.matchups {
@@ -376,17 +536,59 @@ fn solve_csp(
                 state.last_week_matchups[pair_idx(lo, hi)] = true;
             }
 
-            state.assignment[week] = [
-                quad_positions(&ec.qa_teams, ec.qa_mc),
-                quad_positions(&ec.qb_teams, ec.qb_mc),
-                quad_positions(&lc.qa_teams, lc.qa_mc),
-                quad_positions(&lc.qb_teams, lc.qb_mc),
-            ];
+            let la_vars = lane_variants(quad_positions(&lc.qa_teams, lc.qa_mc));
+            let lb_vars = lane_variants(quad_positions(&lc.qb_teams, lc.qb_mc));
 
-            let next = week + 1;
-            let feasible = next == WEEKS || forward_check(state, week, pair_futures);
-            if feasible && solve_csp(halves, pair_futures, state, next, rng, deadline) {
-                return true;
+            let ea_top = top_n_variants(state, &ea_vars, 0);
+            for &ea in &ea_top {
+                apply_quad_lanes(state, &ea, 0);
+                if !quad_lanes_ok(state, &ea, 0, week) {
+                    undo_quad_lanes(state, &ea, 0);
+                    continue;
+                }
+
+                let eb_top = top_n_variants(state, &eb_vars, 1);
+                for &eb in &eb_top {
+                    apply_quad_lanes(state, &eb, 1);
+                    if !quad_lanes_ok(state, &eb, 1, week) {
+                        undo_quad_lanes(state, &eb, 1);
+                        continue;
+                    }
+
+                    let la_top = top_n_variants(state, &la_vars, 2);
+                    for &la in &la_top {
+                        apply_quad_lanes(state, &la, 2);
+                        if !quad_lanes_ok(state, &la, 2, week) {
+                            undo_quad_lanes(state, &la, 2);
+                            continue;
+                        }
+
+                        let lb_top = top_n_variants(state, &lb_vars, 3);
+                        for &lb in &lb_top {
+                            apply_quad_lanes(state, &lb, 3);
+                            if !quad_lanes_ok(state, &lb, 3, week) {
+                                undo_quad_lanes(state, &lb, 3);
+                                continue;
+                            }
+
+                            state.assignment[week] = [ea, eb, la, lb];
+
+                            let next = week + 1;
+                            let feasible = next == WEEKS
+                                || forward_check(state, week, pair_futures);
+                            if feasible
+                                && solve_csp(halves, pair_futures, state, next, rng, attempt_start, max_week, current_week)
+                            {
+                                return true;
+                            }
+
+                            undo_quad_lanes(state, &lb, 3);
+                        }
+                        undo_quad_lanes(state, &la, 2);
+                    }
+                    undo_quad_lanes(state, &eb, 1);
+                }
+                undo_quad_lanes(state, &ea, 0);
             }
 
             state.last_week_matchups = saved_last;
@@ -403,128 +605,62 @@ fn solve_csp(
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Phase 3: Lane + switch optimization via SA (3B iterations)
+// Status tracking
 // ═══════════════════════════════════════════════════════════════════════════
 
-fn toggle_orientation(quad: &[u8; 4]) -> [u8; 4] {
-    let [p0, p1, p2, p3] = *quad;
-    [p1, p0, p3, p2]
+struct CoreStatus {
+    phase: AtomicU8,
+    p1_seed: AtomicU64,
+    p2_attempt: AtomicU64,
+    p2_successes: AtomicU64,
+    max_week: AtomicUsize,
+    current_week: AtomicUsize,
+    best_cost: AtomicU32,
 }
 
-const SA_ITERATIONS: u64 = 3_000_000_000;
-const CHECKPOINT_INTERVAL: u64 = 10_000_000;
-
-struct Phase3Context<'a> {
-    results_dir: &'a str,
-    label: String,
-    global_best: &'a AtomicU32,
-}
-
-fn phase_3(
-    assignment: &mut Assignment,
-    w8: &Weights,
-    seed: u64,
-    shutdown: &AtomicBool,
-    ctx: &Phase3Context,
-) {
-    let mut rng = SmallRng::seed_from_u64(seed);
-    let mut best = *assignment;
-    let mut best_cost = evaluate(assignment, w8).total;
-    let mut current_cost = best_cost;
-    let mut temp = 10.0f64;
-    let mut last_saved_cost = u32::MAX;
-
-    for iter in 0..SA_ITERATIONS {
-        if iter % CHECKPOINT_INTERVAL == 0 {
-            if shutdown.load(Ordering::Relaxed) {
-                break;
-            }
-            if iter > 0 {
-                let cost_bd = evaluate(&best, w8);
-                let prev = ctx.global_best.fetch_min(best_cost, Ordering::Relaxed);
-                let marker = if best_cost < prev { " ★" } else { "" };
-                eprintln!(
-                    "[{}] {} @{}M: {}{}", now_iso(), ctx.label,
-                    iter / 1_000_000, cost_label(&cost_bd), marker,
-                );
-                if best_cost < last_saved_cost {
-                    last_saved_cost = best_cost;
-                    let filename = format!(
-                        "{}/{:04}-{}.tsv", ctx.results_dir, best_cost, ctx.label,
-                    );
-                    let _ = fs::write(&filename, assignment_to_tsv(&best));
-                }
-            }
-        }
-
-        let move_type = rng.random_range(0..10u8);
-        let w = rng.random_range(0..WEEKS);
-
-        match move_type {
-            0..=3 => {
-                let q = rng.random_range(0..QUADS);
-                let saved = assignment[w][q];
-                let [p0, p1, p2, p3] = saved;
-                let flip = rng.random_range(0..3u8);
-                assignment[w][q] = match flip {
-                    0 => [p2, p1, p0, p3],
-                    1 => [p0, p3, p2, p1],
-                    _ => [p2, p3, p0, p1],
-                };
-                let nc = evaluate(assignment, w8).total;
-                let delta = nc as f64 - current_cost as f64;
-                if delta < 0.0 || rng.random::<f64>() < (-delta / temp).exp() {
-                    current_cost = nc;
-                    if nc < best_cost { best_cost = nc; best = *assignment; }
-                } else {
-                    assignment[w][q] = saved;
-                }
-            }
-            4..=6 => {
-                let q = rng.random_range(0..QUADS);
-                let saved = assignment[w][q];
-                assignment[w][q] = toggle_orientation(&saved);
-                let nc = evaluate(assignment, w8).total;
-                let delta = nc as f64 - current_cost as f64;
-                if delta < 0.0 || rng.random::<f64>() < (-delta / temp).exp() {
-                    current_cost = nc;
-                    if nc < best_cost { best_cost = nc; best = *assignment; }
-                } else {
-                    assignment[w][q] = saved;
-                }
-            }
-            _ => {
-                let half = rng.random_range(0..2usize);
-                let q1 = half * 2;
-                let q2 = q1 + 1;
-                assignment[w].swap(q1, q2);
-                let nc = evaluate(assignment, w8).total;
-                let delta = nc as f64 - current_cost as f64;
-                if delta < 0.0 || rng.random::<f64>() < (-delta / temp).exp() {
-                    current_cost = nc;
-                    if nc < best_cost { best_cost = nc; best = *assignment; }
-                } else {
-                    assignment[w].swap(q1, q2);
-                }
-            }
-        }
-
-        temp *= 0.999_999;
-        if iter % 100_000_000 == 0 && iter > 0 {
-            temp = 10.0;
+impl CoreStatus {
+    fn new() -> Self {
+        CoreStatus {
+            phase: AtomicU8::new(0),
+            p1_seed: AtomicU64::new(0),
+            p2_attempt: AtomicU64::new(0),
+            p2_successes: AtomicU64::new(0),
+            max_week: AtomicUsize::new(0),
+            current_week: AtomicUsize::new(0),
+            best_cost: AtomicU32::new(u32::MAX),
         }
     }
+}
 
-    *assignment = best;
+fn dump_status(statuses: &[Arc<CoreStatus>], global_best: &AtomicU32) {
+    eprintln!("=== Status [{}] ===", now_iso());
+    for (i, s) in statuses.iter().enumerate() {
+        let phase = match s.phase.load(Ordering::Relaxed) {
+            1 => "Phase1",
+            2 => "Phase2",
+            _ => "idle  ",
+        };
+        let seed = s.p1_seed.load(Ordering::Relaxed);
+        let att = s.p2_attempt.load(Ordering::Relaxed);
+        let ok = s.p2_successes.load(Ordering::Relaxed);
+        let mw = s.max_week.load(Ordering::Relaxed);
+        let cw = s.current_week.load(Ordering::Relaxed);
+        let bc = s.best_cost.load(Ordering::Relaxed);
+        let bc_str = if bc == u32::MAX { "---".to_string() } else { bc.to_string() };
+        eprintln!(
+            "  core {:>2}: {} p1={:<4} att={:<4} ok={:<3} now={:>2} peak={:>2}/12 best={}",
+            i, phase, seed, att, ok, cw, mw, bc_str,
+        );
+    }
+    let gb = global_best.load(Ordering::Relaxed);
+    let gb_str = if gb == u32::MAX { "---".to_string() } else { gb.to_string() };
+    eprintln!("  Global best: {}", gb_str);
+    eprintln!("==============");
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Main: multi-threaded loop over Phase 1 → Phase 2 → Phase 3
+// Main: multi-threaded Phase 1 → Phase 2 (lane-aware) → save
 // ═══════════════════════════════════════════════════════════════════════════
-
-const PHASE2_ATTEMPTS: u64 = 100;
-const TOP_N_PHASE2: usize = 3;
-const SA_RUNS_PER_PHASE2: u64 = 2;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -563,7 +699,7 @@ fn main() {
                 std::process::exit(1);
             }
             shutdown.store(true, Ordering::SeqCst);
-            eprintln!("\n[{}] Ctrl+C received, finishing current phase... (press again to force)", now_iso());
+            eprintln!("\n[{}] Ctrl+C received, finishing current attempt... (press again to force)", now_iso());
         }).expect("Failed to set Ctrl+C handler");
     }
 
@@ -577,11 +713,29 @@ fn main() {
         .unwrap_or(4);
     let num_cores = cores_override.unwrap_or(available);
 
+    let statuses: Vec<Arc<CoreStatus>> = (0..num_cores)
+        .map(|_| Arc::new(CoreStatus::new()))
+        .collect();
+
     eprintln!(
-        "[{}] Starting construct loop: {} cores, {}×Phase2, top-{} → {}×SA({}M each). Ctrl+C to stop.",
-        now_iso(), num_cores, PHASE2_ATTEMPTS, TOP_N_PHASE2,
-        SA_RUNS_PER_PHASE2, SA_ITERATIONS / 1_000_000,
+        "[{}] Starting construct: {} cores, Phase1 → Phase2 (lane-aware CSP). Ctrl+C to stop, Enter for status.",
+        now_iso(), num_cores,
     );
+
+    {
+        let statuses = statuses.clone();
+        let global_best = Arc::clone(&global_best);
+        let shutdown = Arc::clone(&shutdown);
+        thread::spawn(move || {
+            let stdin = io::stdin();
+            for line in stdin.lock().lines() {
+                if shutdown.load(Ordering::Relaxed) { break; }
+                if line.is_ok() {
+                    dump_status(&statuses, &global_best);
+                }
+            }
+        });
+    }
 
     let handles: Vec<_> = (0..num_cores)
         .map(|core_id| {
@@ -590,18 +744,21 @@ fn main() {
             let w8 = Arc::clone(&w8);
             let patterns = Arc::clone(&patterns);
             let results_dir = Arc::clone(&results_dir);
+            let status = Arc::clone(&statuses[core_id]);
 
             thread::spawn(move || {
-                let mut rng = SmallRng::from_os_rng();
                 let mut phase1_seed: u64 = core_id as u64;
 
                 loop {
                     if shutdown.load(Ordering::Relaxed) { return; }
 
                     // ── Phase 1 ──
-                    let mut halves = None;
+                    status.phase.store(1, Ordering::Relaxed);
                     let seed = phase1_seed;
                     phase1_seed += num_cores as u64;
+                    status.p1_seed.store(seed, Ordering::Relaxed);
+
+                    let mut halves = None;
                     {
                         let mut r = SmallRng::seed_from_u64(seed);
                         let mut csp = EarlyLateCsp::new((*patterns).clone(), &mut r);
@@ -620,83 +777,60 @@ fn main() {
 
                     if shutdown.load(Ordering::Relaxed) { return; }
 
-                    // ── Phase 2: collect top N (10s budget) ──
-                    let pair_futures = precompute_pair_futures(&halves);
-                    let mut phase2_results: Vec<(Assignment, u32)> = Vec::new();
-                    let phase2_deadline = Instant::now() + std::time::Duration::from_secs(10);
-                    let mut attempt = 0u64;
+                    // ── Phase 2: lane-aware CSP (30s budget) ──
+                    status.phase.store(2, Ordering::Relaxed);
+                    status.p2_attempt.store(0, Ordering::Relaxed);
+                    status.p2_successes.store(0, Ordering::Relaxed);
+                    status.max_week.store(0, Ordering::Relaxed);
+                    status.best_cost.store(u32::MAX, Ordering::Relaxed);
 
-                    while Instant::now() < phase2_deadline {
+                    let pair_futures = precompute_pair_futures(&halves);
+                    let mut local_best_cost = u32::MAX;
+                    let mut attempt = 0u64;
+                    let mut successes = 0u64;
+
+                    loop {
                         if shutdown.load(Ordering::Relaxed) { return; }
 
                         let mut state = CspState {
                             matchup_counts: [0; TEAMS * TEAMS],
                             last_week_matchups: [false; TEAMS * TEAMS],
+                            lane_counts: [0; TEAMS * LANES],
+                            stay_counts: [0; TEAMS],
                             assignment: [[[0u8; POS]; QUADS]; WEEKS],
                         };
                         let mut r = SmallRng::seed_from_u64(seed.wrapping_mul(10007).wrapping_add(attempt));
+                        status.max_week.store(0, Ordering::Relaxed);
+                        status.current_week.store(0, Ordering::Relaxed);
                         attempt += 1;
+                        status.p2_attempt.store(attempt, Ordering::Relaxed);
 
-                        let attempt_deadline = Instant::now() + std::time::Duration::from_millis(500);
-                        let deadline = attempt_deadline.min(phase2_deadline);
-                        if solve_csp(&halves, &pair_futures, &mut state, 0, &mut r, &deadline) {
+                        let attempt_start = Instant::now();
+
+                        if solve_csp(&halves, &pair_futures, &mut state, 0, &mut r, &attempt_start, &status.max_week, &status.current_week) {
                             let cost = evaluate(&state.assignment, &w8);
-                            phase2_results.push((state.assignment, cost.total));
+                            successes += 1;
+                            status.p2_successes.store(successes, Ordering::Relaxed);
+
+                            let prev_global = global_best.fetch_min(cost.total, Ordering::Relaxed);
+                            let marker = if cost.total < prev_global { " ★" } else { "" };
+                            eprintln!(
+                                "[{}] core {} p1={} #{}: {}{}",
+                                now_iso(), core_id, seed, successes, cost_label(&cost), marker,
+                            );
+
+                            if cost.total < local_best_cost {
+                                local_best_cost = cost.total;
+                                status.best_cost.store(local_best_cost, Ordering::Relaxed);
+                                let label = format!("c{}-p1s{}-n{}", core_id, seed, successes);
+                                let filename = format!(
+                                    "{}/{:04}-{}.tsv", results_dir, cost.total, label,
+                                );
+                                let _ = fs::write(&filename, assignment_to_tsv(&state.assignment));
+                            }
                         }
                     }
 
-                    if phase2_results.is_empty() {
-                        eprintln!(
-                            "[{}] core {} Phase2 p1={} → 0/{} succeeded, skipping",
-                            now_iso(), core_id, seed, attempt,
-                        );
-                        continue;
-                    }
-
-                    phase2_results.sort_by_key(|&(_, c)| c);
-                    phase2_results.dedup_by(|a, b| a.0 == b.0);
-                    phase2_results.truncate(TOP_N_PHASE2);
-
-                    eprintln!(
-                        "[{}] core {} Phase2 p1={} → {}/{} succeeded, top {}: [{}]",
-                        now_iso(), core_id, seed,
-                        phase2_results.len(), attempt,
-                        phase2_results.len().min(TOP_N_PHASE2),
-                        phase2_results.iter().map(|(_, c)| c.to_string()).collect::<Vec<_>>().join(", "),
-                    );
-
-                    // ── Phase 3: SA on each top result ──
-                    for (rank, (base_assignment, pre_cost)) in phase2_results.iter().enumerate() {
-                        for sa_run in 0..SA_RUNS_PER_PHASE2 {
-                            if shutdown.load(Ordering::Relaxed) { return; }
-
-                            let sa_seed = rng.random::<u64>();
-                            let label = format!("c{}-p1s{}-r{}-sa{}", core_id, seed, rank, sa_run);
-                            let ctx = Phase3Context {
-                                results_dir: &results_dir,
-                                label: label.clone(),
-                                global_best: &global_best,
-                            };
-                            let mut a = *base_assignment;
-
-                            eprintln!(
-                                "[{}] {} starting (pre: {})",
-                                now_iso(), label, pre_cost,
-                            );
-
-                            phase_3(&mut a, &w8, sa_seed, &shutdown, &ctx);
-
-                            let final_cost = evaluate(&a, &w8);
-                            let prev_best = global_best.fetch_min(final_cost.total, Ordering::Relaxed);
-                            let is_new_best = final_cost.total < prev_best;
-
-                            eprintln!(
-                                "[{}] {} done | {} {}",
-                                now_iso(), label, cost_label(&final_cost),
-                                if is_new_best { "★ NEW BEST" } else { "" },
-                            );
-                        }
-                    }
                 }
             })
         })
@@ -706,4 +840,5 @@ fn main() {
         h.join().unwrap();
     }
     eprintln!("[{}] Construct finished.", now_iso());
+    std::process::exit(0);
 }
