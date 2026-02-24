@@ -31,11 +31,11 @@ pub fn save_assignment(
     if last_saved.as_ref() == Some(a) {
         return false;
     }
-    let ts = Local::now().format("%Y-%m-%dT%H%M%S%z");
-    let filename = format!("{}/{}-{}-{}.tsv", results_dir, prefix, key, ts);
+    let ts = Local::now().format("%Y%m%d-%H%M%S%z");
+    let filename = format!("{}/{:04}-{}-{}.tsv", results_dir, key, prefix, ts);
     let tsv = assignment_to_tsv(a);
     let _ = fs::write(&filename, &tsv);
-    eprintln!("[{}] Saved {}: {} ({})", now_iso(), prefix, filename, cost_label(c));
+    eprintln!("[{}] Saved {} ({})", now_iso(), filename, cost_label(c));
     *last_saved = Some(*a);
     true
 }

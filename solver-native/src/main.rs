@@ -67,13 +67,33 @@ struct SyncState {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let config_path = args.get(1).map(|s| s.as_str()).unwrap_or("config.toml");
-    let config_str = fs::read_to_string(config_path)
+    let mut config_path = "config.toml".to_string();
+    let mut cores_override: Option<usize> = None;
+    let mut seed_paths: Vec<String> = Vec::new();
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--cores" => {
+                i += 1;
+                cores_override = Some(args[i].parse().expect("--cores requires a number"));
+            }
+            other => {
+                if config_path == "config.toml" && seed_paths.is_empty() && !other.ends_with(".tsv") {
+                    config_path = other.to_string();
+                } else {
+                    seed_paths.push(other.to_string());
+                }
+            }
+        }
+        i += 1;
+    }
+
+    let config_str = fs::read_to_string(&config_path)
         .unwrap_or_else(|e| panic!("Failed to read {}: {}", config_path, e));
     let config: Config = toml::from_str(&config_str)
         .unwrap_or_else(|e| panic!("Failed to parse {}: {}", config_path, e));
 
-    let weights_path = std::path::Path::new(config_path)
+    let weights_path = std::path::Path::new(&config_path)
         .parent()
         .unwrap_or(std::path::Path::new("."))
         .join(&config.solver.weights_path);
@@ -83,7 +103,7 @@ fn main() {
         .unwrap_or_else(|e| panic!("Failed to parse {}: {}", weights_path.display(), e));
 
     let w8_for_seeds = Arc::new(loaded_weights.clone());
-    let seeds: Vec<Assignment> = args.iter().skip(2)
+    let seeds: Vec<Assignment> = seed_paths.iter()
         .filter_map(|path| {
             let content = fs::read_to_string(path)
                 .map_err(|e| eprintln!("Warning: could not read seed file {}: {}", path, e))
@@ -103,14 +123,16 @@ fn main() {
     let available = thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4);
-    let cores_cfg = config.solver.cores;
-    let num_cores = if cores_cfg <= 0.0 {
-        available
-    } else if cores_cfg < 1.0 {
-        (available as f64 * cores_cfg).round().max(1.0) as usize
-    } else {
-        (cores_cfg as usize).min(available)
-    };
+    let num_cores = cores_override.unwrap_or_else(|| {
+        let cores_cfg = config.solver.cores;
+        if cores_cfg <= 0.0 {
+            available
+        } else if cores_cfg < 1.0 {
+            (available as f64 * cores_cfg).round().max(1.0) as usize
+        } else {
+            (cores_cfg as usize).min(available)
+        }
+    });
     let max_iterations = config.solver.max_iterations;
     let progress_interval = config.solver.progress_interval;
     let sync_interval = config.solver.sync_interval;
@@ -194,14 +216,18 @@ fn main() {
 
             if state.overall_dirty {
                 if let Some((ref a, ref c)) = state.overall {
-                    save_assignment(&gen_dir, "best-overall", c.total, a, c, &mut last_overall);
+                    if c.total < 200 {
+                        save_assignment(&gen_dir, "best-overall", c.total, a, c, &mut last_overall);
+                    }
                 }
                 state.overall_dirty = false;
             }
 
             if state.matchup_dirty {
                 if let Some((ref a, ref c)) = state.best_matchup {
-                    save_assignment(&gen_dir, "best-matchup", c.matchup_balance, a, c, &mut last_matchup);
+                    if c.total < 200 {
+                        save_assignment(&gen_dir, "best-matchup", c.total, a, c, &mut last_matchup);
+                    }
                 }
                 state.matchup_dirty = false;
             }
@@ -591,13 +617,15 @@ fn main() {
                                     }
                                 }
 
-                                save_assignment(
-                                    &sync.generation_dir.clone(), "sync",
-                                    global_cost.total,
-                                    &sync.global_best_assignment,
-                                    &global_cost,
-                                    &mut last_sync,
-                                );
+                                if global_cost.total < 200 {
+                                    save_assignment(
+                                        &sync.generation_dir.clone(), "sync",
+                                        global_cost.total,
+                                        &sync.global_best_assignment,
+                                        &global_cost,
+                                        &mut last_sync,
+                                    );
+                                }
 
                                 if generational_restart {
                                     eprintln!(
@@ -609,14 +637,16 @@ fn main() {
                                         sync.stagnation_epochs,
                                     );
 
-                                    let cdir = complete_dir(&base_dir);
-                                    save_assignment(
-                                        &cdir, "gen-best",
-                                        global_cost.total,
-                                        &sync.global_best_assignment,
-                                        &global_cost,
-                                        &mut last_gen_best,
-                                    );
+                                    if global_cost.total < 200 {
+                                        let cdir = complete_dir(&base_dir);
+                                        save_assignment(
+                                            &cdir, "gen-best",
+                                            global_cost.total,
+                                            &sync.global_best_assignment,
+                                            &global_cost,
+                                            &mut last_gen_best,
+                                        );
+                                    }
 
                                     sync.generation_complete = true;
                                 } else {
@@ -740,15 +770,17 @@ fn main() {
                         "[{}] core {} finished {:.2}B iterations | best: {}",
                         now_iso(), core_id, max_iterations as f64 / 1e9, cost_label(&final_cost),
                     );
-                    let gen_dir = {
-                        let sync = sync_pair.0.lock().unwrap();
-                        sync.generation_dir.clone()
-                    };
-                    let mut dummy_last: Option<Assignment> = None;
-                    save_assignment(
-                        &gen_dir, &format!("core{}", core_id),
-                        final_cost.total, &best_a, &final_cost, &mut dummy_last,
-                    );
+                    if final_cost.total < 200 {
+                        let gen_dir = {
+                            let sync = sync_pair.0.lock().unwrap();
+                            sync.generation_dir.clone()
+                        };
+                        let mut dummy_last: Option<Assignment> = None;
+                        save_assignment(
+                            &gen_dir, &format!("core{}", core_id),
+                            final_cost.total, &best_a, &final_cost, &mut dummy_last,
+                        );
+                    }
                     {
                         let mut br = best_results.lock().unwrap();
                         let is_new_overall = br.overall.as_ref()
