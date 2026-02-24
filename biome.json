@@ -8,7 +8,7 @@
     },
     "files": {
         "ignoreUnknown": false,
-        "ignore": [".next"]
+        "ignore": [".next", "docs/out", "docs/public/solver_wasm.js"]
     },
     "formatter": {
         "enabled": true,

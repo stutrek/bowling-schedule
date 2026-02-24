@@ -1,0 +1,7 @@
+[workspace]
+members = ["solver-core", "solver-native", "solver-wasm"]
+resolver = "2"
+
+[profile.release]
+opt-level = 3
+lto = true

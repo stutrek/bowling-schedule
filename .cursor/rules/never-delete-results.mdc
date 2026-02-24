@@ -1,0 +1,16 @@
+---
+description: NEVER delete the results directory or any files within it
+alwaysApply: true
+---
+
+# NEVER delete solver results
+
+The `results/` directory contains irreplaceable solver output files generated over hours/days of computation. These files CANNOT be regenerated identically.
+
+**Absolute rules:**
+- NEVER run `rm`, `rm -rf`, `rm -r`, or any delete operation on `results/` or anything inside it
+- NEVER include `rm -rf results` in suggested commands, even as part of a setup/reset sequence
+- NEVER delete, move, or overwrite files in `results/` without explicit user confirmation
+- If a clean test run is needed, create a SEPARATE directory (e.g., `results-test/`) instead
+
+This rule exists because results were permanently destroyed twice by AI agents. There is no recovery path (FileVault, no Time Machine, no backups).

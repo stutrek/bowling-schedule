@@ -3,7 +3,7 @@ import init, { Solver } from './solver_wasm.js';
 let cancelled = false;
 
 self.onmessage = async (e) => {
-    const { type, maxIterations } = e.data;
+    const { type, maxIterations, weightsJson } = e.data;
 
     if (type === 'cancel') {
         cancelled = true;
@@ -14,7 +14,12 @@ self.onmessage = async (e) => {
         cancelled = false;
 
         try {
-            await init(new URL('./solver_wasm_bg.wasm', self.location.href));
+            await init({
+                module_or_path: new URL(
+                    './solver_wasm_bg.wasm',
+                    self.location.href,
+                ),
+            });
         } catch {
             // Already initialized
         }
@@ -22,7 +27,7 @@ self.onmessage = async (e) => {
         const chunkSize = 20_000_000;
 
         try {
-            const solver = new Solver(maxIterations);
+            const solver = new Solver(maxIterations, weightsJson);
 
             while (true) {
                 const done = solver.step(chunkSize);
@@ -36,7 +41,6 @@ self.onmessage = async (e) => {
 
                 if (done || cancelled) break;
 
-                // Yield so the main thread can process progress and we can receive cancel
                 await new Promise((r) => setTimeout(r, 0));
             }
 
@@ -46,7 +50,7 @@ self.onmessage = async (e) => {
                 return;
             }
 
-            const result = solver.result(); // consumes solver
+            const result = solver.result();
             const cost = result.cost;
             const msg = {
                 type: 'done',

@@ -1,4 +1,3 @@
-use chrono::Local;
 use rand::rngs::SmallRng;
 use rand::{Rng, SeedableRng};
 use serde::Deserialize;
@@ -8,29 +7,11 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::Duration;
 
-const TEAMS: usize = 16;
-const LANES: usize = 4;
-const WEEKS: usize = 12;
-const QUADS: usize = 4;
-const POS: usize = 4;
-
-type Assignment = [[[u8; POS]; QUADS]; WEEKS];
+use solver_native::*;
 
 #[derive(Deserialize)]
 struct Config {
-    weights: Weights,
     solver: SolverParams,
-}
-
-#[derive(Deserialize, Clone)]
-struct Weights {
-    matchup_zero: u32,
-    matchup_triple: u32,
-    consecutive_opponents: u32,
-    early_late_balance: f64,
-    early_late_alternation: u32,
-    lane_balance: f64,
-    lane_switch: f64,
 }
 
 #[derive(Deserialize)]
@@ -47,21 +28,16 @@ struct SolverParams {
     sync_ratio: f64,
     #[serde(default)]
     cores: f64,
+    #[serde(default)]
+    temp_floor: f64,
+    #[serde(default = "default_weights_path")]
+    weights_path: String,
 }
+
+fn default_weights_path() -> String { "../weights.json".to_string() }
 
 fn default_max_perturb() -> f64 { 100.0 }
 fn default_sync_ratio() -> f64 { 0.5 }
-
-#[derive(Clone)]
-struct CostBreakdown {
-    matchup_balance: u32,
-    consecutive_opponents: u32,
-    early_late_balance: u32,
-    early_late_alternation: u32,
-    lane_balance: u32,
-    lane_switch_balance: u32,
-    total: u32,
-}
 
 struct BestResults {
     overall: Option<(Assignment, CostBreakdown)>,
@@ -89,285 +65,6 @@ struct SyncState {
     generation_complete: bool,
 }
 
-fn random_assignment(rng: &mut SmallRng) -> Assignment {
-    let mut a = [[[0u8; POS]; QUADS]; WEEKS];
-    for w in 0..WEEKS {
-        let mut teams: [u8; TEAMS] = std::array::from_fn(|i| i as u8);
-        for i in (1..TEAMS).rev() {
-            let j = rng.random_range(0..=i);
-            teams.swap(i, j);
-        }
-        for q in 0..QUADS {
-            for p in 0..POS {
-                a[w][q][p] = teams[q * POS + p];
-            }
-        }
-    }
-    a
-}
-
-fn evaluate(a: &Assignment, w8: &Weights) -> CostBreakdown {
-    let mut matchups = [0i32; TEAMS * TEAMS];
-    let mut week_matchup = [0u8; WEEKS * TEAMS * TEAMS];
-    let mut lane_counts = [0i32; TEAMS * LANES];
-    let mut stay_count = [0i32; TEAMS];
-    let mut early_count = [0i32; TEAMS];
-    let mut early_late = [0u8; TEAMS * WEEKS];
-
-    for w in 0..WEEKS {
-        for q in 0..QUADS {
-            let [pa, pb, pc, pd] = a[w][q];
-            let early: u8 = if q < 2 { 1 } else { 0 };
-            let lane_off = (q % 2) * 2;
-
-            let pairs: [(u8, u8); 4] = [(pa, pb), (pc, pd), (pa, pd), (pc, pb)];
-            for &(t1, t2) in &pairs {
-                let lo = t1.min(t2) as usize;
-                let hi = t1.max(t2) as usize;
-                matchups[lo * TEAMS + hi] += 1;
-                week_matchup[w * TEAMS * TEAMS + lo * TEAMS + hi] = 1;
-            }
-
-            lane_counts[pa as usize * LANES + lane_off] += 2;
-            lane_counts[pb as usize * LANES + lane_off] += 1;
-            lane_counts[pb as usize * LANES + lane_off + 1] += 1;
-            lane_counts[pc as usize * LANES + lane_off + 1] += 2;
-            lane_counts[pd as usize * LANES + lane_off + 1] += 1;
-            lane_counts[pd as usize * LANES + lane_off] += 1;
-
-            stay_count[pa as usize] += 1;
-            stay_count[pc as usize] += 1;
-
-            for &t in &[pa, pb, pc, pd] {
-                early_late[t as usize * WEEKS + w] = early;
-                if early == 1 {
-                    early_count[t as usize] += 1;
-                }
-            }
-        }
-    }
-
-    let mut matchup_balance: u32 = 0;
-    for i in 0..TEAMS {
-        for j in (i + 1)..TEAMS {
-            let c = matchups[i * TEAMS + j];
-            if c == 0 {
-                matchup_balance += w8.matchup_zero;
-            } else if c >= 3 {
-                matchup_balance += (c - 2) as u32 * w8.matchup_triple;
-            }
-        }
-    }
-
-    let mut consecutive_opponents: u32 = 0;
-    for w in 0..(WEEKS - 1) {
-        let b1 = w * TEAMS * TEAMS;
-        let b2 = (w + 1) * TEAMS * TEAMS;
-        for i in 0..TEAMS {
-            for j in (i + 1)..TEAMS {
-                let idx = i * TEAMS + j;
-                if week_matchup[b1 + idx] != 0 && week_matchup[b2 + idx] != 0 {
-                    consecutive_opponents += w8.consecutive_opponents;
-                }
-            }
-        }
-    }
-
-    let mut early_late_balance: u32 = 0;
-    let target_e: f64 = WEEKS as f64 / 2.0;
-    for t in 0..TEAMS {
-        let dev = (early_count[t] as f64 - target_e).abs();
-        early_late_balance += (dev * dev * w8.early_late_balance) as u32;
-    }
-
-    let mut early_late_alternation: u32 = 0;
-    for t in 0..TEAMS {
-        for w in 0..(WEEKS - 2) {
-            let base = t * WEEKS;
-            if early_late[base + w] == early_late[base + w + 1]
-                && early_late[base + w + 1] == early_late[base + w + 2]
-            {
-                early_late_alternation += w8.early_late_alternation;
-            }
-        }
-    }
-
-    let mut lane_balance: u32 = 0;
-    let target_l: f64 = (WEEKS as f64 * 2.0) / LANES as f64;
-    for t in 0..TEAMS {
-        for l in 0..LANES {
-            lane_balance +=
-                ((lane_counts[t * LANES + l] as f64 - target_l).abs() * w8.lane_balance) as u32;
-        }
-    }
-
-    let mut lane_switch_balance: u32 = 0;
-    let target_stay: f64 = WEEKS as f64 / 2.0;
-    for t in 0..TEAMS {
-        let dev = (stay_count[t] as f64 - target_stay).abs();
-        lane_switch_balance += (dev * w8.lane_switch) as u32;
-    }
-
-    let total = matchup_balance
-        + consecutive_opponents
-        + early_late_balance
-        + early_late_alternation
-        + lane_balance
-        + lane_switch_balance;
-
-    CostBreakdown {
-        matchup_balance,
-        consecutive_opponents,
-        early_late_balance,
-        early_late_alternation,
-        lane_balance,
-        lane_switch_balance,
-        total,
-    }
-}
-
-fn perturb(a: &mut Assignment, rng: &mut SmallRng, n: usize) {
-    for _ in 0..n {
-        let w = rng.random_range(0..WEEKS);
-        let q1 = rng.random_range(0..QUADS);
-        let mut q2 = rng.random_range(0..(QUADS - 1));
-        if q2 >= q1 {
-            q2 += 1;
-        }
-        let p1 = rng.random_range(0..POS);
-        let p2 = rng.random_range(0..POS);
-        let tmp = a[w][q1][p1];
-        a[w][q1][p1] = a[w][q2][p2];
-        a[w][q2][p2] = tmp;
-    }
-}
-
-fn assignment_to_tsv(a: &Assignment) -> String {
-    let slot_names = ["Early 1", "Early 2", "Late 1", "Late 2"];
-    let mut lines = vec![String::from("Week\tSlot\tLane 1\tLane 2\tLane 3\tLane 4")];
-
-    for w in 0..WEEKS {
-        let mut slots: [[String; LANES]; 4] = Default::default();
-
-        for q in 0..QUADS {
-            let [pa, pb, pc, pd] = a[w][q];
-            let slot_base = if q < 2 { 0 } else { 2 };
-            let lane_base = (q % 2) * 2;
-
-            slots[slot_base][lane_base] = format!("{} v {}", pa + 1, pb + 1);
-            slots[slot_base][lane_base + 1] = format!("{} v {}", pc + 1, pd + 1);
-            slots[slot_base + 1][lane_base] = format!("{} v {}", pa + 1, pd + 1);
-            slots[slot_base + 1][lane_base + 1] = format!("{} v {}", pc + 1, pb + 1);
-        }
-
-        for (s, slot_row) in slots.iter().enumerate() {
-            lines.push(format!(
-                "{}\t{}\t{}\t{}\t{}\t{}",
-                w + 1,
-                slot_names[s],
-                slot_row[0],
-                slot_row[1],
-                slot_row[2],
-                slot_row[3]
-            ));
-        }
-    }
-
-    lines.join("\n")
-}
-
-fn cost_label(c: &CostBreakdown) -> String {
-    format!(
-        "total: {:>4} matchup: {:>3} consec: {:>3} el_bal: {:>3} el_alt: {:>3} lane: {:>3} switch: {:>3}",
-        c.total, c.matchup_balance, c.consecutive_opponents,
-        c.early_late_balance, c.early_late_alternation, c.lane_balance,
-        c.lane_switch_balance,
-    )
-}
-
-fn parse_tsv(content: &str) -> Option<Assignment> {
-    let mut a: Assignment = [[[0u8; POS]; QUADS]; WEEKS];
-    let lines: Vec<&str> = content.lines().collect();
-    if lines.len() < 2 { return None; }
-
-    for w in 0..WEEKS {
-        let base = 1 + w * 4;
-        if base + 3 >= lines.len() { return None; }
-
-        // Early 1 row -> quads 0 and 1, positions [pa, pb] and [pc, pd]
-        let e1: Vec<&str> = lines[base].split('\t').collect();
-        let l1: Vec<&str> = lines[base + 2].split('\t').collect();
-        if e1.len() < 6 || l1.len() < 6 { return None; }
-
-        // Parse "X v Y" into (X-1, Y-1)
-        let parse_match = |s: &str| -> Option<(u8, u8)> {
-            let parts: Vec<&str> = s.split(" v ").collect();
-            if parts.len() != 2 { return None; }
-            let a = parts[0].trim().parse::<u8>().ok()? - 1;
-            let b = parts[1].trim().parse::<u8>().ok()? - 1;
-            Some((a, b))
-        };
-
-        // Quad 0: Early, Lanes 1-2. Early 1 row: lane1 = pa v pb, lane2 = pc v pd
-        let (pa, pb) = parse_match(e1[2])?;
-        let (pc, pd) = parse_match(e1[3])?;
-        a[w][0] = [pa, pb, pc, pd];
-
-        // Quad 1: Early, Lanes 3-4. Early 1 row: lane3 = pa v pb, lane4 = pc v pd
-        let (pa, pb) = parse_match(e1[4])?;
-        let (pc, pd) = parse_match(e1[5])?;
-        a[w][1] = [pa, pb, pc, pd];
-
-        // Quad 2: Late, Lanes 1-2
-        let (pa, pb) = parse_match(l1[2])?;
-        let (pc, pd) = parse_match(l1[3])?;
-        a[w][2] = [pa, pb, pc, pd];
-
-        // Quad 3: Late, Lanes 3-4
-        let (pa, pb) = parse_match(l1[4])?;
-        let (pc, pd) = parse_match(l1[5])?;
-        a[w][3] = [pa, pb, pc, pd];
-    }
-    Some(a)
-}
-
-fn now_iso() -> String {
-    Local::now().format("%Y-%m-%dT%H:%M:%S%:z").to_string()
-}
-
-fn new_generation_dir(base: &str) -> String {
-    let ts = Local::now().format("%Y-%m-%dT%H%M%S%.3f");
-    let dir = format!("{}/gen-{}", base, ts);
-    fs::create_dir_all(&dir).expect("Failed to create generation directory");
-    dir
-}
-
-fn complete_dir(base: &str) -> String {
-    let dir = format!("{}/complete", base);
-    fs::create_dir_all(&dir).expect("Failed to create complete directory");
-    dir
-}
-
-fn save_assignment(
-    results_dir: &str,
-    prefix: &str,
-    key: u32,
-    a: &Assignment,
-    c: &CostBreakdown,
-    last_saved: &mut Option<Assignment>,
-) -> bool {
-    if last_saved.as_ref() == Some(a) {
-        return false;
-    }
-    let ts = Local::now().format("%Y-%m-%dT%H%M%S%z");
-    let filename = format!("{}/{}-{}-{}.tsv", results_dir, prefix, key, ts);
-    let tsv = assignment_to_tsv(a);
-    let _ = fs::write(&filename, &tsv);
-    eprintln!("[{}] Saved {}: {} ({})", now_iso(), prefix, filename, cost_label(c));
-    *last_saved = Some(*a);
-    true
-}
-
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let config_path = args.get(1).map(|s| s.as_str()).unwrap_or("config.toml");
@@ -376,7 +73,16 @@ fn main() {
     let config: Config = toml::from_str(&config_str)
         .unwrap_or_else(|e| panic!("Failed to parse {}: {}", config_path, e));
 
-    let w8_for_seeds = Arc::new(config.weights.clone());
+    let weights_path = std::path::Path::new(config_path)
+        .parent()
+        .unwrap_or(std::path::Path::new("."))
+        .join(&config.solver.weights_path);
+    let weights_str = fs::read_to_string(&weights_path)
+        .unwrap_or_else(|e| panic!("Failed to read {}: {}", weights_path.display(), e));
+    let loaded_weights: Weights = serde_json::from_str(&weights_str)
+        .unwrap_or_else(|e| panic!("Failed to parse {}: {}", weights_path.display(), e));
+
+    let w8_for_seeds = Arc::new(loaded_weights.clone());
     let seeds: Vec<Assignment> = args.iter().skip(2)
         .filter_map(|path| {
             let content = fs::read_to_string(path)
@@ -413,7 +119,8 @@ fn main() {
     let base_max_perturb = config.solver.max_perturb;
     let sync_ratio = config.solver.sync_ratio;
     let t0 = config.solver.t0;
-    let weights = Arc::new(config.weights);
+    let temp_floor = config.solver.temp_floor;
+    let weights = Arc::new(loaded_weights);
 
     let dummy_assignment: Assignment = [[[0u8; POS]; QUADS]; WEEKS];
     let initial_gen_dir = new_generation_dir(results_dir);
@@ -816,7 +523,7 @@ fn main() {
                             cost = evaluate(&a, &w8);
                         }
 
-                        temp = t0 * (cool_rate * (i - cool_offset) as f64).exp();
+                        temp = (t0 * (cool_rate * (i - cool_offset) as f64).exp()).max(temp_floor);
 
                         if i > 0 && i % progress_interval == 0 {
                             let label = if i >= 1_000_000_000 {

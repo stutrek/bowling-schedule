@@ -138,5 +138,5 @@ solver-wasm/target/
 solver-wasm/pkg/
 solver-native/target/
 
-# Solver results
-results/
+# Rust build artifacts (workspace-level)
+target/

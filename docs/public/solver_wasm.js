@@ -1,119 +1,5 @@
 /* @ts-self-types="./solver_wasm.d.ts" */
 
-export class CostBreakdown {
-    static __wrap(ptr) {
-        ptr = ptr >>> 0;
-        const obj = Object.create(CostBreakdown.prototype);
-        obj.__wbg_ptr = ptr;
-        CostBreakdownFinalization.register(obj, obj.__wbg_ptr, obj);
-        return obj;
-    }
-    __destroy_into_raw() {
-        const ptr = this.__wbg_ptr;
-        this.__wbg_ptr = 0;
-        CostBreakdownFinalization.unregister(this);
-        return ptr;
-    }
-    free() {
-        const ptr = this.__destroy_into_raw();
-        wasm.__wbg_costbreakdown_free(ptr, 0);
-    }
-    /**
-     * @returns {number}
-     */
-    get consecutive_opponents() {
-        const ret = wasm.__wbg_get_costbreakdown_consecutive_opponents(
-            this.__wbg_ptr,
-        );
-        return ret >>> 0;
-    }
-    /**
-     * @returns {number}
-     */
-    get early_late_alternation() {
-        const ret = wasm.__wbg_get_costbreakdown_early_late_alternation(
-            this.__wbg_ptr,
-        );
-        return ret >>> 0;
-    }
-    /**
-     * @returns {number}
-     */
-    get early_late_balance() {
-        const ret = wasm.__wbg_get_costbreakdown_early_late_balance(
-            this.__wbg_ptr,
-        );
-        return ret >>> 0;
-    }
-    /**
-     * @returns {number}
-     */
-    get lane_balance() {
-        const ret = wasm.__wbg_get_costbreakdown_lane_balance(this.__wbg_ptr);
-        return ret >>> 0;
-    }
-    /**
-     * @returns {number}
-     */
-    get matchup_balance() {
-        const ret = wasm.__wbg_get_costbreakdown_matchup_balance(
-            this.__wbg_ptr,
-        );
-        return ret >>> 0;
-    }
-    /**
-     * @returns {number}
-     */
-    get total() {
-        const ret = wasm.__wbg_get_costbreakdown_total(this.__wbg_ptr);
-        return ret >>> 0;
-    }
-    /**
-     * @param {number} arg0
-     */
-    set consecutive_opponents(arg0) {
-        wasm.__wbg_set_costbreakdown_consecutive_opponents(
-            this.__wbg_ptr,
-            arg0,
-        );
-    }
-    /**
-     * @param {number} arg0
-     */
-    set early_late_alternation(arg0) {
-        wasm.__wbg_set_costbreakdown_early_late_alternation(
-            this.__wbg_ptr,
-            arg0,
-        );
-    }
-    /**
-     * @param {number} arg0
-     */
-    set early_late_balance(arg0) {
-        wasm.__wbg_set_costbreakdown_early_late_balance(this.__wbg_ptr, arg0);
-    }
-    /**
-     * @param {number} arg0
-     */
-    set lane_balance(arg0) {
-        wasm.__wbg_set_costbreakdown_lane_balance(this.__wbg_ptr, arg0);
-    }
-    /**
-     * @param {number} arg0
-     */
-    set matchup_balance(arg0) {
-        wasm.__wbg_set_costbreakdown_matchup_balance(this.__wbg_ptr, arg0);
-    }
-    /**
-     * @param {number} arg0
-     */
-    set total(arg0) {
-        wasm.__wbg_set_costbreakdown_total(this.__wbg_ptr, arg0);
-    }
-}
-if (Symbol.dispose)
-    CostBreakdown.prototype[Symbol.dispose] = CostBreakdown.prototype.free;
-
 export class Solver {
     __destroy_into_raw() {
         const ptr = this.__wbg_ptr;
@@ -141,9 +27,16 @@ export class Solver {
     }
     /**
      * @param {number} max_iterations
+     * @param {string} weights_json
      */
-    constructor(max_iterations) {
-        const ret = wasm.solver_new(max_iterations);
+    constructor(max_iterations, weights_json) {
+        const ptr0 = passStringToWasm0(
+            weights_json,
+            wasm.__wbindgen_malloc,
+            wasm.__wbindgen_realloc,
+        );
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.solver_new(max_iterations, ptr0, len0);
         this.__wbg_ptr = ret >>> 0;
         SolverFinalization.register(this, this.__wbg_ptr, this);
         return this;
@@ -157,7 +50,6 @@ export class Solver {
         return SolverResult.__wrap(ret);
     }
     /**
-     * Run `chunk_size` iterations. Returns true when fully done.
      * @param {number} chunk_size
      * @returns {boolean}
      */
@@ -196,15 +88,173 @@ export class SolverResult {
         return v1;
     }
     /**
-     * @returns {CostBreakdown}
+     * @returns {WasmCostBreakdown}
      */
     get cost() {
         const ret = wasm.solverresult_cost(this.__wbg_ptr);
-        return CostBreakdown.__wrap(ret);
+        return WasmCostBreakdown.__wrap(ret);
     }
 }
 if (Symbol.dispose)
     SolverResult.prototype[Symbol.dispose] = SolverResult.prototype.free;
+
+export class WasmCostBreakdown {
+    static __wrap(ptr) {
+        ptr = ptr >>> 0;
+        const obj = Object.create(WasmCostBreakdown.prototype);
+        obj.__wbg_ptr = ptr;
+        WasmCostBreakdownFinalization.register(obj, obj.__wbg_ptr, obj);
+        return obj;
+    }
+    __destroy_into_raw() {
+        const ptr = this.__wbg_ptr;
+        this.__wbg_ptr = 0;
+        WasmCostBreakdownFinalization.unregister(this);
+        return ptr;
+    }
+    free() {
+        const ptr = this.__destroy_into_raw();
+        wasm.__wbg_wasmcostbreakdown_free(ptr, 0);
+    }
+    /**
+     * @returns {number}
+     */
+    get consecutive_opponents() {
+        const ret = wasm.__wbg_get_wasmcostbreakdown_consecutive_opponents(
+            this.__wbg_ptr,
+        );
+        return ret >>> 0;
+    }
+    /**
+     * @returns {number}
+     */
+    get early_late_alternation() {
+        const ret = wasm.__wbg_get_wasmcostbreakdown_early_late_alternation(
+            this.__wbg_ptr,
+        );
+        return ret >>> 0;
+    }
+    /**
+     * @returns {number}
+     */
+    get early_late_balance() {
+        const ret = wasm.__wbg_get_wasmcostbreakdown_early_late_balance(
+            this.__wbg_ptr,
+        );
+        return ret >>> 0;
+    }
+    /**
+     * @returns {number}
+     */
+    get lane_balance() {
+        const ret = wasm.__wbg_get_wasmcostbreakdown_lane_balance(
+            this.__wbg_ptr,
+        );
+        return ret >>> 0;
+    }
+    /**
+     * @returns {number}
+     */
+    get lane_switch_balance() {
+        const ret = wasm.__wbg_get_wasmcostbreakdown_lane_switch_balance(
+            this.__wbg_ptr,
+        );
+        return ret >>> 0;
+    }
+    /**
+     * @returns {number}
+     */
+    get matchup_balance() {
+        const ret = wasm.__wbg_get_wasmcostbreakdown_matchup_balance(
+            this.__wbg_ptr,
+        );
+        return ret >>> 0;
+    }
+    /**
+     * @returns {number}
+     */
+    get total() {
+        const ret = wasm.__wbg_get_wasmcostbreakdown_total(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * @param {number} arg0
+     */
+    set consecutive_opponents(arg0) {
+        wasm.__wbg_set_wasmcostbreakdown_consecutive_opponents(
+            this.__wbg_ptr,
+            arg0,
+        );
+    }
+    /**
+     * @param {number} arg0
+     */
+    set early_late_alternation(arg0) {
+        wasm.__wbg_set_wasmcostbreakdown_early_late_alternation(
+            this.__wbg_ptr,
+            arg0,
+        );
+    }
+    /**
+     * @param {number} arg0
+     */
+    set early_late_balance(arg0) {
+        wasm.__wbg_set_wasmcostbreakdown_early_late_balance(
+            this.__wbg_ptr,
+            arg0,
+        );
+    }
+    /**
+     * @param {number} arg0
+     */
+    set lane_balance(arg0) {
+        wasm.__wbg_set_wasmcostbreakdown_lane_balance(this.__wbg_ptr, arg0);
+    }
+    /**
+     * @param {number} arg0
+     */
+    set lane_switch_balance(arg0) {
+        wasm.__wbg_set_wasmcostbreakdown_lane_switch_balance(
+            this.__wbg_ptr,
+            arg0,
+        );
+    }
+    /**
+     * @param {number} arg0
+     */
+    set matchup_balance(arg0) {
+        wasm.__wbg_set_wasmcostbreakdown_matchup_balance(this.__wbg_ptr, arg0);
+    }
+    /**
+     * @param {number} arg0
+     */
+    set total(arg0) {
+        wasm.__wbg_set_wasmcostbreakdown_total(this.__wbg_ptr, arg0);
+    }
+}
+if (Symbol.dispose)
+    WasmCostBreakdown.prototype[Symbol.dispose] =
+        WasmCostBreakdown.prototype.free;
+
+/**
+ * Evaluate a flat assignment (WEEKS*QUADS*POS u8s) with given weights JSON.
+ * Returns a WasmCostBreakdown.
+ * @param {Uint8Array} flat
+ * @param {string} weights_json
+ * @returns {WasmCostBreakdown}
+ */
+export function evaluate_assignment(flat, weights_json) {
+    const ptr0 = passArray8ToWasm0(flat, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ptr1 = passStringToWasm0(
+        weights_json,
+        wasm.__wbindgen_malloc,
+        wasm.__wbindgen_realloc,
+    );
+    const len1 = WASM_VECTOR_LEN;
+    const ret = wasm.evaluate_assignment(ptr0, len0, ptr1, len1);
+    return WasmCostBreakdown.__wrap(ret);
+}
 
 function __wbg_get_imports() {
     const import0 = {
@@ -235,12 +285,6 @@ function __wbg_get_imports() {
     };
 }
 
-const CostBreakdownFinalization =
-    typeof FinalizationRegistry === 'undefined'
-        ? { register: () => {}, unregister: () => {} }
-        : new FinalizationRegistry((ptr) =>
-              wasm.__wbg_costbreakdown_free(ptr >>> 0, 1),
-          );
 const SolverFinalization =
     typeof FinalizationRegistry === 'undefined'
         ? { register: () => {}, unregister: () => {} }
@@ -252,6 +296,12 @@ const SolverResultFinalization =
         ? { register: () => {}, unregister: () => {} }
         : new FinalizationRegistry((ptr) =>
               wasm.__wbg_solverresult_free(ptr >>> 0, 1),
+          );
+const WasmCostBreakdownFinalization =
+    typeof FinalizationRegistry === 'undefined'
+        ? { register: () => {}, unregister: () => {} }
+        : new FinalizationRegistry((ptr) =>
+              wasm.__wbg_wasmcostbreakdown_free(ptr >>> 0, 1),
           );
 
 function addToExternrefTable0(obj) {
@@ -290,6 +340,52 @@ function handleError(f, args) {
     }
 }
 
+function passArray8ToWasm0(arg, malloc) {
+    const ptr = malloc(arg.length * 1, 1) >>> 0;
+    getUint8ArrayMemory0().set(arg, ptr / 1);
+    WASM_VECTOR_LEN = arg.length;
+    return ptr;
+}
+
+function passStringToWasm0(arg, malloc, realloc) {
+    if (realloc === undefined) {
+        const buf = cachedTextEncoder.encode(arg);
+        const ptr = malloc(buf.length, 1) >>> 0;
+        getUint8ArrayMemory0()
+            .subarray(ptr, ptr + buf.length)
+            .set(buf);
+        WASM_VECTOR_LEN = buf.length;
+        return ptr;
+    }
+
+    let len = arg.length;
+    let ptr = malloc(len, 1) >>> 0;
+
+    const mem = getUint8ArrayMemory0();
+
+    let offset = 0;
+
+    for (; offset < len; offset++) {
+        const code = arg.charCodeAt(offset);
+        if (code > 0x7f) break;
+        mem[ptr + offset] = code;
+    }
+    if (offset !== len) {
+        if (offset !== 0) {
+            arg = arg.slice(offset);
+        }
+        ptr = realloc(ptr, len, (len = offset + arg.length * 3), 1) >>> 0;
+        const view = getUint8ArrayMemory0().subarray(ptr + offset, ptr + len);
+        const ret = cachedTextEncoder.encodeInto(arg, view);
+
+        offset += ret.written;
+        ptr = realloc(ptr, len, offset, 1) >>> 0;
+    }
+
+    WASM_VECTOR_LEN = offset;
+    return ptr;
+}
+
 let cachedTextDecoder = new TextDecoder('utf-8', {
     ignoreBOM: true,
     fatal: true,
@@ -311,6 +407,21 @@ function decodeText(ptr, len) {
         getUint8ArrayMemory0().subarray(ptr, ptr + len),
     );
 }
+
+const cachedTextEncoder = new TextEncoder();
+
+if (!('encodeInto' in cachedTextEncoder)) {
+    cachedTextEncoder.encodeInto = function (arg, view) {
+        const buf = cachedTextEncoder.encode(arg);
+        view.set(buf);
+        return {
+            read: arg.length,
+            written: buf.length,
+        };
+    };
+}
+
+let WASM_VECTOR_LEN = 0;
 
 let wasmModule, wasm;
 function __wbg_finalize_init(instance, module) {
