@@ -219,6 +219,22 @@ export default function ControlBar() {
         }
     }
 
+    async function loadBestResult() {
+        try {
+            const basePath = window.location.pathname.replace(/\/+$/, '');
+            const res = await fetch(
+                `${basePath}/great_results/0085-c0-20260225-001838-0500.tsv`,
+            );
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            const text = await res.text();
+            if (!importTSV(text)) {
+                alert('Could not parse the saved schedule');
+            }
+        } catch (e) {
+            alert(`Failed to load schedule: ${e}`);
+        }
+    }
+
     return (
         <div className="not-prose flex items-center gap-4 flex-wrap">
             <select
@@ -256,6 +272,14 @@ export default function ControlBar() {
                     Cancel
                 </button>
             )}
+            <button
+                type="button"
+                onClick={loadBestResult}
+                disabled={generating}
+                className="px-4 py-3 rounded-lg font-medium border border-gray-300 hover:bg-gray-100 disabled:opacity-50 transition-colors text-sm"
+            >
+                Load Best
+            </button>
             <button
                 type="button"
                 onClick={pasteTSV}

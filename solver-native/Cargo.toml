@@ -15,6 +15,18 @@ path = "src/refine.rs"
 name = "construct"
 path = "src/construct.rs"
 
+[[bin]]
+name = "first-half"
+path = "src/first_half.rs"
+
+[[bin]]
+name = "complete"
+path = "src/complete.rs"
+
+[[bin]]
+name = "split-sa"
+path = "src/split_sa.rs"
+
 [dependencies]
 solver-core = { path = "../solver-core" }
 rand = { version = "0.9", features = ["small_rng"] }

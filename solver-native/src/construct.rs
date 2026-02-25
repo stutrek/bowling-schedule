@@ -788,9 +788,21 @@ fn main() {
                     let mut local_best_cost = u32::MAX;
                     let mut attempt = 0u64;
                     let mut successes = 0u64;
+                    let mut all_time_peak: usize = 0;
+                    let mut last_peak_improvement = Instant::now();
+                    const STAGNATION_SECS: u64 = 300;
 
                     loop {
                         if shutdown.load(Ordering::Relaxed) { return; }
+
+                        if last_peak_improvement.elapsed().as_secs() > STAGNATION_SECS {
+                            eprintln!(
+                                "[{}] core {} p1={} → stagnant (peak {} unchanged for {}s, {} attempts), trying new seed",
+                                now_iso(), core_id, seed, all_time_peak,
+                                last_peak_improvement.elapsed().as_secs(), attempt,
+                            );
+                            break;
+                        }
 
                         let mut state = CspState {
                             matchup_counts: [0; TEAMS * TEAMS],
@@ -807,7 +819,13 @@ fn main() {
 
                         let attempt_start = Instant::now();
 
-                        if solve_csp(&halves, &pair_futures, &mut state, 0, &mut r, &attempt_start, &status.max_week, &status.current_week) {
+                        let solved = solve_csp(&halves, &pair_futures, &mut state, 0, &mut r, &attempt_start, &status.max_week, &status.current_week);
+                        let attempt_peak = status.max_week.load(Ordering::Relaxed);
+                        if attempt_peak > all_time_peak {
+                            all_time_peak = attempt_peak;
+                            last_peak_improvement = Instant::now();
+                        }
+                        if solved {
                             let cost = evaluate(&state.assignment, &w8);
                             successes += 1;
                             status.p2_successes.store(successes, Ordering::Relaxed);
