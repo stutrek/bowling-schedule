@@ -151,7 +151,14 @@ export function analyzeSchedule(schedule: Schedule): Analysis {
         }
     }
 
-    return { matchups, laneCounts, lastGameLaneCounts, slotCounts, groups, laneSwitchCounts };
+    return {
+        matchups,
+        laneCounts,
+        lastGameLaneCounts,
+        slotCounts,
+        groups,
+        laneSwitchCounts,
+    };
 }
 
 export function computeViolations(schedule: Schedule): Violations {

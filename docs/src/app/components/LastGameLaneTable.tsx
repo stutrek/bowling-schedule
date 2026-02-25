@@ -40,7 +40,9 @@ export default function LastGameLaneTable() {
                                     <td
                                         // biome-ignore lint/suspicious/noArrayIndexKey: sequential
                                         key={j}
-                                        className={colors[count] ?? 'bg-red-300'}
+                                        className={
+                                            colors[count] ?? 'bg-red-300'
+                                        }
                                         title={`Team ${j + 1} last game on lane ${i + 1}: ${count}× (expect 3)`}
                                     >
                                         {count}

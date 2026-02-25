@@ -79,6 +79,9 @@ jobs:
         run: ${{ steps.detect-package-manager.outputs.manager }} ${{ steps.detect-package-manager.outputs.command }}
         working-directory: ./docs
 
+      - name: Copy results to docs public
+        run: ./docs/scripts/copy-results.sh
+
       - name: Build with Next.js
         run: ${{ steps.detect-package-manager.outputs.runner }} next build
         working-directory: ./docs

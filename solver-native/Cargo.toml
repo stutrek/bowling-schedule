@@ -27,6 +27,10 @@ path = "src/complete.rs"
 name = "split-sa"
 path = "src/split_sa.rs"
 
+[[bin]]
+name = "rescore"
+path = "src/rescore.rs"
+
 [dependencies]
 solver-core = { path = "../solver-core" }
 rand = { version = "0.9", features = ["small_rng"] }

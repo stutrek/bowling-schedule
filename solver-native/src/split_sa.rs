@@ -29,7 +29,7 @@ struct SolverParams {
 fn default_weights_path() -> String { "../weights.json".to_string() }
 fn default_progress_interval() -> u64 { 10_000_000 }
 
-const MAX_ITERATIONS: u64 = 3_000_000_000;
+const MAX_ITERATIONS: u64 = 6_000_000_000;
 const SPLIT_WEEK: usize = 7;
 const SWAP_INTERVAL: u64 = 100_000;
 const STATS_RECOMPUTE: u64 = 10_000;
@@ -676,7 +676,8 @@ fn run_phase(
                 loop {
                     if shutdown.load(Ordering::Relaxed) { return; }
 
-                    let mut a: Assignment = if first_run && core_id < seed_files.len() {
+                    let use_seed = first_run && core_id < seed_files.len();
+                    let mut a: Assignment = if use_seed {
                         first_run = false;
                         seed_files[core_id]
                     } else {
@@ -694,7 +695,9 @@ fn run_phase(
                         }
                     };
 
-                    randomize_unlocked(&mut a, &locked, &mut rng);
+                    if !use_seed {
+                        randomize_unlocked(&mut a, &locked, &mut rng);
+                    }
 
                     let mut cost = evaluate_masked(&a, &w8, &locked, &baseline, full_schedule_eval);
                     let mut best_a = a;

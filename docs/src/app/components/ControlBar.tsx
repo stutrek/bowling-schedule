@@ -1,6 +1,6 @@
 'use client';
 
-import { useRef } from 'react';
+import { useRef, useState, useEffect } from 'react';
 import { Schedule } from '../../../../src/Schedule';
 import { pinsetter as pinsetter1 } from '../../../../src/pinsetter1';
 import { pinsetter as pinsetter2 } from '../../../../src/pinsetter2';
@@ -56,6 +56,7 @@ export default function ControlBar() {
 
     const algorithmRef = useRef<AlgorithmId>('solver');
     const workersRef = useRef<Worker[]>([]);
+    const [resultFiles, setResultFiles] = useState<string[]>([]);
 
     function generate() {
         const algorithm = algorithmRef.current;
@@ -206,6 +207,28 @@ export default function ControlBar() {
         setSolverProgress(null);
     }
 
+    useEffect(() => {
+        const basePath = window.location.pathname.replace(/\/+$/, '');
+        fetch(`${basePath}/results/manifest.json`)
+            .then((r) => (r.ok ? r.json() : []))
+            .then((files: string[]) => setResultFiles(files))
+            .catch(() => {});
+    }, []);
+
+    async function loadResultFile(filename: string) {
+        try {
+            const basePath = window.location.pathname.replace(/\/+$/, '');
+            const res = await fetch(`${basePath}/results/${filename}`);
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            const text = await res.text();
+            if (!importTSV(text)) {
+                alert(`Could not parse ${filename}`);
+            }
+        } catch (e) {
+            alert(`Failed to load ${filename}: ${e}`);
+        }
+    }
+
     async function pasteTSV() {
         try {
             const text = await navigator.clipboard.readText();
@@ -216,22 +239,6 @@ export default function ControlBar() {
             alert(
                 'Could not read clipboard. Try pasting into the text area instead.',
             );
-        }
-    }
-
-    async function loadBestResult() {
-        try {
-            const basePath = window.location.pathname.replace(/\/+$/, '');
-            const res = await fetch(
-                `${basePath}/great_results/0085-c0-20260225-001838-0500.tsv`,
-            );
-            if (!res.ok) throw new Error(`HTTP ${res.status}`);
-            const text = await res.text();
-            if (!importTSV(text)) {
-                alert('Could not parse the saved schedule');
-            }
-        } catch (e) {
-            alert(`Failed to load schedule: ${e}`);
         }
     }
 
@@ -272,14 +279,28 @@ export default function ControlBar() {
                     Cancel
                 </button>
             )}
-            <button
-                type="button"
-                onClick={loadBestResult}
-                disabled={generating}
-                className="px-4 py-3 rounded-lg font-medium border border-gray-300 hover:bg-gray-100 disabled:opacity-50 transition-colors text-sm"
-            >
-                Load Best
-            </button>
+            {resultFiles.length > 0 && (
+                <select
+                    defaultValue=""
+                    onChange={(e) => {
+                        if (e.target.value) {
+                            loadResultFile(e.target.value);
+                            e.target.value = '';
+                        }
+                    }}
+                    className="px-3 py-3 rounded-lg border border-gray-300 bg-white text-sm"
+                    disabled={generating}
+                >
+                    <option value="" disabled>
+                        Load result...
+                    </option>
+                    {resultFiles.map((f) => (
+                        <option key={f} value={f}>
+                            {f.replace('.tsv', '')}
+                        </option>
+                    ))}
+                </select>
+            )}
             <button
                 type="button"
                 onClick={pasteTSV}
