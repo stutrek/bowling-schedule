@@ -99,6 +99,7 @@ struct MaskedCost {
     early_late_alternation: u32,
     lane_balance: u32,
     lane_switch_balance: u32,
+    late_lane_balance: u32,
     total: u32,
 }
 
@@ -111,6 +112,7 @@ fn evaluate_masked(
 ) -> MaskedCost {
     let mut matchups = *baseline_matchups;
     let mut lane_counts = [0i32; TEAMS * LANES];
+    let mut late_lane_counts = [0i32; TEAMS * LANES];
     let mut stay_count = [0i32; TEAMS];
     let mut early_count = [0i32; TEAMS];
     let mut early_late = [255u8; TEAMS * WEEKS];
@@ -139,6 +141,15 @@ fn evaluate_masked(
             lane_counts[pc as usize * LANES + lane_off + 1] += 2;
             lane_counts[pd as usize * LANES + lane_off + 1] += 1;
             lane_counts[pd as usize * LANES + lane_off] += 1;
+
+            if q >= 2 {
+                late_lane_counts[pa as usize * LANES + lane_off] += 2;
+                late_lane_counts[pb as usize * LANES + lane_off] += 1;
+                late_lane_counts[pb as usize * LANES + lane_off + 1] += 1;
+                late_lane_counts[pc as usize * LANES + lane_off + 1] += 2;
+                late_lane_counts[pd as usize * LANES + lane_off + 1] += 1;
+                late_lane_counts[pd as usize * LANES + lane_off] += 1;
+            }
 
             stay_count[pa as usize] += 1;
             stay_count[pc as usize] += 1;
@@ -218,21 +229,35 @@ fn evaluate_masked(
         lane_switch_balance += (dev * w8.lane_switch) as u32;
     }
 
+    let active_late_quad_count: f64 = (0..WEEKS).map(|w| {
+        (2..QUADS).filter(|&q| if full_schedule { true } else { !locked[w][q] }).count() as f64
+    }).sum::<f64>();
+    let late_scale = active_late_quad_count / (WEEKS * 2) as f64;
+    let late_target_l: f64 = WEEKS as f64 / LANES as f64 * late_scale;
+    let mut late_lane_balance: u32 = 0;
+    for t in 0..TEAMS {
+        for l in 0..LANES {
+            late_lane_balance +=
+                ((late_lane_counts[t * LANES + l] as f64 - late_target_l).abs() * w8.late_lane_balance) as u32;
+        }
+    }
+
     let total = matchup_balance + consecutive_opponents + early_late_balance
-        + early_late_alternation + lane_balance + lane_switch_balance;
+        + early_late_alternation + lane_balance + lane_switch_balance + late_lane_balance;
 
     MaskedCost {
         matchup_balance, consecutive_opponents, early_late_balance,
-        early_late_alternation, lane_balance, lane_switch_balance, total,
+        early_late_alternation, lane_balance, lane_switch_balance,
+        late_lane_balance, total,
     }
 }
 
 fn cost_label_masked(c: &MaskedCost) -> String {
     format!(
-        "total: {:>4} matchup: {:>3} consec: {:>3} el_bal: {:>3} el_alt: {:>3} lane: {:>3} switch: {:>3}",
+        "total: {:>4} matchup: {:>3} consec: {:>3} el_bal: {:>3} el_alt: {:>3} lane: {:>3} switch: {:>3} ll_bal: {:>3}",
         c.total, c.matchup_balance, c.consecutive_opponents,
         c.early_late_balance, c.early_late_alternation, c.lane_balance,
-        c.lane_switch_balance,
+        c.lane_switch_balance, c.late_lane_balance,
     )
 }
 

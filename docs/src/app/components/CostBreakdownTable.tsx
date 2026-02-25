@@ -37,6 +37,11 @@ export default function CostBreakdownTable() {
             value: cost.laneSwitchBalance,
             desc: 'Equal stay vs switch between games',
         },
+        {
+            label: 'Last game lane balance',
+            value: cost.lateLaneBalance,
+            desc: 'Last game of the night spread evenly across lanes',
+        },
     ];
 
     return (

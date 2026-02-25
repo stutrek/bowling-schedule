@@ -30,6 +30,7 @@ Quads are great for bowlers, but they make scheduling harder. On top of the quad
 4. **Early/late alternation** -- no team should play early (or late) three weeks in a row
 5. **Lane balance** -- each team should play on each of the 4 lanes roughly equally (6 times each)
 6. **Lane switches** -- each team should stay on their lane about half the time and switch about half the time
+7. **Last game lane balance** -- each team's 6 last games of the night should be spread evenly across the 4 lanes (1-2 times each). This prevents a team from always ending their night on a problematic lane.
 
 The relative importance of each constraint is configured in [weights.json](weights.json).
 

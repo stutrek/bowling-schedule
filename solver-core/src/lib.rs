@@ -19,6 +19,7 @@ pub struct Weights {
     pub early_late_alternation: u32,
     pub lane_balance: f64,
     pub lane_switch: f64,
+    pub late_lane_balance: f64,
 }
 
 #[derive(Clone)]
@@ -29,6 +30,7 @@ pub struct CostBreakdown {
     pub early_late_alternation: u32,
     pub lane_balance: u32,
     pub lane_switch_balance: u32,
+    pub late_lane_balance: u32,
     pub total: u32,
 }
 
@@ -53,6 +55,7 @@ pub fn evaluate(a: &Assignment, w8: &Weights) -> CostBreakdown {
     let mut matchups = [0i32; TEAMS * TEAMS];
     let mut week_matchup = [0u8; WEEKS * TEAMS * TEAMS];
     let mut lane_counts = [0i32; TEAMS * LANES];
+    let mut late_lane_counts = [0i32; TEAMS * LANES];
     let mut stay_count = [0i32; TEAMS];
     let mut early_count = [0i32; TEAMS];
     let mut early_late = [0u8; TEAMS * WEEKS];
@@ -77,6 +80,15 @@ pub fn evaluate(a: &Assignment, w8: &Weights) -> CostBreakdown {
             lane_counts[pc as usize * LANES + lane_off + 1] += 2;
             lane_counts[pd as usize * LANES + lane_off + 1] += 1;
             lane_counts[pd as usize * LANES + lane_off] += 1;
+
+            if q >= 2 {
+                late_lane_counts[pa as usize * LANES + lane_off] += 2;
+                late_lane_counts[pb as usize * LANES + lane_off] += 1;
+                late_lane_counts[pb as usize * LANES + lane_off + 1] += 1;
+                late_lane_counts[pc as usize * LANES + lane_off + 1] += 2;
+                late_lane_counts[pd as usize * LANES + lane_off + 1] += 1;
+                late_lane_counts[pd as usize * LANES + lane_off] += 1;
+            }
 
             stay_count[pa as usize] += 1;
             stay_count[pc as usize] += 1;
@@ -151,12 +163,22 @@ pub fn evaluate(a: &Assignment, w8: &Weights) -> CostBreakdown {
         lane_switch_balance += (dev * w8.lane_switch) as u32;
     }
 
+    let mut late_lane_balance: u32 = 0;
+    let late_target_l: f64 = WEEKS as f64 / LANES as f64;
+    for t in 0..TEAMS {
+        for l in 0..LANES {
+            late_lane_balance +=
+                ((late_lane_counts[t * LANES + l] as f64 - late_target_l).abs() * w8.late_lane_balance) as u32;
+        }
+    }
+
     let total = matchup_balance
         + consecutive_opponents
         + early_late_balance
         + early_late_alternation
         + lane_balance
-        + lane_switch_balance;
+        + lane_switch_balance
+        + late_lane_balance;
 
     CostBreakdown {
         matchup_balance,
@@ -165,6 +187,7 @@ pub fn evaluate(a: &Assignment, w8: &Weights) -> CostBreakdown {
         early_late_alternation,
         lane_balance,
         lane_switch_balance,
+        late_lane_balance,
         total,
     }
 }
@@ -221,10 +244,10 @@ pub fn assignment_to_tsv(a: &Assignment) -> String {
 
 pub fn cost_label(c: &CostBreakdown) -> String {
     format!(
-        "total: {:>4} matchup: {:>3} consec: {:>3} el_bal: {:>3} el_alt: {:>3} lane: {:>3} switch: {:>3}",
+        "total: {:>4} matchup: {:>3} consec: {:>3} el_bal: {:>3} el_alt: {:>3} lane: {:>3} switch: {:>3} ll_bal: {:>3}",
         c.total, c.matchup_balance, c.consecutive_opponents,
         c.early_late_balance, c.early_late_alternation, c.lane_balance,
-        c.lane_switch_balance,
+        c.lane_switch_balance, c.late_lane_balance,
     )
 }
 

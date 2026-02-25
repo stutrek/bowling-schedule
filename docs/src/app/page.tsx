@@ -6,6 +6,7 @@ import SolverProgress from './components/SolverProgress';
 import CostBreakdownTable from './components/CostBreakdownTable';
 import MatchupsTable from './components/MatchupsTable';
 import LaneCountsTable from './components/LaneCountsTable';
+import LastGameLaneTable from './components/LastGameLaneTable';
 import LaneSwitchesTable from './components/LaneSwitchesTable';
 import SlotCountsTable from './components/SlotCountsTable';
 import EarlyLateTable from './components/EarlyLateTable';
@@ -37,6 +38,7 @@ function PageContent() {
                             <CostBreakdownTable />
                             <MatchupsTable />
                             <LaneCountsTable />
+                            <LastGameLaneTable />
                             <LaneSwitchesTable />
                             <SlotCountsTable />
                             <EarlyLateTable />

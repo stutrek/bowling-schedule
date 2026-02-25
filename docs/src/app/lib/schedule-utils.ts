@@ -13,6 +13,7 @@ export const slotNames = ['Early 1', 'Early 2', 'Late 1', 'Late 2'];
 export interface Analysis {
     matchups: number[][];
     laneCounts: number[][];
+    lastGameLaneCounts: number[][];
     slotCounts: number[][];
     groups: number[][];
     laneSwitchCounts: number[];
@@ -30,6 +31,7 @@ export interface CostBreakdown {
     earlyLateAlternation: number;
     laneBalance: number;
     laneSwitchBalance: number;
+    lateLaneBalance: number;
     total: number;
 }
 
@@ -107,6 +109,9 @@ export function analyzeSchedule(schedule: Schedule): Analysis {
     const laneCounts = Array.from({ length: lanes }, () =>
         new Array(teams).fill(0),
     );
+    const lastGameLaneCounts = Array.from({ length: lanes }, () =>
+        new Array(teams).fill(0),
+    );
     const slotCounts = Array.from({ length: timeSlots }, () =>
         new Array(teams).fill(0),
     );
@@ -121,6 +126,10 @@ export function analyzeSchedule(schedule: Schedule): Analysis {
         matchups[game.teams[1]][game.teams[0]]++;
         laneCounts[game.lane][game.teams[0]]++;
         laneCounts[game.lane][game.teams[1]]++;
+        if (game.timeSlot >= 2) {
+            lastGameLaneCounts[game.lane][game.teams[0]]++;
+            lastGameLaneCounts[game.lane][game.teams[1]]++;
+        }
         slotCounts[game.timeSlot][game.teams[0]]++;
         slotCounts[game.timeSlot][game.teams[1]]++;
         const group = (game.timeSlot < 2 ? 0 : 2) + (game.lane < 2 ? 1 : 2);
@@ -142,7 +151,7 @@ export function analyzeSchedule(schedule: Schedule): Analysis {
         }
     }
 
-    return { matchups, laneCounts, slotCounts, groups, laneSwitchCounts };
+    return { matchups, laneCounts, lastGameLaneCounts, slotCounts, groups, laneSwitchCounts };
 }
 
 export function computeViolations(schedule: Schedule): Violations {

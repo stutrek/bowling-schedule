@@ -40,6 +40,7 @@ type EvaluateFn = (
     early_late_alternation: number;
     lane_balance: number;
     lane_switch_balance: number;
+    late_lane_balance: number;
     total: number;
 };
 
@@ -139,6 +140,7 @@ export function ScheduleProvider({ children }: { children: ReactNode }) {
             earlyLateAlternation: c.early_late_alternation,
             laneBalance: c.lane_balance,
             laneSwitchBalance: c.lane_switch_balance,
+            lateLaneBalance: c.late_lane_balance,
             total: c.total,
         };
     }

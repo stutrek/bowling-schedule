@@ -16,6 +16,7 @@ pub struct WasmCostBreakdown {
     pub early_late_alternation: u32,
     pub lane_balance: u32,
     pub lane_switch_balance: u32,
+    pub late_lane_balance: u32,
     pub total: u32,
 }
 
@@ -27,6 +28,7 @@ fn to_wasm_cost(c: &core::CostBreakdown) -> WasmCostBreakdown {
         early_late_alternation: c.early_late_alternation,
         lane_balance: c.lane_balance,
         lane_switch_balance: c.lane_switch_balance,
+        late_lane_balance: c.late_lane_balance,
         total: c.total,
     }
 }
@@ -48,6 +50,7 @@ impl SolverResult {
             early_late_alternation: self.cost.early_late_alternation,
             lane_balance: self.cost.lane_balance,
             lane_switch_balance: self.cost.lane_switch_balance,
+            late_lane_balance: self.cost.late_lane_balance,
             total: self.cost.total,
         }
     }

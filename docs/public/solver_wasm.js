@@ -30,11 +30,7 @@ export class Solver {
      * @param {string} weights_json
      */
     constructor(max_iterations, weights_json) {
-        const ptr0 = passStringToWasm0(
-            weights_json,
-            wasm.__wbindgen_malloc,
-            wasm.__wbindgen_realloc,
-        );
+        const ptr0 = passStringToWasm0(weights_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len0 = WASM_VECTOR_LEN;
         const ret = wasm.solver_new(max_iterations, ptr0, len0);
         this.__wbg_ptr = ret >>> 0;
@@ -95,8 +91,7 @@ export class SolverResult {
         return WasmCostBreakdown.__wrap(ret);
     }
 }
-if (Symbol.dispose)
-    SolverResult.prototype[Symbol.dispose] = SolverResult.prototype.free;
+if (Symbol.dispose) SolverResult.prototype[Symbol.dispose] = SolverResult.prototype.free;
 
 export class WasmCostBreakdown {
     static __wrap(ptr) {
@@ -120,54 +115,49 @@ export class WasmCostBreakdown {
      * @returns {number}
      */
     get consecutive_opponents() {
-        const ret = wasm.__wbg_get_wasmcostbreakdown_consecutive_opponents(
-            this.__wbg_ptr,
-        );
+        const ret = wasm.__wbg_get_wasmcostbreakdown_consecutive_opponents(this.__wbg_ptr);
         return ret >>> 0;
     }
     /**
      * @returns {number}
      */
     get early_late_alternation() {
-        const ret = wasm.__wbg_get_wasmcostbreakdown_early_late_alternation(
-            this.__wbg_ptr,
-        );
+        const ret = wasm.__wbg_get_wasmcostbreakdown_early_late_alternation(this.__wbg_ptr);
         return ret >>> 0;
     }
     /**
      * @returns {number}
      */
     get early_late_balance() {
-        const ret = wasm.__wbg_get_wasmcostbreakdown_early_late_balance(
-            this.__wbg_ptr,
-        );
+        const ret = wasm.__wbg_get_wasmcostbreakdown_early_late_balance(this.__wbg_ptr);
         return ret >>> 0;
     }
     /**
      * @returns {number}
      */
     get lane_balance() {
-        const ret = wasm.__wbg_get_wasmcostbreakdown_lane_balance(
-            this.__wbg_ptr,
-        );
+        const ret = wasm.__wbg_get_wasmcostbreakdown_lane_balance(this.__wbg_ptr);
         return ret >>> 0;
     }
     /**
      * @returns {number}
      */
     get lane_switch_balance() {
-        const ret = wasm.__wbg_get_wasmcostbreakdown_lane_switch_balance(
-            this.__wbg_ptr,
-        );
+        const ret = wasm.__wbg_get_wasmcostbreakdown_lane_switch_balance(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * @returns {number}
+     */
+    get late_lane_balance() {
+        const ret = wasm.__wbg_get_wasmcostbreakdown_late_lane_balance(this.__wbg_ptr);
         return ret >>> 0;
     }
     /**
      * @returns {number}
      */
     get matchup_balance() {
-        const ret = wasm.__wbg_get_wasmcostbreakdown_matchup_balance(
-            this.__wbg_ptr,
-        );
+        const ret = wasm.__wbg_get_wasmcostbreakdown_matchup_balance(this.__wbg_ptr);
         return ret >>> 0;
     }
     /**
@@ -181,28 +171,19 @@ export class WasmCostBreakdown {
      * @param {number} arg0
      */
     set consecutive_opponents(arg0) {
-        wasm.__wbg_set_wasmcostbreakdown_consecutive_opponents(
-            this.__wbg_ptr,
-            arg0,
-        );
+        wasm.__wbg_set_wasmcostbreakdown_consecutive_opponents(this.__wbg_ptr, arg0);
     }
     /**
      * @param {number} arg0
      */
     set early_late_alternation(arg0) {
-        wasm.__wbg_set_wasmcostbreakdown_early_late_alternation(
-            this.__wbg_ptr,
-            arg0,
-        );
+        wasm.__wbg_set_wasmcostbreakdown_early_late_alternation(this.__wbg_ptr, arg0);
     }
     /**
      * @param {number} arg0
      */
     set early_late_balance(arg0) {
-        wasm.__wbg_set_wasmcostbreakdown_early_late_balance(
-            this.__wbg_ptr,
-            arg0,
-        );
+        wasm.__wbg_set_wasmcostbreakdown_early_late_balance(this.__wbg_ptr, arg0);
     }
     /**
      * @param {number} arg0
@@ -214,10 +195,13 @@ export class WasmCostBreakdown {
      * @param {number} arg0
      */
     set lane_switch_balance(arg0) {
-        wasm.__wbg_set_wasmcostbreakdown_lane_switch_balance(
-            this.__wbg_ptr,
-            arg0,
-        );
+        wasm.__wbg_set_wasmcostbreakdown_lane_switch_balance(this.__wbg_ptr, arg0);
+    }
+    /**
+     * @param {number} arg0
+     */
+    set late_lane_balance(arg0) {
+        wasm.__wbg_set_wasmcostbreakdown_late_lane_balance(this.__wbg_ptr, arg0);
     }
     /**
      * @param {number} arg0
@@ -232,9 +216,7 @@ export class WasmCostBreakdown {
         wasm.__wbg_set_wasmcostbreakdown_total(this.__wbg_ptr, arg0);
     }
 }
-if (Symbol.dispose)
-    WasmCostBreakdown.prototype[Symbol.dispose] =
-        WasmCostBreakdown.prototype.free;
+if (Symbol.dispose) WasmCostBreakdown.prototype[Symbol.dispose] = WasmCostBreakdown.prototype.free;
 
 /**
  * Evaluate a flat assignment (WEEKS*QUADS*POS u8s) with given weights JSON.
@@ -246,11 +228,7 @@ if (Symbol.dispose)
 export function evaluate_assignment(flat, weights_json) {
     const ptr0 = passArray8ToWasm0(flat, wasm.__wbindgen_malloc);
     const len0 = WASM_VECTOR_LEN;
-    const ptr1 = passStringToWasm0(
-        weights_json,
-        wasm.__wbindgen_malloc,
-        wasm.__wbindgen_realloc,
-    );
+    const ptr1 = passStringToWasm0(weights_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len1 = WASM_VECTOR_LEN;
     const ret = wasm.evaluate_assignment(ptr0, len0, ptr1, len1);
     return WasmCostBreakdown.__wrap(ret);
@@ -259,17 +237,13 @@ export function evaluate_assignment(flat, weights_json) {
 function __wbg_get_imports() {
     const import0 = {
         __proto__: null,
-        __wbg___wbindgen_throw_df03e93053e0f4bc: function (arg0, arg1) {
+        __wbg___wbindgen_throw_df03e93053e0f4bc: function(arg0, arg1) {
             throw new Error(getStringFromWasm0(arg0, arg1));
         },
-        __wbg_getRandomValues_3f44b700395062e5: function () {
-            return handleError(function (arg0, arg1) {
-                globalThis.crypto.getRandomValues(
-                    getArrayU8FromWasm0(arg0, arg1),
-                );
-            }, arguments);
-        },
-        __wbindgen_init_externref_table: function () {
+        __wbg_getRandomValues_3f44b700395062e5: function() { return handleError(function (arg0, arg1) {
+            globalThis.crypto.getRandomValues(getArrayU8FromWasm0(arg0, arg1));
+        }, arguments); },
+        __wbindgen_init_externref_table: function() {
             const table = wasm.__wbindgen_externrefs;
             const offset = table.grow(4);
             table.set(0, undefined);
@@ -281,28 +255,19 @@ function __wbg_get_imports() {
     };
     return {
         __proto__: null,
-        './solver_wasm_bg.js': import0,
+        "./solver_wasm_bg.js": import0,
     };
 }
 
-const SolverFinalization =
-    typeof FinalizationRegistry === 'undefined'
-        ? { register: () => {}, unregister: () => {} }
-        : new FinalizationRegistry((ptr) =>
-              wasm.__wbg_solver_free(ptr >>> 0, 1),
-          );
-const SolverResultFinalization =
-    typeof FinalizationRegistry === 'undefined'
-        ? { register: () => {}, unregister: () => {} }
-        : new FinalizationRegistry((ptr) =>
-              wasm.__wbg_solverresult_free(ptr >>> 0, 1),
-          );
-const WasmCostBreakdownFinalization =
-    typeof FinalizationRegistry === 'undefined'
-        ? { register: () => {}, unregister: () => {} }
-        : new FinalizationRegistry((ptr) =>
-              wasm.__wbg_wasmcostbreakdown_free(ptr >>> 0, 1),
-          );
+const SolverFinalization = (typeof FinalizationRegistry === 'undefined')
+    ? { register: () => {}, unregister: () => {} }
+    : new FinalizationRegistry(ptr => wasm.__wbg_solver_free(ptr >>> 0, 1));
+const SolverResultFinalization = (typeof FinalizationRegistry === 'undefined')
+    ? { register: () => {}, unregister: () => {} }
+    : new FinalizationRegistry(ptr => wasm.__wbg_solverresult_free(ptr >>> 0, 1));
+const WasmCostBreakdownFinalization = (typeof FinalizationRegistry === 'undefined')
+    ? { register: () => {}, unregister: () => {} }
+    : new FinalizationRegistry(ptr => wasm.__wbg_wasmcostbreakdown_free(ptr >>> 0, 1));
 
 function addToExternrefTable0(obj) {
     const idx = wasm.__externref_table_alloc();
@@ -322,10 +287,7 @@ function getStringFromWasm0(ptr, len) {
 
 let cachedUint8ArrayMemory0 = null;
 function getUint8ArrayMemory0() {
-    if (
-        cachedUint8ArrayMemory0 === null ||
-        cachedUint8ArrayMemory0.byteLength === 0
-    ) {
+    if (cachedUint8ArrayMemory0 === null || cachedUint8ArrayMemory0.byteLength === 0) {
         cachedUint8ArrayMemory0 = new Uint8Array(wasm.memory.buffer);
     }
     return cachedUint8ArrayMemory0;
@@ -351,9 +313,7 @@ function passStringToWasm0(arg, malloc, realloc) {
     if (realloc === undefined) {
         const buf = cachedTextEncoder.encode(arg);
         const ptr = malloc(buf.length, 1) >>> 0;
-        getUint8ArrayMemory0()
-            .subarray(ptr, ptr + buf.length)
-            .set(buf);
+        getUint8ArrayMemory0().subarray(ptr, ptr + buf.length).set(buf);
         WASM_VECTOR_LEN = buf.length;
         return ptr;
     }
@@ -367,14 +327,14 @@ function passStringToWasm0(arg, malloc, realloc) {
 
     for (; offset < len; offset++) {
         const code = arg.charCodeAt(offset);
-        if (code > 0x7f) break;
+        if (code > 0x7F) break;
         mem[ptr + offset] = code;
     }
     if (offset !== len) {
         if (offset !== 0) {
             arg = arg.slice(offset);
         }
-        ptr = realloc(ptr, len, (len = offset + arg.length * 3), 1) >>> 0;
+        ptr = realloc(ptr, len, len = offset + arg.length * 3, 1) >>> 0;
         const view = getUint8ArrayMemory0().subarray(ptr + offset, ptr + len);
         const ret = cachedTextEncoder.encodeInto(arg, view);
 
@@ -386,26 +346,18 @@ function passStringToWasm0(arg, malloc, realloc) {
     return ptr;
 }
 
-let cachedTextDecoder = new TextDecoder('utf-8', {
-    ignoreBOM: true,
-    fatal: true,
-});
+let cachedTextDecoder = new TextDecoder('utf-8', { ignoreBOM: true, fatal: true });
 cachedTextDecoder.decode();
 const MAX_SAFARI_DECODE_BYTES = 2146435072;
 let numBytesDecoded = 0;
 function decodeText(ptr, len) {
     numBytesDecoded += len;
     if (numBytesDecoded >= MAX_SAFARI_DECODE_BYTES) {
-        cachedTextDecoder = new TextDecoder('utf-8', {
-            ignoreBOM: true,
-            fatal: true,
-        });
+        cachedTextDecoder = new TextDecoder('utf-8', { ignoreBOM: true, fatal: true });
         cachedTextDecoder.decode();
         numBytesDecoded = len;
     }
-    return cachedTextDecoder.decode(
-        getUint8ArrayMemory0().subarray(ptr, ptr + len),
-    );
+    return cachedTextDecoder.decode(getUint8ArrayMemory0().subarray(ptr, ptr + len));
 }
 
 const cachedTextEncoder = new TextEncoder();
@@ -416,7 +368,7 @@ if (!('encodeInto' in cachedTextEncoder)) {
         view.set(buf);
         return {
             read: arg.length,
-            written: buf.length,
+            written: buf.length
         };
     };
 }
@@ -438,20 +390,12 @@ async function __wbg_load(module, imports) {
             try {
                 return await WebAssembly.instantiateStreaming(module, imports);
             } catch (e) {
-                const validResponse =
-                    module.ok && expectedResponseType(module.type);
+                const validResponse = module.ok && expectedResponseType(module.type);
 
-                if (
-                    validResponse &&
-                    module.headers.get('Content-Type') !== 'application/wasm'
-                ) {
-                    console.warn(
-                        '`WebAssembly.instantiateStreaming` failed because your server does not serve Wasm with `application/wasm` MIME type. Falling back to `WebAssembly.instantiate` which is slower. Original error:\n',
-                        e,
-                    );
-                } else {
-                    throw e;
-                }
+                if (validResponse && module.headers.get('Content-Type') !== 'application/wasm') {
+                    console.warn("`WebAssembly.instantiateStreaming` failed because your server does not serve Wasm with `application/wasm` MIME type. Falling back to `WebAssembly.instantiate` which is slower. Original error:\n", e);
+
+                } else { throw e; }
             }
         }
 
@@ -469,10 +413,7 @@ async function __wbg_load(module, imports) {
 
     function expectedResponseType(type) {
         switch (type) {
-            case 'basic':
-            case 'cors':
-            case 'default':
-                return true;
+            case 'basic': case 'cors': case 'default': return true;
         }
         return false;
     }
@@ -481,13 +422,12 @@ async function __wbg_load(module, imports) {
 function initSync(module) {
     if (wasm !== undefined) return wasm;
 
+
     if (module !== undefined) {
         if (Object.getPrototypeOf(module) === Object.prototype) {
-            ({ module } = module);
+            ({module} = module)
         } else {
-            console.warn(
-                'using deprecated parameters for `initSync()`; pass a single object instead',
-            );
+            console.warn('using deprecated parameters for `initSync()`; pass a single object instead')
         }
     }
 
@@ -502,13 +442,12 @@ function initSync(module) {
 async function __wbg_init(module_or_path) {
     if (wasm !== undefined) return wasm;
 
+
     if (module_or_path !== undefined) {
         if (Object.getPrototypeOf(module_or_path) === Object.prototype) {
-            ({ module_or_path } = module_or_path);
+            ({module_or_path} = module_or_path)
         } else {
-            console.warn(
-                'using deprecated parameters for the initialization function; pass a single object instead',
-            );
+            console.warn('using deprecated parameters for the initialization function; pass a single object instead')
         }
     }
 
@@ -517,18 +456,11 @@ async function __wbg_init(module_or_path) {
     }
     const imports = __wbg_get_imports();
 
-    if (
-        typeof module_or_path === 'string' ||
-        (typeof Request === 'function' && module_or_path instanceof Request) ||
-        (typeof URL === 'function' && module_or_path instanceof URL)
-    ) {
+    if (typeof module_or_path === 'string' || (typeof Request === 'function' && module_or_path instanceof Request) || (typeof URL === 'function' && module_or_path instanceof URL)) {
         module_or_path = fetch(module_or_path);
     }
 
-    const { instance, module } = await __wbg_load(
-        await module_or_path,
-        imports,
-    );
+    const { instance, module } = await __wbg_load(await module_or_path, imports);
 
     return __wbg_finalize_init(instance, module);
 }
