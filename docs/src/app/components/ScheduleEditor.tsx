@@ -75,9 +75,7 @@ export default function ScheduleEditor() {
     }
 
     return (
-        <aside
-            className="w-full border-t border-gray-200 p-3 flex flex-col gap-3 bg-gray-50 lg:sticky lg:top-0 lg:h-screen lg:overflow-y-auto lg:border-t-0 lg:border-l lg:w-[480px] lg:flex-shrink-0"
-        >
+        <aside className="w-full border-t border-gray-200 p-3 flex flex-col gap-3 bg-gray-50 lg:sticky lg:top-0 lg:h-screen lg:overflow-y-auto lg:border-t-0 lg:border-l lg:w-[480px] lg:flex-shrink-0">
             <div className="flex items-center gap-2 flex-wrap">
                 <button
                     type="button"
