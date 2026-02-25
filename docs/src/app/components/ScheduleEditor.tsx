@@ -76,8 +76,7 @@ export default function ScheduleEditor() {
 
     return (
         <aside
-            className="sticky top-0 h-screen overflow-y-auto border-l border-gray-200 bg-gray-50 flex-shrink-0 p-3 flex flex-col gap-3"
-            style={{ width: '480px' }}
+            className="w-full border-t border-gray-200 p-3 flex flex-col gap-3 bg-gray-50 lg:sticky lg:top-0 lg:h-screen lg:overflow-y-auto lg:border-t-0 lg:border-l lg:w-[480px] lg:flex-shrink-0"
         >
             <div className="flex items-center gap-2 flex-wrap">
                 <button
@@ -119,7 +118,7 @@ export default function ScheduleEditor() {
                 </p>
             )}
 
-            <div className="overflow-y-auto flex-1 -mx-1 px-1">
+            <div className="overflow-y-auto max-h-[60vh] lg:max-h-none lg:flex-1 -mx-1 px-1">
                 <table className="text-xs w-full border-collapse">
                     <thead className="sticky top-0 bg-gray-50 z-10">
                         <tr>

@@ -16,9 +16,9 @@ function PageContent() {
     const hasSchedule = schedule && cost && analysis && violations;
 
     return (
-        <div className="flex min-h-screen">
+        <div className="flex flex-col lg:flex-row min-h-screen">
             <div
-                className={`flex-1 p-4 overflow-y-auto ${hasSchedule ? 'pr-2' : ''}`}
+                className={`flex-1 p-4 overflow-y-auto ${hasSchedule ? 'lg:pr-2' : ''}`}
             >
                 <div className="prose max-w-none">
                     <h1>Bowling Schedule Generator</h1>
