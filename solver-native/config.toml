@@ -1,5 +1,5 @@
 [solver]
-t0 = 30.0
+t0 = 15.0
 max_iterations = 6_000_000_000
 progress_interval = 10_000_000
 sync_interval = 30_000_000
@@ -9,4 +9,6 @@ max_perturb = 50
 sync_ratio = 0
 cores = 0
 temp_floor = 1
+stagnation_iters = 1_000_000_000
+focus_iters = 10_000_000
 weights_path = "../weights.json"

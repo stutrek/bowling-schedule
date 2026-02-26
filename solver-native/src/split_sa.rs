@@ -24,10 +24,16 @@ struct SolverParams {
     weights_path: String,
     #[serde(default)]
     cores: f64,
+    #[serde(default = "default_stagnation_iters")]
+    stagnation_iters: u64,
+    #[serde(default = "default_focus_iters")]
+    focus_iters: u64,
 }
 
 fn default_weights_path() -> String { "../weights.json".to_string() }
 fn default_progress_interval() -> u64 { 10_000_000 }
+fn default_stagnation_iters() -> u64 { 500_000_000 }
+fn default_focus_iters() -> u64 { 1_000_000_000 }
 
 const MAX_ITERATIONS: u64 = 6_000_000_000;
 const SPLIT_WEEK: usize = 7;
@@ -282,6 +288,71 @@ fn cost_label_masked(c: &MaskedCost) -> String {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// Constraint focus (single-constraint optimization for stagnation escape)
+// ═══════════════════════════════════════════════════════════════════════════
+
+fn pick_focus_constraint(cost: &MaskedCost, original: &Weights) -> (&'static str, Weights) {
+    let candidates = [
+        (cost.matchup_balance, "matchup"),
+        (cost.consecutive_opponents, "consec"),
+        (cost.early_late_balance, "el_bal"),
+        (cost.early_late_alternation, "el_alt"),
+        (cost.lane_balance, "lane"),
+        (cost.lane_switch_balance, "switch"),
+        (cost.late_lane_balance, "ll_bal"),
+        (cost.commissioner_overlap, "comm"),
+    ];
+
+    let &(_, name) = candidates.iter()
+        .filter(|(v, _)| *v > 0)
+        .max_by_key(|(v, _)| *v)
+        .unwrap_or(&(0, "matchup"));
+
+    let mut w = Weights {
+        matchup_zero: 0, matchup_triple: 0, consecutive_opponents: 0,
+        early_late_balance: 0.0, early_late_alternation: 0,
+        lane_balance: 0.0, lane_switch: 0.0, late_lane_balance: 0.0,
+        commissioner_overlap: 0,
+    };
+
+    match name {
+        "matchup" => { w.matchup_zero = original.matchup_zero; w.matchup_triple = original.matchup_triple; }
+        "consec" => { w.consecutive_opponents = original.consecutive_opponents; }
+        "el_bal" => { w.early_late_balance = original.early_late_balance; }
+        "el_alt" => { w.early_late_alternation = original.early_late_alternation; }
+        "lane" => { w.lane_balance = original.lane_balance; }
+        "switch" => { w.lane_switch = original.lane_switch; }
+        "ll_bal" => { w.late_lane_balance = original.late_lane_balance; }
+        "comm" => { w.commissioner_overlap = original.commissioner_overlap; }
+        _ => unreachable!(),
+    }
+
+    (name, w)
+}
+
+fn cost_label_with_focus(c: &MaskedCost, focus: Option<&str>) -> String {
+    let bf = |name: &str, val: u32| -> String {
+        if focus == Some(name) {
+            format!("\x1b[1m{:>3}\x1b[0m", val)
+        } else {
+            format!("{:>3}", val)
+        }
+    };
+    format!(
+        "total: {:>4} matchup: {} consec: {} el_bal: {} el_alt: {} lane: {} switch: {} ll_bal: {} comm: {}",
+        c.total,
+        bf("matchup", c.matchup_balance),
+        bf("consec", c.consecutive_opponents),
+        bf("el_bal", c.early_late_balance),
+        bf("el_alt", c.early_late_alternation),
+        bf("lane", c.lane_balance),
+        bf("switch", c.lane_switch_balance),
+        bf("ll_bal", c.late_lane_balance),
+        bf("comm", c.commissioner_overlap),
+    )
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Adaptive move selection
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -299,6 +370,7 @@ const BASE_WEIGHTS: [f64; NUM_MOVES] = [
     0.06,  // 9: guided lane
     0.07,  // 10: guided early/late
 ];
+
 
 struct MoveStats {
     attempts: [u64; NUM_MOVES],
@@ -615,6 +687,8 @@ fn run_phase(
     seed_files: &[Assignment],
     baseline_matchups: &[i32; TEAMS * TEAMS],
     full_schedule_eval: bool,
+    stagnation_iters: u64,
+    focus_iters: u64,
 ) -> Option<Assignment> {
     let idx = build_active_indices(locked);
     if idx.active_quads.is_empty() {
@@ -691,7 +765,8 @@ fn run_phase(
                 let mut rng = SmallRng::from_os_rng();
                 let mut first_run = true;
                 let mut last_saved: Option<Assignment> = None;
-                let temp = temps[core_id];
+                let base_temp = temps[core_id];
+                let cold_temp = temps[0];
 
                 loop {
                     if shutdown.load(Ordering::Relaxed) { return; }
@@ -719,10 +794,15 @@ fn run_phase(
                         randomize_unlocked(&mut a, &locked, &mut rng);
                     }
 
-                    let mut cost = evaluate_masked(&a, &w8, &locked, &baseline, full_schedule_eval);
+                    let mut active_w8 = (*w8).clone();
+                    let mut cost = evaluate_masked(&a, &active_w8, &locked, &baseline, full_schedule_eval);
                     let mut best_a = a;
                     let mut best_cost = cost.total;
                     let mut stats = MoveStats::new();
+                    let mut last_improvement: u64 = 0;
+                    let mut focus_name: Option<String> = None;
+                    let mut focus_end: u64 = 0;
+                    let mut temp = base_temp;
 
                     for i in 0..MAX_ITERATIONS {
                         if shutdown.load(Ordering::Relaxed) { break; }
@@ -731,6 +811,47 @@ fn run_phase(
                         // Recompute adaptive weights periodically
                         if i > 0 && i % STATS_RECOMPUTE == 0 {
                             stats.recompute();
+
+                            // Focus mode exit: constraint satisfied or time expired
+                            if focus_name.is_some() && (i >= focus_end || cost.total == 0) {
+                                let name = focus_name.take().unwrap();
+                                active_w8 = (*w8).clone();
+                                temp = base_temp;
+                                cost = evaluate_masked(&a, &active_w8, &locked, &baseline, full_schedule_eval);
+                                let improved = cost.total < best_cost;
+                                if improved {
+                                    best_a = a;
+                                }
+                                eprintln!(
+                                    "[{}] core {} exiting focus (\x1b[1m{}\x1b[0m) | full: {} | prev best: {} | {}",
+                                    now_iso(), core_id, name, cost.total, best_cost,
+                                    if improved { "★ improved!" } else { "reconverging..." },
+                                );
+                                best_cost = cost.total;
+                                last_improvement = i;
+                            }
+
+                            // Stagnation detection
+                            if focus_name.is_none() && i > last_improvement + stagnation_iters {
+                                let gb = global_best_assignment.lock().unwrap().unwrap_or(best_a);
+                                let full_cost = evaluate_masked(&gb, &w8, &locked, &baseline, full_schedule_eval);
+                                if full_cost.total > 0 {
+                                    let (name, fw) = pick_focus_constraint(&full_cost, &w8);
+                                    eprintln!(
+                                        "[{}] core {} focusing on \x1b[1m{}\x1b[0m (stagnant {}M iters, global={})",
+                                        now_iso(), core_id, name, (i - last_improvement) / 1_000_000, full_cost.total,
+                                    );
+                                    active_w8 = fw;
+                                    focus_name = Some(name.to_string());
+                                    focus_end = i + focus_iters;
+                                    temp = cold_temp;
+                                    a = gb;
+                                    perturb(&mut a, &mut rng, 10);
+                                    cost = evaluate_masked(&a, &active_w8, &locked, &baseline, full_schedule_eval);
+                                } else {
+                                    last_improvement = i;
+                                }
+                            }
                         }
 
                         // Exhaustive single-week inter-quad swap search (periodic)
@@ -744,7 +865,7 @@ fn run_phase(
                                     let tmp = a[ew][eq1][ep1];
                                     a[ew][eq1][ep1] = a[ew][eq2][ep2];
                                     a[ew][eq2][ep2] = tmp;
-                                    let nc = evaluate_masked(&a, &w8, &locked, &baseline, full_schedule_eval);
+                                    let nc = evaluate_masked(&a, &active_w8, &locked, &baseline, full_schedule_eval);
                                     let d = nc.total as i64 - cost.total as i64;
                                     if d < best_delta {
                                         best_delta = d;
@@ -758,8 +879,8 @@ fn run_phase(
                                 let tmp = a[ew][eq1][ep1];
                                 a[ew][eq1][ep1] = a[ew][eq2][ep2];
                                 a[ew][eq2][ep2] = tmp;
-                                cost = evaluate_masked(&a, &w8, &locked, &baseline, full_schedule_eval);
-                                if cost.total < best_cost { best_cost = cost.total; best_a = a; }
+                                cost = evaluate_masked(&a, &active_w8, &locked, &baseline, full_schedule_eval);
+                                if focus_name.is_none() && cost.total < best_cost { best_cost = cost.total; best_a = a; last_improvement = i; }
                             }
                         }
 
@@ -778,11 +899,11 @@ fn run_phase(
                                 a[w][q1][p1] = a[w][q2][p2];
                                 a[w][q2][p2] = tmp;
                             }
-                            let new_cost = evaluate_masked(&a, &w8, &locked, &baseline, full_schedule_eval);
+                            let new_cost = evaluate_masked(&a, &active_w8, &locked, &baseline, full_schedule_eval);
                             let delta = new_cost.total as i64 - cost.total as i64;
                             if delta <= 0 || rng.random::<f64>() < (-delta as f64 / temp).exp() {
                                 cost = new_cost;
-                                if cost.total < best_cost { best_cost = cost.total; best_a = a; }
+                                if focus_name.is_none() && cost.total < best_cost { best_cost = cost.total; best_a = a; last_improvement = i; }
                             } else {
                                 a = saved;
                             }
@@ -803,11 +924,11 @@ fn run_phase(
                                         let tmp = a[w][q1][p1];
                                         a[w][q1][p1] = a[w][q2][p2];
                                         a[w][q2][p2] = tmp;
-                                        let new_cost = evaluate_masked(&a, &w8, &locked, &baseline, full_schedule_eval);
+                                        let new_cost = evaluate_masked(&a, &active_w8, &locked, &baseline, full_schedule_eval);
                                         let delta = new_cost.total as i64 - cost.total as i64;
                                         if delta <= 0 || rng.random::<f64>() < (-delta as f64 / temp).exp() {
                                             cost = new_cost;
-                                            if cost.total < best_cost { best_cost = cost.total; best_a = a; }
+                                            if focus_name.is_none() && cost.total < best_cost { best_cost = cost.total; best_a = a; last_improvement = i; }
                                             accepted = true;
                                         } else {
                                             a[w][q2][p2] = a[w][q1][p1];
@@ -827,11 +948,11 @@ fn run_phase(
                                         let tmp = a[w][q][p1];
                                         a[w][q][p1] = a[w][q][p2];
                                         a[w][q][p2] = tmp;
-                                        let new_cost = evaluate_masked(&a, &w8, &locked, &baseline, full_schedule_eval);
+                                        let new_cost = evaluate_masked(&a, &active_w8, &locked, &baseline, full_schedule_eval);
                                         let delta = new_cost.total as i64 - cost.total as i64;
                                         if delta <= 0 || rng.random::<f64>() < (-delta as f64 / temp).exp() {
                                             cost = new_cost;
-                                            if cost.total < best_cost { best_cost = cost.total; best_a = a; }
+                                            if focus_name.is_none() && cost.total < best_cost { best_cost = cost.total; best_a = a; last_improvement = i; }
                                             accepted = true;
                                         } else {
                                             a[w][q][p2] = a[w][q][p1];
@@ -874,11 +995,11 @@ fn run_phase(
                                                 a[w1][qi2][pi2] = team;
                                                 a[w2][qi2][pi2] = other1;
                                                 a[w2][qi1][pi1] = team;
-                                                let new_cost = evaluate_masked(&a, &w8, &locked, &baseline, full_schedule_eval);
+                                                let new_cost = evaluate_masked(&a, &active_w8, &locked, &baseline, full_schedule_eval);
                                                 let delta = new_cost.total as i64 - cost.total as i64;
                                                 if delta <= 0 || rng.random::<f64>() < (-delta as f64 / temp).exp() {
                                                     cost = new_cost;
-                                                    if cost.total < best_cost { best_cost = cost.total; best_a = a; }
+                                                    if focus_name.is_none() && cost.total < best_cost { best_cost = cost.total; best_a = a; last_improvement = i; }
                                                     true
                                                 } else {
                                                     a[w1][qi1][pi1] = save.0;
@@ -899,11 +1020,11 @@ fn run_phase(
                                         let tmp = a[w][q1];
                                         a[w][q1] = a[w][q2];
                                         a[w][q2] = tmp;
-                                        let new_cost = evaluate_masked(&a, &w8, &locked, &baseline, full_schedule_eval);
+                                        let new_cost = evaluate_masked(&a, &active_w8, &locked, &baseline, full_schedule_eval);
                                         let delta = new_cost.total as i64 - cost.total as i64;
                                         if delta <= 0 || rng.random::<f64>() < (-delta as f64 / temp).exp() {
                                             cost = new_cost;
-                                            if cost.total < best_cost { best_cost = cost.total; best_a = a; }
+                                            if focus_name.is_none() && cost.total < best_cost { best_cost = cost.total; best_a = a; last_improvement = i; }
                                             accepted = true;
                                         } else {
                                             a[w][q2] = a[w][q1];
@@ -923,11 +1044,11 @@ fn run_phase(
                                         let tmp = a[w1];
                                         a[w1] = a[w2];
                                         a[w2] = tmp;
-                                        let new_cost = evaluate_masked(&a, &w8, &locked, &baseline, full_schedule_eval);
+                                        let new_cost = evaluate_masked(&a, &active_w8, &locked, &baseline, full_schedule_eval);
                                         let delta = new_cost.total as i64 - cost.total as i64;
                                         if delta <= 0 || rng.random::<f64>() < (-delta as f64 / temp).exp() {
                                             cost = new_cost;
-                                            if cost.total < best_cost { best_cost = cost.total; best_a = a; }
+                                            if focus_name.is_none() && cost.total < best_cost { best_cost = cost.total; best_a = a; last_improvement = i; }
                                             accepted = true;
                                         } else {
                                             a[w2] = a[w1];
@@ -944,11 +1065,11 @@ fn run_phase(
                                         let tmp0 = a[w][0]; let tmp1 = a[w][1];
                                         a[w][0] = a[w][2]; a[w][2] = tmp0;
                                         a[w][1] = a[w][3]; a[w][3] = tmp1;
-                                        let new_cost = evaluate_masked(&a, &w8, &locked, &baseline, full_schedule_eval);
+                                        let new_cost = evaluate_masked(&a, &active_w8, &locked, &baseline, full_schedule_eval);
                                         let delta = new_cost.total as i64 - cost.total as i64;
                                         if delta <= 0 || rng.random::<f64>() < (-delta as f64 / temp).exp() {
                                             cost = new_cost;
-                                            if cost.total < best_cost { best_cost = cost.total; best_a = a; }
+                                            if focus_name.is_none() && cost.total < best_cost { best_cost = cost.total; best_a = a; last_improvement = i; }
                                             accepted = true;
                                         } else {
                                             let tmp0 = a[w][0]; let tmp1 = a[w][1];
@@ -966,11 +1087,11 @@ fn run_phase(
                                         let tmp0 = a[w][0]; let tmp2 = a[w][2];
                                         a[w][0] = a[w][1]; a[w][1] = tmp0;
                                         a[w][2] = a[w][3]; a[w][3] = tmp2;
-                                        let new_cost = evaluate_masked(&a, &w8, &locked, &baseline, full_schedule_eval);
+                                        let new_cost = evaluate_masked(&a, &active_w8, &locked, &baseline, full_schedule_eval);
                                         let delta = new_cost.total as i64 - cost.total as i64;
                                         if delta <= 0 || rng.random::<f64>() < (-delta as f64 / temp).exp() {
                                             cost = new_cost;
-                                            if cost.total < best_cost { best_cost = cost.total; best_a = a; }
+                                            if focus_name.is_none() && cost.total < best_cost { best_cost = cost.total; best_a = a; last_improvement = i; }
                                             accepted = true;
                                         } else {
                                             let tmp1 = a[w][1]; let tmp3 = a[w][3];
@@ -987,11 +1108,11 @@ fn run_phase(
                                         let (w, q) = idx.active_quads[qi];
                                         a[w][q].swap(0, 1);
                                         a[w][q].swap(2, 3);
-                                        let new_cost = evaluate_masked(&a, &w8, &locked, &baseline, full_schedule_eval);
+                                        let new_cost = evaluate_masked(&a, &active_w8, &locked, &baseline, full_schedule_eval);
                                         let delta = new_cost.total as i64 - cost.total as i64;
                                         if delta <= 0 || rng.random::<f64>() < (-delta as f64 / temp).exp() {
                                             cost = new_cost;
-                                            if cost.total < best_cost { best_cost = cost.total; best_a = a; }
+                                            if focus_name.is_none() && cost.total < best_cost { best_cost = cost.total; best_a = a; last_improvement = i; }
                                             accepted = true;
                                         } else {
                                             a[w][q].swap(0, 1);
@@ -1005,11 +1126,11 @@ fn run_phase(
                                     let saved = a;
                                     let did_move = guided_matchup(&mut a, &locked, &idx.active_weeks, full_schedule_eval, &mut rng);
                                     if did_move {
-                                        let new_cost = evaluate_masked(&a, &w8, &locked, &baseline, full_schedule_eval);
+                                        let new_cost = evaluate_masked(&a, &active_w8, &locked, &baseline, full_schedule_eval);
                                         let delta = new_cost.total as i64 - cost.total as i64;
                                         if delta <= 0 || rng.random::<f64>() < (-delta as f64 / temp).exp() {
                                             cost = new_cost;
-                                            if cost.total < best_cost { best_cost = cost.total; best_a = a; }
+                                            if focus_name.is_none() && cost.total < best_cost { best_cost = cost.total; best_a = a; last_improvement = i; }
                                             accepted = true;
                                         } else {
                                             a = saved;
@@ -1022,11 +1143,11 @@ fn run_phase(
                                     let saved = a;
                                     let did_move = guided_lane(&mut a, &locked, &idx.active_quads, full_schedule_eval, scale, &mut rng);
                                     if did_move {
-                                        let new_cost = evaluate_masked(&a, &w8, &locked, &baseline, full_schedule_eval);
+                                        let new_cost = evaluate_masked(&a, &active_w8, &locked, &baseline, full_schedule_eval);
                                         let delta = new_cost.total as i64 - cost.total as i64;
                                         if delta <= 0 || rng.random::<f64>() < (-delta as f64 / temp).exp() {
                                             cost = new_cost;
-                                            if cost.total < best_cost { best_cost = cost.total; best_a = a; }
+                                            if focus_name.is_none() && cost.total < best_cost { best_cost = cost.total; best_a = a; last_improvement = i; }
                                             accepted = true;
                                         } else {
                                             a = saved;
@@ -1039,11 +1160,11 @@ fn run_phase(
                                     let saved = a;
                                     let did_move = guided_early_late(&mut a, &locked, &idx.full_weeks, full_schedule_eval, scale, &mut rng);
                                     if did_move {
-                                        let new_cost = evaluate_masked(&a, &w8, &locked, &baseline, full_schedule_eval);
+                                        let new_cost = evaluate_masked(&a, &active_w8, &locked, &baseline, full_schedule_eval);
                                         let delta = new_cost.total as i64 - cost.total as i64;
                                         if delta <= 0 || rng.random::<f64>() < (-delta as f64 / temp).exp() {
                                             cost = new_cost;
-                                            if cost.total < best_cost { best_cost = cost.total; best_a = a; }
+                                            if focus_name.is_none() && cost.total < best_cost { best_cost = cost.total; best_a = a; last_improvement = i; }
                                             accepted = true;
                                         } else {
                                             a = saved;
@@ -1061,7 +1182,12 @@ fn run_phase(
                             let (lock, cvar) = &*swap_pair;
                             let mut buf = lock.lock().unwrap();
 
-                            buf.slots[core_id] = ReplicaSlot { assignment: a, cost: cost.total, best_assignment: best_a, best_cost };
+                            let barrier_cost = if focus_name.is_some() {
+                                evaluate_masked(&a, &w8, &locked, &baseline, full_schedule_eval).total
+                            } else {
+                                cost.total
+                            };
+                            buf.slots[core_id] = ReplicaSlot { assignment: a, cost: barrier_cost, best_assignment: best_a, best_cost };
                             buf.checked_in += 1;
 
                             if buf.checked_in == num_cores {
@@ -1098,7 +1224,7 @@ fn run_phase(
 
                                 // Every 100 epochs (~10M iters/core): diversify stagnant cores
                                 if buf.epoch > 0 && buf.epoch % 100 == 0 && buf.stagnation > 50 {
-                                    let pert = 15 + buf.stagnation as usize / 10;
+                                    let pert = (15 + buf.stagnation as usize / 10).min(25);
                                     let mut resets = 0u32;
 
                                     // Dedup: compare per-core BEST assignments, perturb from global best
@@ -1148,8 +1274,8 @@ fn run_phase(
                             // Read back (possibly swapped/perturbed) assignment
                             a = buf.slots[core_id].assignment;
                             drop(buf);
-                            cost = evaluate_masked(&a, &w8, &locked, &baseline, full_schedule_eval);
-                            if cost.total < best_cost { best_cost = cost.total; best_a = a; }
+                            cost = evaluate_masked(&a, &active_w8, &locked, &baseline, full_schedule_eval);
+                            if focus_name.is_none() && cost.total < best_cost { best_cost = cost.total; best_a = a; last_improvement = i; }
 
                             if best_cost < global_best.load(Ordering::Relaxed) {
                                 let prev = global_best.fetch_min(best_cost, Ordering::Relaxed);
@@ -1185,8 +1311,13 @@ fn run_phase(
                             };
                             let best_breakdown = evaluate_masked(&best_a, &w8, &locked, &baseline, full_schedule_eval);
                             eprintln!(
-                                "[{}] core {} @ {} | best: {} | temp: {:.2}",
-                                now_iso(), core_id, label, cost_label_masked(&best_breakdown), temp,
+                                "[{}] core {} @ {} | best: {} | temp: {:.2}{}",
+                                now_iso(), core_id, label,
+                                cost_label_with_focus(&best_breakdown, focus_name.as_deref()),
+                                temp,
+                                if let Some(ref name) = focus_name {
+                                    format!(" | \x1b[1mfocus: {}\x1b[0m", name)
+                                } else { String::new() },
                             );
                         }
                     }
@@ -1294,6 +1425,8 @@ fn main() {
     let t0 = config.solver.t0;
     let temp_floor = config.solver.temp_floor;
     let progress_interval = config.solver.progress_interval;
+    let stagnation_iters = config.solver.stagnation_iters;
+    let focus_iters = config.solver.focus_iters;
 
     let shutdown = Arc::new(AtomicBool::new(false));
     {
@@ -1328,7 +1461,7 @@ fn main() {
         eprintln!("[{}] Full schedule mode: {} seeds, all weeks unlocked", now_iso(), seeds.len());
         let no_lock = [[false; QUADS]; WEEKS];
         let no_baseline = [0i32; TEAMS * TEAMS];
-        run_phase("Full", &no_lock, &weights, t0, temp_floor, progress_interval, num_cores, &shutdown, full_dir, &seeds, &no_baseline, true);
+        run_phase("Full", &no_lock, &weights, t0, temp_floor, progress_interval, num_cores, &shutdown, full_dir, &seeds, &no_baseline, true, stagnation_iters, focus_iters);
     } else if !phase2_files.is_empty() {
         eprintln!("[{}] Phase 2 mode: loading {} seed files", now_iso(), phase2_files.len());
         let seeds: Vec<Assignment> = phase2_files.iter()
@@ -1351,12 +1484,12 @@ fn main() {
 
         let p2_lock = phase2_lock();
         let no_baseline = [0i32; TEAMS * TEAMS];
-        run_phase("Phase 2", &p2_lock, &weights, t0, temp_floor, progress_interval, num_cores, &shutdown, complete_dir, &seeds, &no_baseline, true);
+        run_phase("Phase 2", &p2_lock, &weights, t0, temp_floor, progress_interval, num_cores, &shutdown, complete_dir, &seeds, &no_baseline, true, stagnation_iters, focus_iters);
     } else {
         eprintln!("[{}] Phase 1 mode: solving weeks 0-6 + half of week 7", now_iso());
         let p1_lock = phase1_lock();
         let no_baseline = [0i32; TEAMS * TEAMS];
-        run_phase("Phase 1", &p1_lock, &weights, t0, temp_floor, progress_interval, num_cores, &shutdown, phase1_dir, &[], &no_baseline, false);
+        run_phase("Phase 1", &p1_lock, &weights, t0, temp_floor, progress_interval, num_cores, &shutdown, phase1_dir, &[], &no_baseline, false, stagnation_iters, focus_iters);
     }
 
     eprintln!("[{}] Done.", now_iso());
