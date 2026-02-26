@@ -254,7 +254,7 @@ export default function ControlBar() {
                             loadResultFile(val);
                         }
                     }}
-                    className="px-3 py-3 rounded-lg border border-gray-300 bg-white text-sm"
+                    className="pl-3 pr-9 py-3 rounded-lg border border-gray-300 bg-white text-sm"
                     disabled={generating}
                 >
                     <option value="" disabled>
@@ -295,7 +295,7 @@ export default function ControlBar() {
                     onChange={(e) => {
                         algorithmRef.current = e.target.value as AlgorithmId;
                     }}
-                    className="px-3 py-3 rounded-lg border border-gray-300 bg-white text-sm"
+                    className="pl-3 pr-9 py-3 rounded-lg border border-gray-300 bg-white text-sm"
                     disabled={generating}
                 >
                     {algorithms.map((a) => (
@@ -319,7 +319,7 @@ export default function ControlBar() {
                 <select
                     value={iterations}
                     onChange={(e) => setIterations(Number(e.target.value))}
-                    className="px-3 py-3 rounded-lg border border-gray-300 bg-white text-sm"
+                    className="pl-3 pr-9 py-3 rounded-lg border border-gray-300 bg-white text-sm"
                     disabled={generating}
                 >
                     <option value={100_000_000}>100M iter</option>
