@@ -2,6 +2,8 @@ use rand::rngs::SmallRng;
 use rand::Rng;
 use serde::Deserialize;
 
+pub mod sa;
+
 pub const TEAMS: usize = 16;
 pub const LANES: usize = 4;
 pub const WEEKS: usize = 12;

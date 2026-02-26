@@ -2,6 +2,8 @@
 
 An optimized 12-week bowling schedule for 16 teams across 4 lanes (5, 6, 7, 8), built with a quad-based structure that's better for bowlers and easier for computers to optimize.
 
+**[Try the interactive web UI →](https://stutrek.github.io/bowling-schedule/)**
+
 ## The Problem and the Big Improvement
 
 The current schedule has 16 teams playing two games each week. But a team can end up on completely different lanes between their two games -- maybe lanes 5 and 7, or lanes 6 and 8. This causes real problems on bowling night.

@@ -3,7 +3,7 @@ import init, { Solver } from './solver_wasm.js';
 let cancelled = false;
 
 self.onmessage = async (e) => {
-    const { type, maxIterations, weightsJson } = e.data;
+    const { type, maxIterations, weightsJson, seedFlat } = e.data;
 
     if (type === 'cancel') {
         cancelled = true;
@@ -24,20 +24,37 @@ self.onmessage = async (e) => {
             // Already initialized
         }
 
-        const chunkSize = 20_000_000;
+        const chunkSize = 100_000;
 
         try {
-            const solver = new Solver(maxIterations, weightsJson);
+            const solver = seedFlat
+                ? Solver.new_with_seed(
+                      maxIterations,
+                      weightsJson,
+                      new Uint8Array(seedFlat),
+                  )
+                : new Solver(maxIterations, weightsJson);
+
+            let prevBest = Number.POSITIVE_INFINITY;
 
             while (true) {
                 const done = solver.step(chunkSize);
+                const currentBest = solver.best_cost_total();
+                const improved = currentBest < prevBest;
 
-                self.postMessage({
+                const msg = {
                     type: 'progress',
                     iteration: solver.current_iteration(),
                     maxIterations,
-                    bestCost: solver.best_cost_total(),
-                });
+                    bestCost: currentBest,
+                };
+
+                if (improved) {
+                    msg.bestAssignment = Array.from(solver.best_assignment());
+                    prevBest = currentBest;
+                }
+
+                self.postMessage(msg);
 
                 if (done || cancelled) break;
 
@@ -65,6 +82,7 @@ self.onmessage = async (e) => {
                 },
                 assignment: Array.from(result.assignment),
             };
+            cost.free();
             result.free();
             self.postMessage(msg);
         } catch (err) {

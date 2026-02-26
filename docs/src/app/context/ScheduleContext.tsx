@@ -106,6 +106,8 @@ export function ScheduleProvider({ children }: { children: ReactNode }) {
     const [wasmReady, setWasmReady] = useState(false);
 
     const evaluateRef = useRef<EvaluateFn | null>(null);
+    const scheduleRef = useRef<Schedule | null>(null);
+    scheduleRef.current = schedule;
 
     useEffect(() => {
         (async () => {
@@ -128,12 +130,19 @@ export function ScheduleProvider({ children }: { children: ReactNode }) {
         })();
     }, []);
 
+    useEffect(() => {
+        if (wasmReady && scheduleRef.current) {
+            const c = scoreSchedule(scheduleRef.current);
+            if (c) setCost(c);
+        }
+    }, [wasmReady]);
+
     function scoreSchedule(s: Schedule): CostBreakdown | null {
         const evaluate = evaluateRef.current;
         if (!evaluate) return null;
         const flat = scheduleToFlat(s);
         const c = evaluate(new Uint8Array(flat), weightsJson);
-        return {
+        const result = {
             matchupBalance: c.matchup_balance,
             consecutiveOpponents: c.consecutive_opponents,
             earlyLateBalance: c.early_late_balance,
@@ -143,6 +152,8 @@ export function ScheduleProvider({ children }: { children: ReactNode }) {
             lateLaneBalance: c.late_lane_balance,
             total: c.total,
         };
+        c.free();
+        return result;
     }
 
     function updateAll(s: Schedule) {

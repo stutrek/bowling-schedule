@@ -27,7 +27,14 @@ function PageContent() {
                         Generates an optimized 12-week schedule for 16 teams
                         across 4 lanes. Teams stay on their lane pair (1-2 or
                         3-4), play every other team, and alternate early/late as
-                        much as possible.
+                        much as possible.{' '}
+                        <a
+                            href="https://github.com/stutrek/bowling-schedule"
+                            target="_blank"
+                            rel="noopener noreferrer"
+                        >
+                            View on GitHub
+                        </a>
                     </p>
 
                     <ControlBar />

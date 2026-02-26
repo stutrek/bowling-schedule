@@ -3,48 +3,26 @@
 import { useRef, useState, useEffect } from 'react';
 import { Schedule } from '../../../../src/Schedule';
 import { pinsetter as pinsetter1 } from '../../../../src/pinsetter1';
-import { pinsetter as pinsetter2 } from '../../../../src/pinsetter2';
-import { pinsetter as pinsetter3 } from '../../../../src/pinsetter3';
-import { pinsetter as pinsetter4 } from '../../../../src/pinsetter4';
-import { pinsetter as pinsetter5 } from '../../../../src/pinsetter5';
-import { pinsetter as pinsetter6 } from '../../../../src/pinsetter6';
 import {
     useSchedule,
     type SolverProgress,
     type WorkerProgress,
 } from '../context/ScheduleContext';
-import { config } from '../lib/schedule-utils';
+import { config, scheduleToFlat, scheduleToTSV } from '../lib/schedule-utils';
 
-type AlgorithmId =
-    | 'solver'
-    | 'pinsetter1'
-    | 'pinsetter2'
-    | 'pinsetter3'
-    | 'pinsetter4'
-    | 'pinsetter5'
-    | 'pinsetter6';
+type AlgorithmId = 'solver' | 'pinsetter1';
 
 const algorithms: { id: AlgorithmId; label: string }[] = [
     { id: 'solver', label: 'SA Solver' },
-    { id: 'pinsetter1', label: 'Pinsetter 1 — highs vs lows' },
-    { id: 'pinsetter2', label: 'Pinsetter 2 — rotations' },
-    { id: 'pinsetter3', label: 'Pinsetter 3 — mixed transforms' },
-    { id: 'pinsetter4', label: 'Pinsetter 4 — remaps' },
-    { id: 'pinsetter5', label: 'Pinsetter 5 — reverseTwos' },
-    { id: 'pinsetter6', label: 'Pinsetter 6 — rotate pairs' },
 ];
 
 const pinsetterFns: Record<string, (s: Schedule) => Schedule> = {
     pinsetter1,
-    pinsetter2,
-    pinsetter3,
-    pinsetter4,
-    pinsetter5,
-    pinsetter6,
 };
 
 export default function ControlBar() {
     const {
+        schedule,
         generating,
         setGenerating,
         setSolverProgress,
@@ -57,6 +35,8 @@ export default function ControlBar() {
     const algorithmRef = useRef<AlgorithmId>('solver');
     const workersRef = useRef<Worker[]>([]);
     const [resultFiles, setResultFiles] = useState<string[]>([]);
+    const [useSeed, setUseSeed] = useState(false);
+    const [iterations, setIterations] = useState(200_000_000);
 
     function generate() {
         const algorithm = algorithmRef.current;
@@ -68,7 +48,7 @@ export default function ControlBar() {
             workersRef.current = [];
 
             const numWorkers = navigator.hardwareConcurrency || 4;
-            const iterationsPerWorker = 600_000_000;
+            const iterationsPerWorker = iterations;
             const basePath =
                 typeof window !== 'undefined'
                     ? window.location.pathname.replace(/\/+$/, '')
@@ -119,6 +99,14 @@ export default function ControlBar() {
                             bestCost: msg.bestCost,
                             done: false,
                         };
+                        if (msg.bestAssignment && msg.bestCost < bestCost) {
+                            bestCost = msg.bestCost;
+                            bestResult = {
+                                cost: msg.cost,
+                                assignment: msg.bestAssignment,
+                            };
+                            setScheduleFromAssignment(msg.bestAssignment);
+                        }
                         const globalBest = Math.min(
                             ...workerStates.map((w) => w.bestCost),
                         );
@@ -180,10 +168,13 @@ export default function ControlBar() {
                     }
                 };
 
+                const seedFlat =
+                    useSeed && schedule ? scheduleToFlat(schedule) : null;
                 worker.postMessage({
                     type: 'solve',
                     maxIterations: iterationsPerWorker,
                     weightsJson,
+                    seedFlat,
                 });
             }
         } else {
@@ -211,7 +202,12 @@ export default function ControlBar() {
         const basePath = window.location.pathname.replace(/\/+$/, '');
         fetch(`${basePath}/results/manifest.json`)
             .then((r) => (r.ok ? r.json() : []))
-            .then((files: string[]) => setResultFiles(files))
+            .then((files: string[]) => {
+                setResultFiles(files);
+                if (files.length > 0) {
+                    loadResultFile(files[0]);
+                }
+            })
             .catch(() => {});
     }, []);
 
@@ -243,72 +239,117 @@ export default function ControlBar() {
     }
 
     return (
-        <div className="not-prose flex items-center gap-4 flex-wrap">
-            <select
-                defaultValue="solver"
-                onChange={(e) => {
-                    algorithmRef.current = e.target.value as AlgorithmId;
-                }}
-                className="px-3 py-3 rounded-lg border border-gray-300 bg-white text-sm"
-                disabled={generating}
-            >
-                {algorithms.map((a) => (
-                    <option key={a.id} value={a.id}>
-                        {a.label}
-                    </option>
-                ))}
-            </select>
-            <button
-                type="button"
-                onClick={generate}
-                disabled={generating}
-                className="px-6 py-3 rounded-lg font-semibold text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:cursor-wait transition-colors"
-            >
-                {generating
-                    ? algorithmRef.current === 'solver'
-                        ? 'Solving (WASM)...'
-                        : 'Generating...'
-                    : 'Generate'}
-            </button>
-            {generating && algorithmRef.current === 'solver' && (
-                <button
-                    type="button"
-                    onClick={cancelSolve}
-                    className="px-4 py-3 rounded-lg font-semibold text-white bg-red-500 hover:bg-red-600 transition-colors"
-                >
-                    Cancel
-                </button>
-            )}
-            {resultFiles.length > 0 && (
+        <div className="not-prose flex flex-col gap-3">
+            <div className="flex items-center gap-4 flex-wrap">
                 <select
                     defaultValue=""
                     onChange={(e) => {
-                        if (e.target.value) {
-                            loadResultFile(e.target.value);
-                            e.target.value = '';
+                        const val = e.target.value;
+                        if (val === '__pinsetter1') {
+                            const s = new Schedule(config);
+                            s.createSchedule();
+                            pinsetter1(s);
+                            setScheduleFromPinsetter(s);
+                        } else if (val) {
+                            loadResultFile(val);
                         }
                     }}
                     className="px-3 py-3 rounded-lg border border-gray-300 bg-white text-sm"
                     disabled={generating}
                 >
                     <option value="" disabled>
-                        Load result...
+                        Load a schedule...
                     </option>
                     {resultFiles.map((f) => (
                         <option key={f} value={f}>
                             {f.replace('.tsv', '')}
                         </option>
                     ))}
+                    <option value="__pinsetter1">Manual attempt</option>
                 </select>
-            )}
-            <button
-                type="button"
-                onClick={pasteTSV}
-                disabled={generating}
-                className="px-4 py-3 rounded-lg font-medium border border-gray-300 hover:bg-gray-100 disabled:opacity-50 transition-colors text-sm"
-            >
-                Paste TSV
-            </button>
+                <button
+                    type="button"
+                    onClick={pasteTSV}
+                    disabled={generating}
+                    className="px-4 py-3 rounded-lg font-medium border border-gray-300 hover:bg-gray-100 disabled:opacity-50 transition-colors text-sm"
+                >
+                    Paste TSV
+                </button>
+                {schedule && (
+                    <button
+                        type="button"
+                        onClick={() => {
+                            navigator.clipboard.writeText(
+                                scheduleToTSV(schedule),
+                            );
+                        }}
+                        className="px-4 py-3 rounded-lg font-medium border border-gray-300 hover:bg-gray-100 transition-colors text-sm"
+                    >
+                        Copy TSV
+                    </button>
+                )}
+            </div>
+            <div className="flex items-center gap-4 flex-wrap">
+                <select
+                    defaultValue="solver"
+                    onChange={(e) => {
+                        algorithmRef.current = e.target.value as AlgorithmId;
+                    }}
+                    className="px-3 py-3 rounded-lg border border-gray-300 bg-white text-sm"
+                    disabled={generating}
+                >
+                    {algorithms.map((a) => (
+                        <option key={a.id} value={a.id}>
+                            {a.label}
+                        </option>
+                    ))}
+                </select>
+                <button
+                    type="button"
+                    onClick={generate}
+                    disabled={generating}
+                    className="px-6 py-3 rounded-lg font-semibold text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:cursor-wait transition-colors"
+                >
+                    {generating
+                        ? algorithmRef.current === 'solver'
+                            ? 'Solving (WASM)...'
+                            : 'Generating...'
+                        : 'Generate new schedule'}
+                </button>
+                <select
+                    value={iterations}
+                    onChange={(e) => setIterations(Number(e.target.value))}
+                    className="px-3 py-3 rounded-lg border border-gray-300 bg-white text-sm"
+                    disabled={generating}
+                >
+                    <option value={100_000_000}>100M iter</option>
+                    <option value={200_000_000}>200M iter</option>
+                    <option value={400_000_000}>400M iter</option>
+                    <option value={600_000_000}>600M iter</option>
+                    <option value={1_000_000_000}>1B iter</option>
+                </select>
+                {schedule && (
+                    <label className="flex items-center gap-1.5 text-sm cursor-pointer select-none">
+                        <input
+                            type="checkbox"
+                            checked={useSeed}
+                            onChange={(e) => setUseSeed(e.target.checked)}
+                            disabled={generating}
+                            className="w-4 h-4"
+                        />
+                        Seed from current
+                    </label>
+                )}
+                {generating && algorithmRef.current === 'solver' && (
+                    <button
+                        type="button"
+                        onClick={cancelSolve}
+                        className="px-4 py-3 rounded-lg font-semibold text-white bg-red-500 hover:bg-red-600 transition-colors"
+                    >
+                        Cancel
+                    </button>
+                )}
+            </div>
         </div>
     );
 }

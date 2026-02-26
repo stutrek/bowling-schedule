@@ -1,6 +1,13 @@
 /* @ts-self-types="./solver_wasm.d.ts" */
 
 export class Solver {
+    static __wrap(ptr) {
+        ptr = ptr >>> 0;
+        const obj = Object.create(Solver.prototype);
+        obj.__wbg_ptr = ptr;
+        SolverFinalization.register(obj, obj.__wbg_ptr, obj);
+        return obj;
+    }
     __destroy_into_raw() {
         const ptr = this.__wbg_ptr;
         this.__wbg_ptr = 0;
@@ -10,6 +17,15 @@ export class Solver {
     free() {
         const ptr = this.__destroy_into_raw();
         wasm.__wbg_solver_free(ptr, 0);
+    }
+    /**
+     * @returns {Uint8Array}
+     */
+    best_assignment() {
+        const ret = wasm.solver_best_assignment(this.__wbg_ptr);
+        var v1 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+        return v1;
     }
     /**
      * @returns {number}
@@ -36,6 +52,20 @@ export class Solver {
         this.__wbg_ptr = ret >>> 0;
         SolverFinalization.register(this, this.__wbg_ptr, this);
         return this;
+    }
+    /**
+     * @param {number} max_iterations
+     * @param {string} weights_json
+     * @param {Uint8Array} seed_flat
+     * @returns {Solver}
+     */
+    static new_with_seed(max_iterations, weights_json, seed_flat) {
+        const ptr0 = passStringToWasm0(weights_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passArray8ToWasm0(seed_flat, wasm.__wbindgen_malloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ret = wasm.solver_new_with_seed(max_iterations, ptr0, len0, ptr1, len1);
+        return Solver.__wrap(ret);
     }
     /**
      * @returns {SolverResult}
@@ -219,8 +249,6 @@ export class WasmCostBreakdown {
 if (Symbol.dispose) WasmCostBreakdown.prototype[Symbol.dispose] = WasmCostBreakdown.prototype.free;
 
 /**
- * Evaluate a flat assignment (WEEKS*QUADS*POS u8s) with given weights JSON.
- * Returns a WasmCostBreakdown.
  * @param {Uint8Array} flat
  * @param {string} weights_json
  * @returns {WasmCostBreakdown}
