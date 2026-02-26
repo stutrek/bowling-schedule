@@ -144,6 +144,13 @@ export class WasmCostBreakdown {
     /**
      * @returns {number}
      */
+    get commissioner_overlap() {
+        const ret = wasm.__wbg_get_wasmcostbreakdown_commissioner_overlap(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * @returns {number}
+     */
     get consecutive_opponents() {
         const ret = wasm.__wbg_get_wasmcostbreakdown_consecutive_opponents(this.__wbg_ptr);
         return ret >>> 0;
@@ -196,6 +203,12 @@ export class WasmCostBreakdown {
     get total() {
         const ret = wasm.__wbg_get_wasmcostbreakdown_total(this.__wbg_ptr);
         return ret >>> 0;
+    }
+    /**
+     * @param {number} arg0
+     */
+    set commissioner_overlap(arg0) {
+        wasm.__wbg_set_wasmcostbreakdown_commissioner_overlap(this.__wbg_ptr, arg0);
     }
     /**
      * @param {number} arg0

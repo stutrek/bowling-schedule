@@ -22,6 +22,7 @@ pub struct Weights {
     pub lane_balance: f64,
     pub lane_switch: f64,
     pub late_lane_balance: f64,
+    pub commissioner_overlap: u32,
 }
 
 #[derive(Clone)]
@@ -33,6 +34,7 @@ pub struct CostBreakdown {
     pub lane_balance: u32,
     pub lane_switch_balance: u32,
     pub late_lane_balance: u32,
+    pub commissioner_overlap: u32,
     pub total: u32,
 }
 
@@ -174,13 +176,30 @@ pub fn evaluate(a: &Assignment, w8: &Weights) -> CostBreakdown {
         }
     }
 
+    let mut min_overlap = WEEKS as u32;
+    for i in 0..TEAMS {
+        for j in (i + 1)..TEAMS {
+            let mut overlap = 0u32;
+            for w in 0..WEEKS {
+                if early_late[i * WEEKS + w] == early_late[j * WEEKS + w] {
+                    overlap += 1;
+                }
+            }
+            if overlap < min_overlap {
+                min_overlap = overlap;
+            }
+        }
+    }
+    let commissioner_overlap = w8.commissioner_overlap * min_overlap.saturating_sub(1);
+
     let total = matchup_balance
         + consecutive_opponents
         + early_late_balance
         + early_late_alternation
         + lane_balance
         + lane_switch_balance
-        + late_lane_balance;
+        + late_lane_balance
+        + commissioner_overlap;
 
     CostBreakdown {
         matchup_balance,
@@ -190,6 +209,7 @@ pub fn evaluate(a: &Assignment, w8: &Weights) -> CostBreakdown {
         lane_balance,
         lane_switch_balance,
         late_lane_balance,
+        commissioner_overlap,
         total,
     }
 }
@@ -246,10 +266,10 @@ pub fn assignment_to_tsv(a: &Assignment) -> String {
 
 pub fn cost_label(c: &CostBreakdown) -> String {
     format!(
-        "total: {:>4} matchup: {:>3} consec: {:>3} el_bal: {:>3} el_alt: {:>3} lane: {:>3} switch: {:>3} ll_bal: {:>3}",
+        "total: {:>4} matchup: {:>3} consec: {:>3} el_bal: {:>3} el_alt: {:>3} lane: {:>3} switch: {:>3} ll_bal: {:>3} comm: {:>3}",
         c.total, c.matchup_balance, c.consecutive_opponents,
         c.early_late_balance, c.early_late_alternation, c.lane_balance,
-        c.lane_switch_balance, c.late_lane_balance,
+        c.lane_switch_balance, c.late_lane_balance, c.commissioner_overlap,
     )
 }
 
@@ -291,6 +311,57 @@ pub fn parse_tsv(content: &str) -> Option<Assignment> {
         a[w][3] = [pa, pb, pc, pd];
     }
     Some(a)
+}
+
+pub fn reassign_commissioners(a: &mut Assignment) {
+    let mut early_late = [0u8; TEAMS * WEEKS];
+    for w in 0..WEEKS {
+        for q in 0..QUADS {
+            let early: u8 = if q < 2 { 1 } else { 0 };
+            for &t in &a[w][q] {
+                early_late[t as usize * WEEKS + w] = early;
+            }
+        }
+    }
+
+    let mut best_i = 0usize;
+    let mut best_j = 1usize;
+    let mut min_overlap = WEEKS as u32;
+    for i in 0..TEAMS {
+        for j in (i + 1)..TEAMS {
+            let mut overlap = 0u32;
+            for w in 0..WEEKS {
+                if early_late[i * WEEKS + w] == early_late[j * WEEKS + w] {
+                    overlap += 1;
+                }
+            }
+            if overlap < min_overlap {
+                min_overlap = overlap;
+                best_i = i;
+                best_j = j;
+            }
+        }
+    }
+
+    if best_i == 0 && best_j == 1 {
+        return;
+    }
+
+    let mut perm: [u8; TEAMS] = std::array::from_fn(|i| i as u8);
+    perm.swap(0, best_i);
+    perm.swap(1, best_j);
+    let mut inv = [0u8; TEAMS];
+    for (i, &p) in perm.iter().enumerate() {
+        inv[p as usize] = i as u8;
+    }
+
+    for w in 0..WEEKS {
+        for q in 0..QUADS {
+            for p in 0..POS {
+                a[w][q][p] = inv[a[w][q][p] as usize];
+            }
+        }
+    }
 }
 
 pub fn flat_to_assignment(flat: &[u8]) -> Assignment {

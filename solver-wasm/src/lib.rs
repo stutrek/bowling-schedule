@@ -16,6 +16,7 @@ pub struct WasmCostBreakdown {
     pub lane_balance: u32,
     pub lane_switch_balance: u32,
     pub late_lane_balance: u32,
+    pub commissioner_overlap: u32,
     pub total: u32,
 }
 
@@ -28,6 +29,7 @@ fn to_wasm_cost(c: &core::CostBreakdown) -> WasmCostBreakdown {
         lane_balance: c.lane_balance,
         lane_switch_balance: c.lane_switch_balance,
         late_lane_balance: c.late_lane_balance,
+        commissioner_overlap: c.commissioner_overlap,
         total: c.total,
     }
 }
@@ -50,6 +52,7 @@ impl SolverResult {
             lane_balance: self.cost.lane_balance,
             lane_switch_balance: self.cost.lane_switch_balance,
             late_lane_balance: self.cost.late_lane_balance,
+            commissioner_overlap: self.cost.commissioner_overlap,
             total: self.cost.total,
         }
     }
@@ -160,12 +163,16 @@ impl Solver {
     }
 
     pub fn best_assignment(&self) -> Vec<u8> {
-        core::assignment_to_flat(&self.inner.best_a)
+        let mut a = self.inner.best_a;
+        core::reassign_commissioners(&mut a);
+        core::assignment_to_flat(&a)
     }
 
     pub fn result(self) -> SolverResult {
-        let final_cost = core::evaluate(&self.inner.best_a, &self.weights);
-        let flat = core::assignment_to_flat(&self.inner.best_a);
+        let mut a = self.inner.best_a;
+        core::reassign_commissioners(&mut a);
+        let final_cost = core::evaluate(&a, &self.weights);
+        let flat = core::assignment_to_flat(&a);
         SolverResult {
             cost: to_wasm_cost(&final_cost),
             assignment: flat,

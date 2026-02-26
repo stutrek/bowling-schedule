@@ -42,6 +42,11 @@ export default function CostBreakdownTable() {
             value: cost.lateLaneBalance,
             desc: 'Last game of the night spread evenly across lanes',
         },
+        {
+            label: 'Commissioner overlap',
+            value: cost.commissionerOverlap,
+            desc: 'A pair of teams on opposite halves except when playing each other',
+        },
     ];
 
     return (

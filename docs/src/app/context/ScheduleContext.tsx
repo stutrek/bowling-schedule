@@ -41,6 +41,7 @@ type EvaluateFn = (
     lane_balance: number;
     lane_switch_balance: number;
     late_lane_balance: number;
+    commissioner_overlap: number;
     total: number;
     free: () => void;
 };
@@ -151,6 +152,7 @@ export function ScheduleProvider({ children }: { children: ReactNode }) {
             laneBalance: c.lane_balance,
             laneSwitchBalance: c.lane_switch_balance,
             lateLaneBalance: c.late_lane_balance,
+            commissionerOverlap: c.commissioner_overlap,
             total: c.total,
         };
         c.free();

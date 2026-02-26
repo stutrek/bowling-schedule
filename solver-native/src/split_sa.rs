@@ -100,6 +100,7 @@ struct MaskedCost {
     lane_balance: u32,
     lane_switch_balance: u32,
     late_lane_balance: u32,
+    commissioner_overlap: u32,
     total: u32,
 }
 
@@ -242,22 +243,41 @@ fn evaluate_masked(
         }
     }
 
+    let mut min_overlap = WEEKS as u32;
+    for i in 0..TEAMS {
+        for j in (i + 1)..TEAMS {
+            let mut overlap = 0u32;
+            for w in 0..WEEKS {
+                let vi = early_late[i * WEEKS + w];
+                let vj = early_late[j * WEEKS + w];
+                if vi != 255 && vj != 255 && vi == vj {
+                    overlap += 1;
+                }
+            }
+            if overlap < min_overlap {
+                min_overlap = overlap;
+            }
+        }
+    }
+    let commissioner_overlap = w8.commissioner_overlap * min_overlap.saturating_sub(1);
+
     let total = matchup_balance + consecutive_opponents + early_late_balance
-        + early_late_alternation + lane_balance + lane_switch_balance + late_lane_balance;
+        + early_late_alternation + lane_balance + lane_switch_balance + late_lane_balance
+        + commissioner_overlap;
 
     MaskedCost {
         matchup_balance, consecutive_opponents, early_late_balance,
         early_late_alternation, lane_balance, lane_switch_balance,
-        late_lane_balance, total,
+        late_lane_balance, commissioner_overlap, total,
     }
 }
 
 fn cost_label_masked(c: &MaskedCost) -> String {
     format!(
-        "total: {:>4} matchup: {:>3} consec: {:>3} el_bal: {:>3} el_alt: {:>3} lane: {:>3} switch: {:>3} ll_bal: {:>3}",
+        "total: {:>4} matchup: {:>3} consec: {:>3} el_bal: {:>3} el_alt: {:>3} lane: {:>3} switch: {:>3} ll_bal: {:>3} comm: {:>3}",
         c.total, c.matchup_balance, c.consecutive_opponents,
         c.early_late_balance, c.early_late_alternation, c.lane_balance,
-        c.lane_switch_balance, c.late_lane_balance,
+        c.lane_switch_balance, c.late_lane_balance, c.commissioner_overlap,
     )
 }
 
@@ -1147,7 +1167,9 @@ fn run_phase(
                                         let filename = format!(
                                             "{}/{:04}-c{}-{}.tsv", results_dir, best_cost, core_id, ts,
                                         );
-                                        let _ = fs::write(&filename, assignment_to_tsv(&best_a));
+                                        let mut out = best_a;
+                                        reassign_commissioners(&mut out);
+                                        let _ = fs::write(&filename, assignment_to_tsv(&out));
                                         eprintln!("[{}] Saved {}", now_iso(), filename);
                                         last_saved = Some(best_a);
                                     }
@@ -1184,7 +1206,9 @@ fn run_phase(
                             "{}/{:04}-c{}-{}.tsv", results_dir, best_cost, core_id, ts,
                         );
                         if last_saved.as_ref() != Some(&best_a) {
-                            let _ = fs::write(&filename, assignment_to_tsv(&best_a));
+                            let mut out = best_a;
+                            reassign_commissioners(&mut out);
+                            let _ = fs::write(&filename, assignment_to_tsv(&out));
                             eprintln!("[{}] Saved {}", now_iso(), filename);
                             last_saved = Some(best_a);
                         }

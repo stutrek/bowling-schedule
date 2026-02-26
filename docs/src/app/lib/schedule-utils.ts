@@ -32,6 +32,7 @@ export interface CostBreakdown {
     laneBalance: number;
     laneSwitchBalance: number;
     lateLaneBalance: number;
+    commissionerOverlap: number;
     total: number;
 }
 
