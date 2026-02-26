@@ -45,7 +45,7 @@ export default function CostBreakdownTable() {
         {
             label: 'Commissioner overlap',
             value: cost.commissionerOverlap,
-            desc: 'A pair of teams on opposite halves except when playing each other',
+            desc: 'The teams with the fewest early/late overlaps per week. Always teams 1 and 2',
         },
     ];
 
