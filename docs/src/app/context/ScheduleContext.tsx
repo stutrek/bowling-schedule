@@ -42,6 +42,7 @@ type EvaluateFn = (
     lane_switch_balance: number;
     late_lane_balance: number;
     total: number;
+    free: () => void;
 };
 
 interface ScheduleContextValue {
