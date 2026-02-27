@@ -33,6 +33,7 @@ Quads are great for bowlers, but they make scheduling harder. On top of the quad
 5. **Lane balance** -- each team should play on each of the 4 lanes roughly equally (6 times each)
 6. **Lane switches** -- each team should stay on their lane about half the time and switch about half the time
 7. **Last game lane balance** -- each team's 6 last games of the night should be spread evenly across the 4 lanes (1-2 times each). This prevents a team from always ending their night on a problematic lane.
+8. **Commissioner switch** -- there are two commissioners in the league. If both have early games the same week (or both late), one person has to cover double duty. The schedule minimizes the number of weeks the commissioners share the same time slot.
 
 The relative importance of each constraint is configured in [weights.json](weights.json).
 
@@ -139,6 +140,23 @@ Constructed a perfect early/late assignment matrix, then tried to optimize match
 Tried building the schedule by placing teams one at a time, backtracking when constraints were violated -- like solving a Sudoku (`construct.rs`, `first_half.rs`). Could find partial solutions but didn't scale to the full 12-week schedule with all six soft constraints.
 
 ## Running It
+
+The GPU solver is the recommended way to run. It uses your GPU for massively parallel chain exploration while also running CPU workers alongside it. Chain count automatically adapts to your GPU's buffer size, and CPU workers use all available cores minus two (reserved for the GPU and OS).
+
+```bash
+# Run the GPU solver (auto-detects GPU size and CPU cores)
+cargo run --release --bin gpu-solver
+
+# Run without CPU workers (GPU only)
+cargo run --release --bin gpu-solver -- --no-cpu
+
+# Run without seeding from previous results
+cargo run --release --bin gpu-solver -- --no-seed
+```
+
+Results are saved to `solver-native/results/gpu/`.
+
+The CPU-only solver is also available:
 
 ```bash
 # Solve the full schedule using all available cores

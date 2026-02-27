@@ -9,7 +9,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use wgpu::util::DeviceExt;
 
-const CHAIN_COUNT: u32 = 32768;
+const DEFAULT_CHAIN_COUNT: u32 = 32768;
+const MIN_CHAIN_COUNT: u32 = 4096;
+const MAX_CHAIN_COUNT: u32 = 131072;
 const ITERS_PER_DISPATCH: u32 = 1000;
 const ASSIGN_U32S: usize = 48;
 const SYNC_INTERVAL: u64 = 10;
@@ -96,6 +98,28 @@ fn unpack_assignment(packed: &[u32; ASSIGN_U32S]) -> solver_core::Assignment {
     a
 }
 
+fn detect_chain_count() -> u32 {
+    let instance = wgpu::Instance::default();
+    let adapter = pollster::block_on(
+        instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            ..Default::default()
+        }),
+    );
+    let adapter = match adapter {
+        Ok(a) => a,
+        Err(_) => return DEFAULT_CHAIN_COUNT,
+    };
+
+    let limits = adapter.limits();
+    // Largest per-chain buffer is assign_buf: chain_count * ASSIGN_U32S * 4 bytes
+    let bytes_per_chain = (ASSIGN_U32S as u64) * 4;
+    let max_chains = limits.max_storage_buffer_binding_size as u64 / bytes_per_chain;
+    let chain_count = max_chains.min(MAX_CHAIN_COUNT as u64).max(MIN_CHAIN_COUNT as u64) as u32;
+    // Round down to multiple of 256 (workgroup size)
+    (chain_count / 256) * 256
+}
+
 fn main() {
     let shutdown = Arc::new(AtomicBool::new(false));
     {
@@ -167,19 +191,20 @@ fn main() {
         results_dir.to_string(),
     );
 
+    let chain_count = detect_chain_count();
     eprintln!(
         "[{}] GPU solver: {} chains, {} iters/dispatch, {} seed files, {} CPU cores",
-        now_iso(), CHAIN_COUNT, ITERS_PER_DISPATCH, seeds.len(), cpu_cores,
+        now_iso(), chain_count, ITERS_PER_DISPATCH, seeds.len(), cpu_cores,
     );
 
     let mut rng = SmallRng::from_os_rng();
-    let mut assign_data = vec![0u32; CHAIN_COUNT as usize * ASSIGN_U32S];
-    let mut rng_data = vec![0u32; CHAIN_COUNT as usize * 4];
-    let mut cost_data = vec![0u32; CHAIN_COUNT as usize];
-    let mut best_assign_data = vec![0u32; CHAIN_COUNT as usize * ASSIGN_U32S];
-    let mut best_cost_data = vec![u32::MAX; CHAIN_COUNT as usize];
+    let mut assign_data = vec![0u32; chain_count as usize * ASSIGN_U32S];
+    let mut rng_data = vec![0u32; chain_count as usize * 4];
+    let mut cost_data = vec![0u32; chain_count as usize];
+    let mut best_assign_data = vec![0u32; chain_count as usize * ASSIGN_U32S];
+    let mut best_cost_data = vec![u32::MAX; chain_count as usize];
 
-    for i in 0..CHAIN_COUNT as usize {
+    for i in 0..chain_count as usize {
         let a = if i < seeds.len() {
             seeds[i]
         } else {
@@ -215,7 +240,7 @@ fn main() {
 
     let gpu_params = GpuParams {
         iters_per_dispatch: ITERS_PER_DISPATCH,
-        chain_count: CHAIN_COUNT,
+        chain_count,
         temp_base: 1.0,
         temp_step: 0.15,
     };
@@ -245,6 +270,7 @@ async fn run_gpu(
     mut rng: SmallRng,
     shared_best: Arc<Mutex<SharedBest>>,
 ) {
+    let chain_count = gpu_params.chain_count;
     let instance = wgpu::Instance::default();
     let adapter = instance
         .request_adapter(&wgpu::RequestAdapterOptions {
@@ -316,7 +342,7 @@ async fn run_gpu(
     });
 
     // Readback buffers: 128KB for all best_costs, 192B for one assignment
-    let costs_readback_size = (CHAIN_COUNT as usize * 4) as u64;
+    let costs_readback_size = (chain_count as usize * 4) as u64;
     let costs_readback_buf = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("costs_readback"),
         size: costs_readback_size,
@@ -366,7 +392,7 @@ async fn run_gpu(
         cache: None,
     });
 
-    let sa_workgroups = (CHAIN_COUNT + 255) / 256;
+    let sa_workgroups = (chain_count + 255) / 256;
 
     let mut global_best_cost = u32::MAX;
     let mut global_best_assignment: Option<solver_core::Assignment> = None;
@@ -485,10 +511,10 @@ async fn run_gpu(
             }
 
             // Burst reseed: immediately seed cold chains from new best
-            let burst_count = (CHAIN_COUNT as usize) / 20; // 5%
+            let burst_count = (chain_count as usize) / 20; // 5%
             let mut burst_seeded = 0;
             for _ in 0..burst_count * 4 {
-                let idx = rng.random_range(0..CHAIN_COUNT as usize);
+                let idx = rng.random_range(0..chain_count as usize);
                 if idx % TEMP_LEVELS >= COLD_THRESHOLD { continue; }
                 let pert = 1 + (idx % TEMP_LEVELS) * 3 / COLD_THRESHOLD;
                 let mut a = assignment;
@@ -524,7 +550,7 @@ async fn run_gpu(
         }
 
         if last_print.elapsed().as_secs() >= 2 {
-            let total_iters = dispatch_count * ITERS_PER_DISPATCH as u64 * CHAIN_COUNT as u64;
+            let total_iters = dispatch_count * ITERS_PER_DISPATCH as u64 * chain_count as u64;
             let elapsed = start_time.elapsed().as_secs_f64();
             let rate = total_iters as f64 / elapsed / 1e6;
             eprintln!(
@@ -560,12 +586,12 @@ async fn run_gpu(
                     }
 
                     // Burst reseed GPU chains from CPU best (same as GPU new-best path)
-                    let burst_count = (CHAIN_COUNT as usize) / 20;
+                    let burst_count = (chain_count as usize) / 20;
                     let mut burst_seeded = 0;
                     let cpu_assign = sb.assignment;
                     drop(sb);
                     for _ in 0..burst_count * 4 {
-                        let idx = rng.random_range(0..CHAIN_COUNT as usize);
+                        let idx = rng.random_range(0..chain_count as usize);
                         if idx % TEMP_LEVELS >= COLD_THRESHOLD { continue; }
                         let pert = 1 + (idx % TEMP_LEVELS) * 3 / COLD_THRESHOLD;
                         let mut a = cpu_assign;
@@ -587,7 +613,7 @@ async fn run_gpu(
 
             if let Some(ref best) = global_best_assignment {
                 // Temperature-aware reseeding: only reseed cold chains
-                let base_reseed = (CHAIN_COUNT as usize) / 10;
+                let base_reseed = (chain_count as usize) / 10;
                 let reseed_count = if dispatches_since_improvement < 5 {
                     base_reseed / 2 // less when actively improving
                 } else if dispatches_since_improvement > STAGNATION_DISPATCHES {
@@ -601,7 +627,7 @@ async fn run_gpu(
                 let max_attempts = reseed_count * 4;
                 while reseeded < reseed_count && attempts < max_attempts {
                     attempts += 1;
-                    let idx = rng.random_range(0..CHAIN_COUNT as usize);
+                    let idx = rng.random_range(0..chain_count as usize);
                     let temp_level = idx % TEMP_LEVELS;
 
                     // Only reseed cold chains
@@ -632,10 +658,10 @@ async fn run_gpu(
                         aggressive_logged = true;
                     }
 
-                    let hot_inject_count = (CHAIN_COUNT as usize) / 100; // ~1% of hot chains
+                    let hot_inject_count = (chain_count as usize) / 100; // ~1% of hot chains
                     let mut hot_injected = 0;
                     for _ in 0..hot_inject_count * 4 {
-                        let idx = rng.random_range(0..CHAIN_COUNT as usize);
+                        let idx = rng.random_range(0..chain_count as usize);
                         if idx % TEMP_LEVELS < WARM_THRESHOLD {
                             continue;
                         }
@@ -662,10 +688,10 @@ async fn run_gpu(
                     );
 
                     // Extra cold reseeds with stronger perturbation
-                    let extra_cold = (CHAIN_COUNT as usize) / 5; // 20%
+                    let extra_cold = (chain_count as usize) / 5; // 20%
                     let mut extra_count = 0;
                     for _ in 0..extra_cold * 4 {
-                        let idx = rng.random_range(0..CHAIN_COUNT as usize);
+                        let idx = rng.random_range(0..chain_count as usize);
                         if idx % TEMP_LEVELS >= COLD_THRESHOLD { continue; }
                         let mut a = *best;
                         let pert = rng.random_range(10..=20);
@@ -680,10 +706,10 @@ async fn run_gpu(
                     }
 
                     // Inject into warm band too
-                    let warm_inject = (CHAIN_COUNT as usize) / 50; // ~2%
+                    let warm_inject = (chain_count as usize) / 50; // ~2%
                     let mut warm_count = 0;
                     for _ in 0..warm_inject * 4 {
-                        let idx = rng.random_range(0..CHAIN_COUNT as usize);
+                        let idx = rng.random_range(0..chain_count as usize);
                         let temp_level = idx % TEMP_LEVELS;
                         if temp_level < COLD_THRESHOLD || temp_level >= WARM_THRESHOLD { continue; }
                         let mut a = *best;
