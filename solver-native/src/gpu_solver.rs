@@ -1,16 +1,18 @@
 use bytemuck::{Pod, Zeroable};
 use rand::rngs::SmallRng;
 use rand::{Rng, SeedableRng};
+use solver_native::cpu_sa::SharedBest;
 use solver_native::*;
 use std::fs;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use wgpu::util::DeviceExt;
 
 const CHAIN_COUNT: u32 = 32768;
 const ITERS_PER_DISPATCH: u32 = 1000;
 const ASSIGN_U32S: usize = 48;
+const SYNC_INTERVAL: u64 = 10;
 
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
@@ -79,6 +81,7 @@ fn main() {
 
     let args: Vec<String> = std::env::args().collect();
     let no_seed = args.iter().any(|a| a == "--no-seed");
+    let no_cpu = args.iter().any(|a| a == "--no-cpu");
 
     let weights_str = fs::read_to_string("../weights.json").expect("Failed to read weights.json");
     let w8: solver_core::Weights = serde_json::from_str(&weights_str).expect("Invalid weights.json");
@@ -88,23 +91,57 @@ fn main() {
 
     let mut seeds: Vec<solver_core::Assignment> = Vec::new();
     if !no_seed {
-        let seed_dir = "results/split-sa/full";
-        if let Ok(entries) = fs::read_dir(seed_dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.extension().map_or(false, |e| e == "tsv") {
-                    if let Ok(contents) = fs::read_to_string(&path) {
-                        if let Some(a) = solver_core::parse_tsv(&contents) {
-                            seeds.push(a);
+        for seed_dir in &["results/split-sa/full", results_dir] {
+            if let Ok(entries) = fs::read_dir(seed_dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.extension().map_or(false, |e| e == "tsv") {
+                        if let Ok(contents) = fs::read_to_string(&path) {
+                            if let Some(a) = solver_core::parse_tsv(&contents) {
+                                seeds.push(a);
+                            }
                         }
                     }
                 }
             }
         }
     }
+
+    let shared_best = Arc::new(Mutex::new(SharedBest::new()));
+
+    if !seeds.is_empty() {
+        let mut best_seed_cost = u32::MAX;
+        let mut best_seed_idx = 0;
+        for (i, a) in seeds.iter().enumerate() {
+            let c = solver_core::evaluate(a, &w8).total;
+            if c < best_seed_cost {
+                best_seed_cost = c;
+                best_seed_idx = i;
+            }
+        }
+        let mut sb = shared_best.lock().unwrap();
+        sb.cost = best_seed_cost;
+        sb.assignment = seeds[best_seed_idx];
+        drop(sb);
+        eprintln!("[{}] Best seed: cost {}", now_iso(), best_seed_cost);
+    }
+
+    let available_cores = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
+    let cpu_cores = if no_cpu { 0 } else { available_cores.saturating_sub(2) };
+
+    let cpu_handles = cpu_sa::run_cpu_workers(
+        cpu_cores,
+        w8.clone(),
+        Arc::clone(&shared_best),
+        Arc::clone(&shutdown),
+        results_dir.to_string(),
+    );
+
     eprintln!(
-        "[{}] GPU solver: {} chains, {} iters/dispatch, {} seed files",
-        now_iso(), CHAIN_COUNT, ITERS_PER_DISPATCH, seeds.len()
+        "[{}] GPU solver: {} chains, {} iters/dispatch, {} seed files, {} CPU cores",
+        now_iso(), CHAIN_COUNT, ITERS_PER_DISPATCH, seeds.len(), cpu_cores,
     );
 
     let mut rng = SmallRng::from_os_rng();
@@ -157,8 +194,13 @@ fn main() {
 
     pollster::block_on(run_gpu(
         assign_data, best_assign_data, cost_data, best_cost_data, rng_data,
-        gpu_weights, gpu_params, w8, results_dir.to_string(), shutdown,
+        gpu_weights, gpu_params, w8, results_dir.to_string(), shutdown, rng,
+        Arc::clone(&shared_best),
     ));
+
+    for h in cpu_handles {
+        let _ = h.join();
+    }
 }
 
 async fn run_gpu(
@@ -172,6 +214,8 @@ async fn run_gpu(
     w8: solver_core::Weights,
     results_dir: String,
     shutdown: Arc<AtomicBool>,
+    mut rng: SmallRng,
+    shared_best: Arc<Mutex<SharedBest>>,
 ) {
     let instance = wgpu::Instance::default();
     let adapter = instance
@@ -205,7 +249,7 @@ async fn run_gpu(
     let assign_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("assignments"),
         contents: bytemuck::cast_slice(&assign_data),
-        usage: wgpu::BufferUsages::STORAGE,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
     });
     let best_assign_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("best_assignments"),
@@ -215,7 +259,7 @@ async fn run_gpu(
     let cost_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("costs"),
         contents: bytemuck::cast_slice(&cost_data),
-        usage: wgpu::BufferUsages::STORAGE,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
     });
     let best_cost_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("best_costs"),
@@ -381,6 +425,15 @@ async fn run_gpu(
 
             global_best_assignment = Some(assignment);
 
+            // Update shared best (visible to CPU workers)
+            {
+                let mut sb = shared_best.lock().unwrap();
+                if global_best_cost < sb.cost {
+                    sb.cost = global_best_cost;
+                    sb.assignment = assignment;
+                }
+            }
+
             if global_best_cost <= 160 {
                 let ts = chrono::Local::now().format("%Y%m%d-%H%M%S%z");
                 let filename = format!("{}/{:04}-gpu-{}.tsv", results_dir, global_best_cost, ts);
@@ -400,6 +453,54 @@ async fn run_gpu(
                 now_iso(), dispatch_count, total_iters as f64 / 1e9, rate, global_best_cost,
             );
             last_print = Instant::now();
+        }
+
+        if dispatch_count % SYNC_INTERVAL == 0 {
+            // Check if CPU found something better
+            {
+                let sb = shared_best.lock().unwrap();
+                if sb.cost < global_best_cost {
+                    let prev = global_best_cost;
+                    global_best_cost = sb.cost;
+                    global_best_assignment = Some(sb.assignment);
+                    let cpu_cost = solver_core::evaluate(&sb.assignment, &w8);
+                    eprintln!(
+                        "[{}] GPU adopted CPU best: {} (was {}) | {}",
+                        now_iso(), sb.cost, prev, cost_label(&cpu_cost),
+                    );
+
+                    if sb.cost <= 160 {
+                        let ts = chrono::Local::now().format("%Y%m%d-%H%M%S%z");
+                        let filename = format!("{}/{:04}-cpu-{}.tsv", results_dir, sb.cost, ts);
+                        let mut out = sb.assignment;
+                        reassign_commissioners(&mut out);
+                        let _ = fs::write(&filename, assignment_to_tsv(&out));
+                        eprintln!("[{}] Saved {}", now_iso(), filename);
+                    }
+                }
+            }
+
+            if let Some(ref best) = global_best_assignment {
+                let reseed_count = (CHAIN_COUNT as usize) / 10;
+                let mut reseeded = 0;
+                for _ in 0..reseed_count {
+                    let idx = rng.random_range(0..CHAIN_COUNT as usize);
+                    let mut a = *best;
+                    let pert = rng.random_range(1..=10);
+                    solver_core::perturb(&mut a, &mut rng, pert);
+                    let packed = pack_assignment(&a);
+                    let cost = solver_core::evaluate(&a, &w8).total;
+                    let offset = idx * ASSIGN_U32S * 4;
+                    queue.write_buffer(&assign_buf, offset as u64, bytemuck::cast_slice(&packed));
+                    queue.write_buffer(&cost_buf, (idx * 4) as u64, bytemuck::bytes_of(&cost));
+                    reseeded += 1;
+                }
+
+                eprintln!(
+                    "[{}] SYNC: reseeded {}/{} GPU chains from best (cost {})",
+                    now_iso(), reseeded, CHAIN_COUNT, global_best_cost,
+                );
+            }
         }
     }
 

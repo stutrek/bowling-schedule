@@ -4,7 +4,7 @@ const LANES: u32 = 4u;
 const WEEKS: u32 = 12u;
 const QUADS: u32 = 4u;
 const POS: u32 = 4u;
-const ASSIGN_SIZE: u32 = 48u; // WEEKS * QUADS
+const ASSIGN_SIZE: u32 = 48u;
 
 struct Weights {
     matchup_zero: u32,
@@ -93,182 +93,218 @@ fn set_quad(a: ptr<function, array<u32, 48>>, w: u32, q: u32, val: u32) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// Branchless cost function
+// Packed matchup helpers (120 pairs as u8 in 30 u32s)
 // ═══════════════════════════════════════════════════════════════════════
 
-fn evaluate(a: ptr<function, array<u32, 48>>) -> u32 {
-    var matchups: array<i32, 256>;
-    var lane_counts: array<i32, 64>;
-    var late_lane_counts: array<i32, 64>;
-    var stay_count: array<i32, 16>;
-    var early_count: array<i32, 16>;
-    var early_late: array<u32, 192>;
+fn matchup_pair_idx(lo: u32, hi: u32) -> u32 {
+    return lo * (2u * TEAMS - lo - 1u) / 2u + (hi - lo - 1u);
+}
 
-    for (var i = 0u; i < 256u; i++) { matchups[i] = 0; }
-    for (var i = 0u; i < 64u; i++) { lane_counts[i] = 0; late_lane_counts[i] = 0; }
-    for (var i = 0u; i < 16u; i++) { stay_count[i] = 0; early_count[i] = 0; }
-    for (var i = 0u; i < 192u; i++) { early_late[i] = 0u; }
+fn inc_matchup(m: ptr<function, array<u32, 30>>, lo: u32, hi: u32) {
+    let idx = matchup_pair_idx(lo, hi);
+    (*m)[idx / 4u] += (1u << ((idx % 4u) * 8u));
+}
 
-    // Phase 1: accumulate statistics
+fn get_matchup(m: ptr<function, array<u32, 30>>, lo: u32, hi: u32) -> u32 {
+    let idx = matchup_pair_idx(lo, hi);
+    return ((*m)[idx / 4u] >> ((idx % 4u) * 8u)) & 0xFFu;
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Bitset helpers for consecutive opponents
+// ═══════════════════════════════════════════════════════════════════════
+
+fn set_pair_bit(bits: ptr<function, array<u32, 4>>, lo: u32, hi: u32) {
+    let pair_idx = matchup_pair_idx(lo, hi);
+    (*bits)[pair_idx / 32u] |= (1u << (pair_idx % 32u));
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Cost function — Pass 1: matchups + early/late
+// Scratch: matchups 30 u32 (120B) + el 16 u32 (64B) = 184B
+// ═══════════════════════════════════════════════════════════════════════
+
+fn eval_matchups_early_late(a: ptr<function, array<u32, 48>>) -> u32 {
+    var matchups: array<u32, 30>;
+    var el: array<u32, 16>;
+    for (var i = 0u; i < 30u; i++) { matchups[i] = 0u; }
+    for (var i = 0u; i < 16u; i++) { el[i] = 0u; }
+
+    for (var w = 0u; w < WEEKS; w++) {
+        let week_bit = 1u << w;
+        for (var q = 0u; q < QUADS; q++) {
+            let pa = get_team(a, w, q, 0u);
+            let pb = get_team(a, w, q, 1u);
+            let pc = get_team(a, w, q, 2u);
+            let pd = get_team(a, w, q, 3u);
+
+            inc_matchup(&matchups, min(pa, pb), max(pa, pb));
+            inc_matchup(&matchups, min(pc, pd), max(pc, pd));
+            inc_matchup(&matchups, min(pa, pd), max(pa, pd));
+            inc_matchup(&matchups, min(pc, pb), max(pc, pb));
+
+            if (q < 2u) {
+                el[pa] |= week_bit;
+                el[pb] |= week_bit;
+                el[pc] |= week_bit;
+                el[pd] |= week_bit;
+            }
+        }
+    }
+
+    var total = 0u;
+
+    // Matchup balance
+    for (var i = 0u; i < TEAMS; i++) {
+        for (var j = i + 1u; j < TEAMS; j++) {
+            let c = get_matchup(&matchups, i, j);
+            total += u32(c == 0u) * weights.matchup_zero;
+            total += u32(max(c, 2u) - 2u) * weights.matchup_triple;
+        }
+    }
+
+    // Consecutive opponents (bitset per week-pair, temporary 8 u32s)
+    for (var w = 0u; w < WEEKS - 1u; w++) {
+        var pw: array<u32, 4>;
+        var pw1: array<u32, 4>;
+        for (var k = 0u; k < 4u; k++) { pw[k] = 0u; pw1[k] = 0u; }
+
+        for (var q = 0u; q < QUADS; q++) {
+            let a0 = get_team(a, w, q, 0u);
+            let b0 = get_team(a, w, q, 1u);
+            let c0 = get_team(a, w, q, 2u);
+            let d0 = get_team(a, w, q, 3u);
+            set_pair_bit(&pw, min(a0, b0), max(a0, b0));
+            set_pair_bit(&pw, min(c0, d0), max(c0, d0));
+            set_pair_bit(&pw, min(a0, d0), max(a0, d0));
+            set_pair_bit(&pw, min(c0, b0), max(c0, b0));
+
+            let a1 = get_team(a, w + 1u, q, 0u);
+            let b1 = get_team(a, w + 1u, q, 1u);
+            let c1 = get_team(a, w + 1u, q, 2u);
+            let d1 = get_team(a, w + 1u, q, 3u);
+            set_pair_bit(&pw1, min(a1, b1), max(a1, b1));
+            set_pair_bit(&pw1, min(c1, d1), max(c1, d1));
+            set_pair_bit(&pw1, min(a1, d1), max(a1, d1));
+            set_pair_bit(&pw1, min(c1, b1), max(c1, b1));
+        }
+
+        for (var k = 0u; k < 4u; k++) {
+            total += countOneBits(pw[k] & pw1[k]) * weights.consecutive_opponents;
+        }
+    }
+
+    // Early/late balance (popcount replaces early_count array)
+    let target_e = f32(WEEKS) / 2.0;
+    let week_mask = (1u << WEEKS) - 1u;
+    for (var t = 0u; t < TEAMS; t++) {
+        let ec = countOneBits(el[t] & week_mask);
+        let dev = abs(f32(ec) - target_e);
+        total += u32(dev * dev * weights.early_late_balance);
+    }
+
+    // Early/late alternation (3 consecutive same — bit extraction)
+    for (var t = 0u; t < TEAMS; t++) {
+        for (var w = 0u; w < WEEKS - 2u; w++) {
+            let e0 = (el[t] >> w) & 1u;
+            let e1 = (el[t] >> (w + 1u)) & 1u;
+            let e2 = (el[t] >> (w + 2u)) & 1u;
+            let same = (1u - min(e0 ^ e1, 1u)) * (1u - min(e1 ^ e2, 1u));
+            total += same * weights.early_late_alternation;
+        }
+    }
+
+    // Commissioner overlap (XNOR + popcount)
+    var min_overlap = WEEKS;
+    for (var i = 0u; i < TEAMS; i++) {
+        for (var j = i + 1u; j < TEAMS; j++) {
+            let same_bits = ~(el[i] ^ el[j]) & week_mask;
+            let overlap = countOneBits(same_bits);
+            min_overlap = min(min_overlap, overlap);
+        }
+    }
+    total += weights.commissioner_overlap * u32(max(i32(min_overlap) - 1, 0));
+
+    return total;
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Cost function — Pass 2: lanes + stay/switch
+// Scratch: lc 16 u32 (64B) + llc 16 u32 (64B) + sc 4 u32 (16B) = 144B
+// ═══════════════════════════════════════════════════════════════════════
+
+fn eval_lanes(a: ptr<function, array<u32, 48>>) -> u32 {
+    var lc: array<u32, 16>;
+    var llc: array<u32, 16>;
+    var sc: array<u32, 4>;
+    for (var i = 0u; i < 16u; i++) { lc[i] = 0u; llc[i] = 0u; }
+    for (var i = 0u; i < 4u; i++) { sc[i] = 0u; }
+
     for (var w = 0u; w < WEEKS; w++) {
         for (var q = 0u; q < QUADS; q++) {
             let pa = get_team(a, w, q, 0u);
             let pb = get_team(a, w, q, 1u);
             let pc = get_team(a, w, q, 2u);
             let pd = get_team(a, w, q, 3u);
-            let early = u32(q < 2u);
-            let lane_off = (q % 2u) * 2u;
-
-            // Matchups: (pa,pb), (pc,pd), (pa,pd), (pc,pb)
-            let lo0 = min(pa, pb); let hi0 = max(pa, pb);
-            let lo1 = min(pc, pd); let hi1 = max(pc, pd);
-            let lo2 = min(pa, pd); let hi2 = max(pa, pd);
-            let lo3 = min(pc, pb); let hi3 = max(pc, pb);
-            matchups[lo0 * TEAMS + hi0] += 1;
-            matchups[lo1 * TEAMS + hi1] += 1;
-            matchups[lo2 * TEAMS + hi2] += 1;
-            matchups[lo3 * TEAMS + hi3] += 1;
-
-            // Lane counts
-            lane_counts[pa * LANES + lane_off] += 2;
-            lane_counts[pb * LANES + lane_off] += 1;
-            lane_counts[pb * LANES + lane_off + 1u] += 1;
-            lane_counts[pc * LANES + lane_off + 1u] += 2;
-            lane_counts[pd * LANES + lane_off + 1u] += 1;
-            lane_counts[pd * LANES + lane_off] += 1;
-
-            // Late lane counts (q >= 2)
+            let lo = (q % 2u) * 2u;
             let is_late = u32(q >= 2u);
-            late_lane_counts[pa * LANES + lane_off] += i32(is_late) * 2;
-            late_lane_counts[pb * LANES + lane_off] += i32(is_late);
-            late_lane_counts[pb * LANES + lane_off + 1u] += i32(is_late);
-            late_lane_counts[pc * LANES + lane_off + 1u] += i32(is_late) * 2;
-            late_lane_counts[pd * LANES + lane_off + 1u] += i32(is_late);
-            late_lane_counts[pd * LANES + lane_off] += i32(is_late);
 
-            // Stay count (positions 0 and 2)
-            stay_count[pa] += 1;
-            stay_count[pc] += 1;
+            lc[pa] += 2u << (lo * 8u);
+            lc[pb] += 1u << (lo * 8u);
+            lc[pb] += 1u << ((lo + 1u) * 8u);
+            lc[pc] += 2u << ((lo + 1u) * 8u);
+            lc[pd] += 1u << ((lo + 1u) * 8u);
+            lc[pd] += 1u << (lo * 8u);
 
-            // Early/late tracking
-            early_late[pa * WEEKS + w] = early;
-            early_late[pb * WEEKS + w] = early;
-            early_late[pc * WEEKS + w] = early;
-            early_late[pd * WEEKS + w] = early;
-            early_count[pa] += i32(early);
-            early_count[pb] += i32(early);
-            early_count[pc] += i32(early);
-            early_count[pd] += i32(early);
+            llc[pa] += is_late * (2u << (lo * 8u));
+            llc[pb] += is_late * (1u << (lo * 8u));
+            llc[pb] += is_late * (1u << ((lo + 1u) * 8u));
+            llc[pc] += is_late * (2u << ((lo + 1u) * 8u));
+            llc[pd] += is_late * (1u << ((lo + 1u) * 8u));
+            llc[pd] += is_late * (1u << (lo * 8u));
+
+            sc[pa / 4u] += 1u << ((pa % 4u) * 8u);
+            sc[pc / 4u] += 1u << ((pc % 4u) * 8u);
         }
     }
 
-    // Phase 2: compute penalties (branchless)
     var total = 0u;
-
-    // Matchup balance
-    for (var i = 0u; i < TEAMS; i++) {
-        for (var j = i + 1u; j < TEAMS; j++) {
-            let c = matchups[i * TEAMS + j];
-            total += u32(c == 0) * weights.matchup_zero;
-            total += u32(max(c, 2) - 2) * weights.matchup_triple;
-        }
-    }
-
-    // Consecutive opponents (bitset approach)
-    for (var w = 0u; w < WEEKS - 1u; w++) {
-        var pairs_w: array<u32, 4>;
-        var pairs_w1: array<u32, 4>;
-        for (var k = 0u; k < 4u; k++) { pairs_w[k] = 0u; pairs_w1[k] = 0u; }
-
-        for (var q = 0u; q < QUADS; q++) {
-            let pa0 = get_team(a, w, q, 0u);
-            let pb0 = get_team(a, w, q, 1u);
-            let pc0 = get_team(a, w, q, 2u);
-            let pd0 = get_team(a, w, q, 3u);
-            // Set pair bits for week w
-            set_pair_bit(&pairs_w, min(pa0, pb0), max(pa0, pb0));
-            set_pair_bit(&pairs_w, min(pc0, pd0), max(pc0, pd0));
-            set_pair_bit(&pairs_w, min(pa0, pd0), max(pa0, pd0));
-            set_pair_bit(&pairs_w, min(pc0, pb0), max(pc0, pb0));
-
-            let pa1 = get_team(a, w + 1u, q, 0u);
-            let pb1 = get_team(a, w + 1u, q, 1u);
-            let pc1 = get_team(a, w + 1u, q, 2u);
-            let pd1 = get_team(a, w + 1u, q, 3u);
-            set_pair_bit(&pairs_w1, min(pa1, pb1), max(pa1, pb1));
-            set_pair_bit(&pairs_w1, min(pc1, pd1), max(pc1, pd1));
-            set_pair_bit(&pairs_w1, min(pa1, pd1), max(pa1, pd1));
-            set_pair_bit(&pairs_w1, min(pc1, pb1), max(pc1, pb1));
-        }
-
-        for (var k = 0u; k < 4u; k++) {
-            total += countOneBits(pairs_w[k] & pairs_w1[k]) * weights.consecutive_opponents;
-        }
-    }
-
-    // Early/late balance
-    let target_e = f32(WEEKS) / 2.0;
-    for (var t = 0u; t < TEAMS; t++) {
-        let dev = abs(f32(early_count[t]) - target_e);
-        total += u32(dev * dev * weights.early_late_balance);
-    }
-
-    // Early/late alternation (3 consecutive same)
-    for (var t = 0u; t < TEAMS; t++) {
-        for (var w = 0u; w < WEEKS - 2u; w++) {
-            let e0 = early_late[t * WEEKS + w];
-            let e1 = early_late[t * WEEKS + w + 1u];
-            let e2 = early_late[t * WEEKS + w + 2u];
-            let same = (1u - min(e0 ^ e1, 1u)) * (1u - min(e1 ^ e2, 1u));
-            total += same * weights.early_late_alternation;
-        }
-    }
 
     // Lane balance
     let target_l = f32(WEEKS) * 2.0 / f32(LANES);
     for (var t = 0u; t < TEAMS; t++) {
         for (var l = 0u; l < LANES; l++) {
-            total += u32(abs(f32(lane_counts[t * LANES + l]) - target_l) * weights.lane_balance);
+            let count = (lc[t] >> (l * 8u)) & 0xFFu;
+            total += u32(abs(f32(count) - target_l) * weights.lane_balance);
+        }
+    }
+
+    // Late lane balance
+    let late_target = f32(WEEKS) / f32(LANES);
+    for (var t = 0u; t < TEAMS; t++) {
+        for (var l = 0u; l < LANES; l++) {
+            let count = (llc[t] >> (l * 8u)) & 0xFFu;
+            total += u32(abs(f32(count) - late_target) * weights.late_lane_balance);
         }
     }
 
     // Lane switch balance
     let target_stay = f32(WEEKS) / 2.0;
     for (var t = 0u; t < TEAMS; t++) {
-        let dev = abs(f32(stay_count[t]) - target_stay);
+        let count = (sc[t / 4u] >> ((t % 4u) * 8u)) & 0xFFu;
+        let dev = abs(f32(count) - target_stay);
         total += u32(dev * weights.lane_switch);
     }
-
-    // Late lane balance
-    let late_target_l = f32(WEEKS) / f32(LANES);
-    for (var t = 0u; t < TEAMS; t++) {
-        for (var l = 0u; l < LANES; l++) {
-            total += u32(abs(f32(late_lane_counts[t * LANES + l]) - late_target_l) * weights.late_lane_balance);
-        }
-    }
-
-    // Commissioner overlap
-    var min_overlap = WEEKS;
-    for (var i = 0u; i < TEAMS; i++) {
-        for (var j = i + 1u; j < TEAMS; j++) {
-            var overlap = 0u;
-            for (var w = 0u; w < WEEKS; w++) {
-                overlap += u32(early_late[i * WEEKS + w] == early_late[j * WEEKS + w]);
-            }
-            min_overlap = min(min_overlap, overlap);
-        }
-    }
-    let sub = u32(max(i32(min_overlap) - 1, 0));
-    total += weights.commissioner_overlap * sub;
 
     return total;
 }
 
-fn set_pair_bit(bits: ptr<function, array<u32, 4>>, lo: u32, hi: u32) {
-    let pair_idx = lo * (2u * TEAMS - lo - 1u) / 2u + (hi - lo - 1u);
-    let word = pair_idx / 32u;
-    let bit = pair_idx % 32u;
-    (*bits)[word] |= (1u << bit);
+// ═══════════════════════════════════════════════════════════════════════
+// Combined evaluate
+// ═══════════════════════════════════════════════════════════════════════
+
+fn evaluate(a: ptr<function, array<u32, 48>>) -> u32 {
+    return eval_matchups_early_late(a) + eval_lanes(a);
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -376,8 +412,8 @@ fn move_cross_week_swap(a: ptr<function, array<u32, 48>>, s: ptr<function, array
 }
 
 fn move_guided_matchup(a: ptr<function, array<u32, 48>>, s: ptr<function, array<u32, 4>>) -> bool {
-    var match_seen: array<u32, 8>; // 120 pairs packed as bits (4 u32s would suffice, use 8 for safety)
-    for (var k = 0u; k < 8u; k++) { match_seen[k] = 0u; }
+    var match_seen: array<u32, 4>;
+    for (var k = 0u; k < 4u; k++) { match_seen[k] = 0u; }
 
     for (var w = 0u; w < WEEKS; w++) {
         for (var q = 0u; q < QUADS; q++) {
@@ -385,10 +421,10 @@ fn move_guided_matchup(a: ptr<function, array<u32, 48>>, s: ptr<function, array<
             let pb = get_team(a, w, q, 1u);
             let pc = get_team(a, w, q, 2u);
             let pd = get_team(a, w, q, 3u);
-            set_pair_bit_8(&match_seen, min(pa, pb), max(pa, pb));
-            set_pair_bit_8(&match_seen, min(pc, pd), max(pc, pd));
-            set_pair_bit_8(&match_seen, min(pa, pd), max(pa, pd));
-            set_pair_bit_8(&match_seen, min(pc, pb), max(pc, pb));
+            set_pair_bit(&match_seen, min(pa, pb), max(pa, pb));
+            set_pair_bit(&match_seen, min(pc, pd), max(pc, pd));
+            set_pair_bit(&match_seen, min(pa, pd), max(pa, pd));
+            set_pair_bit(&match_seen, min(pc, pb), max(pc, pb));
         }
     }
 
@@ -400,7 +436,8 @@ fn move_guided_matchup(a: ptr<function, array<u32, 48>>, s: ptr<function, array<
         if (found) { break; }
         let i = (start_i + off_i) % TEAMS;
         for (var j = i + 1u; j < TEAMS; j++) {
-            if (!get_pair_bit_8(&match_seen, i, j)) {
+            let idx = matchup_pair_idx(i, j);
+            if ((match_seen[idx / 32u] & (1u << (idx % 32u))) == 0u) {
                 ta = i; tb = j;
                 found = true;
                 break;
@@ -421,7 +458,6 @@ fn move_guided_matchup(a: ptr<function, array<u32, 48>>, s: ptr<function, array<
         let same_half = (qa < 2u && qb < 2u) || (qa >= 2u && qb >= 2u);
         if (!same_half || qa == qb) { continue; }
 
-        var swap_pos = rng_range(s, POS - 1u);
         let first_non_ta = find_non_team_pos(a, w, qa, ta, s);
         if (first_non_ta == 0xFFFFFFFFu) { continue; }
         swap_positions(a, w, qa, first_non_ta, w, qb, pb);
@@ -443,23 +479,9 @@ fn find_non_team_pos(a: ptr<function, array<u32, 48>>, w: u32, q: u32, team: u32
     return candidates[rng_range(s, count)];
 }
 
-fn set_pair_bit_8(bits: ptr<function, array<u32, 8>>, lo: u32, hi: u32) {
-    let pair_idx = lo * (2u * TEAMS - lo - 1u) / 2u + (hi - lo - 1u);
-    let word = pair_idx / 32u;
-    let bit = pair_idx % 32u;
-    (*bits)[word] |= (1u << bit);
-}
-
-fn get_pair_bit_8(bits: ptr<function, array<u32, 8>>, lo: u32, hi: u32) -> bool {
-    let pair_idx = lo * (2u * TEAMS - lo - 1u) / 2u + (hi - lo - 1u);
-    let word = pair_idx / 32u;
-    let bit = pair_idx % 32u;
-    return ((*bits)[word] & (1u << bit)) != 0u;
-}
-
 fn move_guided_lane(a: ptr<function, array<u32, 48>>, s: ptr<function, array<u32, 4>>) -> bool {
-    var lc: array<i32, 64>;
-    for (var i = 0u; i < 64u; i++) { lc[i] = 0; }
+    var lc: array<u32, 16>;
+    for (var i = 0u; i < 16u; i++) { lc[i] = 0u; }
 
     for (var w = 0u; w < WEEKS; w++) {
         for (var q = 0u; q < QUADS; q++) {
@@ -468,12 +490,12 @@ fn move_guided_lane(a: ptr<function, array<u32, 48>>, s: ptr<function, array<u32
             let pc = get_team(a, w, q, 2u);
             let pd = get_team(a, w, q, 3u);
             let lo = (q % 2u) * 2u;
-            lc[pa * LANES + lo] += 2;
-            lc[pb * LANES + lo] += 1;
-            lc[pb * LANES + lo + 1u] += 1;
-            lc[pc * LANES + lo + 1u] += 2;
-            lc[pd * LANES + lo + 1u] += 1;
-            lc[pd * LANES + lo] += 1;
+            lc[pa] += 2u << (lo * 8u);
+            lc[pb] += 1u << (lo * 8u);
+            lc[pb] += 1u << ((lo + 1u) * 8u);
+            lc[pc] += 2u << ((lo + 1u) * 8u);
+            lc[pd] += 1u << ((lo + 1u) * 8u);
+            lc[pd] += 1u << (lo * 8u);
         }
     }
 
@@ -482,7 +504,7 @@ fn move_guided_lane(a: ptr<function, array<u32, 48>>, s: ptr<function, array<u32
     var worst_dev = 0.0;
     for (var t = 0u; t < TEAMS; t++) {
         for (var l = 0u; l < LANES; l++) {
-            let dev = abs(f32(lc[t * LANES + l]) - target_l);
+            let dev = abs(f32((lc[t] >> (l * 8u)) & 0xFFu) - target_l);
             if (dev > worst_dev) { worst_dev = dev; worst_team = t; }
         }
     }
@@ -552,6 +574,10 @@ fn move_guided_early_late(a: ptr<function, array<u32, 48>>, s: ptr<function, arr
     return false;
 }
 
+// ═══════════════════════════════════════════════════════════════════════
+// SA helpers
+// ═══════════════════════════════════════════════════════════════════════
+
 fn write_best(a: ptr<function, array<u32, 48>>, base: u32) {
     for (var i = 0u; i < ASSIGN_SIZE; i++) {
         best_assignments[base + i] = (*a)[i];
@@ -580,13 +606,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let base = tid * ASSIGN_SIZE;
     let rng_base = tid * 4u;
 
-    // Load assignment into private memory
     var a: array<u32, 48>;
     for (var i = 0u; i < ASSIGN_SIZE; i++) {
         a[i] = assignments[base + i];
     }
 
-    // Load RNG state
     var rng: array<u32, 4>;
     for (var i = 0u; i < 4u; i++) {
         rng[i] = rng_states[rng_base + i];
@@ -597,15 +621,12 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     let temp = params.temp_base + f32(tid % 64u) * params.temp_step;
 
-    // SA loop — each move saves only affected values for targeted undo
     for (var iter = 0u; iter < params.iters_per_dispatch; iter++) {
         if (best_cost == 0u) { break; }
 
         let move_id = rng_range(&rng, 100u);
 
-        // Save affected state, apply move, evaluate, accept/reject, undo if needed
         if (move_id < 25u) {
-            // inter-quad swap: affects 2 quads in 1 week
             let w = rng_range(&rng, WEEKS);
             let q1 = rng_range(&rng, QUADS);
             var q2 = rng_range(&rng, QUADS - 1u);
@@ -622,7 +643,6 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                 swap_positions(&a, w, q1, p1, w, q2, p2);
             }
         } else if (move_id < 40u) {
-            // intra-quad swap
             let w = rng_range(&rng, WEEKS);
             let q = rng_range(&rng, QUADS);
             let p1 = rng_range(&rng, POS);
@@ -638,7 +658,6 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                 swap_positions(&a, w, q, p1, w, q, p2);
             }
         } else if (move_id < 50u) {
-            // cross-week swap: save 4 affected cells
             let team = rng_range(&rng, TEAMS);
             let w1 = rng_range(&rng, WEEKS);
             var w2 = rng_range(&rng, WEEKS - 1u);
@@ -671,7 +690,6 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                 }
             }
         } else if (move_id < 58u) {
-            // quad swap: save 2 quads
             let w = rng_range(&rng, WEEKS);
             let q1 = rng_range(&rng, QUADS);
             var q2 = rng_range(&rng, QUADS - 1u);
@@ -690,7 +708,6 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                 set_quad(&a, w, q2, tmp2);
             }
         } else if (move_id < 64u) {
-            // week swap: save 2 weeks (8 quads)
             let w1 = rng_range(&rng, WEEKS);
             var w2 = rng_range(&rng, WEEKS - 1u);
             if (w2 >= w1) { w2 += 1u; }
@@ -712,7 +729,6 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                 }
             }
         } else if (move_id < 70u) {
-            // early/late flip: save 4 quads
             let w = rng_range(&rng, WEEKS);
             let sq0 = get_quad(&a, w, 0u); let sq1 = get_quad(&a, w, 1u);
             let sq2 = get_quad(&a, w, 2u); let sq3 = get_quad(&a, w, 3u);
@@ -728,7 +744,6 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                 set_quad(&a, w, 2u, sq2); set_quad(&a, w, 3u, sq3);
             }
         } else if (move_id < 75u) {
-            // lane pair swap: save 4 quads
             let w = rng_range(&rng, WEEKS);
             let sq0 = get_quad(&a, w, 0u); let sq1 = get_quad(&a, w, 1u);
             let sq2 = get_quad(&a, w, 2u); let sq3 = get_quad(&a, w, 3u);
@@ -744,7 +759,6 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                 set_quad(&a, w, 2u, sq2); set_quad(&a, w, 3u, sq3);
             }
         } else if (move_id < 81u) {
-            // stay/switch
             let w = rng_range(&rng, WEEKS);
             let q = rng_range(&rng, QUADS);
             swap_positions(&a, w, q, 0u, w, q, 1u);
