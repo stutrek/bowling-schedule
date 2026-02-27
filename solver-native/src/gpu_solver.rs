@@ -14,6 +14,15 @@ const ITERS_PER_DISPATCH: u32 = 1000;
 const ASSIGN_U32S: usize = 48;
 const SYNC_INTERVAL: u64 = 10;
 
+// Temperature-aware reseeding: 512 levels geometric [0.1, 10.0]
+const TEMP_LEVELS: usize = 512;
+const COLD_THRESHOLD: usize = 128; // idx % 512 < 128 = cold chains (exploit)
+const WARM_THRESHOLD: usize = 384; // idx % 512 >= 384 = hot chains (explore)
+
+// Stagnation thresholds (in dispatches, ~1 dispatch/sec)
+const STAGNATION_DISPATCHES: u64 = 60; // ~1 min → aggressive mode
+const ESCALATION_DISPATCHES: u64 = 300; // ~5 min → escalated shakeup
+
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
 struct GpuWeights {
@@ -39,6 +48,25 @@ struct GpuParams {
     temp_base: f32,
     temp_step: f32,
 }
+
+#[repr(C)]
+#[derive(Copy, Clone, Pod, Zeroable)]
+struct GpuMoveThresholds {
+    t: [u32; 12], // 11 cumulative thresholds (0-100) + 1 padding
+}
+
+// Default: matches original hardcoded values
+const THRESH_DEFAULT: GpuMoveThresholds = GpuMoveThresholds {
+    t: [25, 40, 50, 58, 64, 70, 75, 81, 87, 93, 100, 0],
+};
+// High cost (>500): more structural/exploration moves
+const THRESH_HIGH_COST: GpuMoveThresholds = GpuMoveThresholds {
+    t: [30, 40, 52, 62, 69, 75, 79, 82, 88, 94, 100, 0],
+};
+// Low cost (<200): more fine-grained moves
+const THRESH_LOW_COST: GpuMoveThresholds = GpuMoveThresholds {
+    t: [20, 38, 46, 52, 57, 62, 67, 74, 82, 91, 100, 0],
+};
 
 fn pack_assignment(a: &solver_core::Assignment) -> [u32; ASSIGN_U32S] {
     let mut packed = [0u32; ASSIGN_U32S];
@@ -281,6 +309,11 @@ async fn run_gpu(
         contents: bytemuck::bytes_of(&gpu_params),
         usage: wgpu::BufferUsages::UNIFORM,
     });
+    let move_thresh_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("move_thresholds"),
+        contents: bytemuck::bytes_of(&THRESH_DEFAULT),
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+    });
 
     // Readback buffers: 128KB for all best_costs, 192B for one assignment
     let costs_readback_size = (CHAIN_COUNT as usize * 4) as u64;
@@ -303,6 +336,7 @@ async fn run_gpu(
         entries: &[
             bgl_storage(0, false), bgl_storage(1, false), bgl_storage(2, false),
             bgl_storage(3, false), bgl_storage(4, false), bgl_uniform(5), bgl_uniform(6),
+            bgl_storage(7, true),
         ],
     });
 
@@ -313,6 +347,7 @@ async fn run_gpu(
             bg_entry(0, &assign_buf), bg_entry(1, &best_assign_buf),
             bg_entry(2, &cost_buf), bg_entry(3, &best_cost_buf),
             bg_entry(4, &rng_buf), bg_entry(5, &weights_buf), bg_entry(6, &params_buf),
+            bg_entry(7, &move_thresh_buf),
         ],
     });
 
@@ -338,6 +373,9 @@ async fn run_gpu(
     let mut dispatch_count = 0u64;
     let start_time = Instant::now();
     let mut last_print = Instant::now();
+    let mut dispatches_since_improvement: u64 = 0;
+    let mut last_thresh_regime: u8 = 0; // 0=default, 1=high, 2=low
+    let mut aggressive_logged = false;
 
     eprintln!("[{}] Starting GPU SA...", now_iso());
 
@@ -388,9 +426,12 @@ async fn run_gpu(
         costs_readback_buf.unmap();
 
         dispatch_count += 1;
+        dispatches_since_improvement += 1;
 
         if min_cost < global_best_cost {
             global_best_cost = min_cost;
+            dispatches_since_improvement = 0;
+            aggressive_logged = false;
 
             // Read back winning assignment
             let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -442,6 +483,44 @@ async fn run_gpu(
                 let _ = fs::write(&filename, assignment_to_tsv(&out));
                 eprintln!("[{}] Saved {}", now_iso(), filename);
             }
+
+            // Burst reseed: immediately seed cold chains from new best
+            let burst_count = (CHAIN_COUNT as usize) / 20; // 5%
+            let mut burst_seeded = 0;
+            for _ in 0..burst_count * 4 {
+                let idx = rng.random_range(0..CHAIN_COUNT as usize);
+                if idx % TEMP_LEVELS >= COLD_THRESHOLD { continue; }
+                let pert = 1 + (idx % TEMP_LEVELS) * 3 / COLD_THRESHOLD;
+                let mut a = assignment;
+                solver_core::perturb(&mut a, &mut rng, pert);
+                let packed = pack_assignment(&a);
+                let cost = solver_core::evaluate(&a, &w8).total;
+                let buf_offset = idx * ASSIGN_U32S * 4;
+                queue.write_buffer(&assign_buf, buf_offset as u64, bytemuck::cast_slice(&packed));
+                queue.write_buffer(&cost_buf, (idx * 4) as u64, bytemuck::bytes_of(&cost));
+                burst_seeded += 1;
+                if burst_seeded >= burst_count { break; }
+            }
+            eprintln!("[{}] Burst reseeded {} cold chains from new best", now_iso(), burst_seeded);
+        }
+
+        // Update move threshold regime based on cost
+        let new_regime = if global_best_cost > 500 { 1u8 }
+                         else if global_best_cost < 200 { 2u8 }
+                         else { 0u8 };
+        if new_regime != last_thresh_regime {
+            let thresh = match new_regime {
+                1 => THRESH_HIGH_COST,
+                2 => THRESH_LOW_COST,
+                _ => THRESH_DEFAULT,
+            };
+            queue.write_buffer(&move_thresh_buf, 0, bytemuck::bytes_of(&thresh));
+            last_thresh_regime = new_regime;
+            eprintln!(
+                "[{}] Move threshold regime: {}",
+                now_iso(),
+                match new_regime { 1 => "high-cost (exploration)", 2 => "low-cost (fine-grained)", _ => "default" },
+            );
         }
 
         if last_print.elapsed().as_secs() >= 2 {
@@ -449,8 +528,8 @@ async fn run_gpu(
             let elapsed = start_time.elapsed().as_secs_f64();
             let rate = total_iters as f64 / elapsed / 1e6;
             eprintln!(
-                "[{}] dispatch {} | {:.2}B total iters | {:.1}M iters/sec | best: {}",
-                now_iso(), dispatch_count, total_iters as f64 / 1e9, rate, global_best_cost,
+                "[{}] dispatch {} | {:.2}B total iters | {:.1}M iters/sec | best: {} | stagnant: {}",
+                now_iso(), dispatch_count, total_iters as f64 / 1e9, rate, global_best_cost, dispatches_since_improvement,
             );
             last_print = Instant::now();
         }
@@ -463,6 +542,8 @@ async fn run_gpu(
                     let prev = global_best_cost;
                     global_best_cost = sb.cost;
                     global_best_assignment = Some(sb.assignment);
+                    dispatches_since_improvement = 0;
+                    aggressive_logged = false;
                     let cpu_cost = solver_core::evaluate(&sb.assignment, &w8);
                     eprintln!(
                         "[{}] GPU adopted CPU best: {} (was {}) | {}",
@@ -481,12 +562,33 @@ async fn run_gpu(
             }
 
             if let Some(ref best) = global_best_assignment {
-                let reseed_count = (CHAIN_COUNT as usize) / 10;
+                // Temperature-aware reseeding: only reseed cold chains
+                let base_reseed = (CHAIN_COUNT as usize) / 10;
+                let reseed_count = if dispatches_since_improvement < 5 {
+                    base_reseed / 2 // less when actively improving
+                } else if dispatches_since_improvement > STAGNATION_DISPATCHES {
+                    base_reseed * 2 // more when stagnating
+                } else {
+                    base_reseed
+                };
+
                 let mut reseeded = 0;
-                for _ in 0..reseed_count {
+                let mut attempts = 0;
+                let max_attempts = reseed_count * 4;
+                while reseeded < reseed_count && attempts < max_attempts {
+                    attempts += 1;
                     let idx = rng.random_range(0..CHAIN_COUNT as usize);
+                    let temp_level = idx % TEMP_LEVELS;
+
+                    // Only reseed cold chains
+                    if temp_level >= COLD_THRESHOLD {
+                        continue;
+                    }
+
+                    // Scale perturbation by temperature level within cold band
+                    let pert_max = 2 + (temp_level * 3 / COLD_THRESHOLD); // 2..5
+                    let pert = rng.random_range(1..=pert_max);
                     let mut a = *best;
-                    let pert = rng.random_range(1..=10);
                     solver_core::perturb(&mut a, &mut rng, pert);
                     let packed = pack_assignment(&a);
                     let cost = solver_core::evaluate(&a, &w8).total;
@@ -496,9 +598,86 @@ async fn run_gpu(
                     reseeded += 1;
                 }
 
+                // Stagnation: aggressive mode — inject heavily perturbed chains into hot band
+                if dispatches_since_improvement >= STAGNATION_DISPATCHES {
+                    if !aggressive_logged {
+                        eprintln!(
+                            "[{}] STAGNATION: aggressive mode (stagnant {} dispatches)",
+                            now_iso(), dispatches_since_improvement,
+                        );
+                        aggressive_logged = true;
+                    }
+
+                    let hot_inject_count = (CHAIN_COUNT as usize) / 100; // ~1% of hot chains
+                    let mut hot_injected = 0;
+                    for _ in 0..hot_inject_count * 4 {
+                        let idx = rng.random_range(0..CHAIN_COUNT as usize);
+                        if idx % TEMP_LEVELS < WARM_THRESHOLD {
+                            continue;
+                        }
+                        let mut a = *best;
+                        let pert = rng.random_range(20..=50);
+                        solver_core::perturb(&mut a, &mut rng, pert);
+                        let packed = pack_assignment(&a);
+                        let cost = solver_core::evaluate(&a, &w8).total;
+                        let offset = idx * ASSIGN_U32S * 4;
+                        queue.write_buffer(&assign_buf, offset as u64, bytemuck::cast_slice(&packed));
+                        queue.write_buffer(&cost_buf, (idx * 4) as u64, bytemuck::bytes_of(&cost));
+                        hot_injected += 1;
+                        if hot_injected >= hot_inject_count { break; }
+                    }
+                }
+
+                // Stagnation: escalated shakeup — broader perturbation reach
+                if dispatches_since_improvement >= ESCALATION_DISPATCHES
+                    && dispatches_since_improvement % ESCALATION_DISPATCHES == 0
+                {
+                    eprintln!(
+                        "[{}] ESCALATED SHAKEUP (stagnant {} dispatches)",
+                        now_iso(), dispatches_since_improvement,
+                    );
+
+                    // Extra cold reseeds with stronger perturbation
+                    let extra_cold = (CHAIN_COUNT as usize) / 5; // 20%
+                    let mut extra_count = 0;
+                    for _ in 0..extra_cold * 4 {
+                        let idx = rng.random_range(0..CHAIN_COUNT as usize);
+                        if idx % TEMP_LEVELS >= COLD_THRESHOLD { continue; }
+                        let mut a = *best;
+                        let pert = rng.random_range(10..=20);
+                        solver_core::perturb(&mut a, &mut rng, pert);
+                        let packed = pack_assignment(&a);
+                        let cost = solver_core::evaluate(&a, &w8).total;
+                        let offset = idx * ASSIGN_U32S * 4;
+                        queue.write_buffer(&assign_buf, offset as u64, bytemuck::cast_slice(&packed));
+                        queue.write_buffer(&cost_buf, (idx * 4) as u64, bytemuck::bytes_of(&cost));
+                        extra_count += 1;
+                        if extra_count >= extra_cold { break; }
+                    }
+
+                    // Inject into warm band too
+                    let warm_inject = (CHAIN_COUNT as usize) / 50; // ~2%
+                    let mut warm_count = 0;
+                    for _ in 0..warm_inject * 4 {
+                        let idx = rng.random_range(0..CHAIN_COUNT as usize);
+                        let temp_level = idx % TEMP_LEVELS;
+                        if temp_level < COLD_THRESHOLD || temp_level >= WARM_THRESHOLD { continue; }
+                        let mut a = *best;
+                        let pert = rng.random_range(15..=30);
+                        solver_core::perturb(&mut a, &mut rng, pert);
+                        let packed = pack_assignment(&a);
+                        let cost = solver_core::evaluate(&a, &w8).total;
+                        let offset = idx * ASSIGN_U32S * 4;
+                        queue.write_buffer(&assign_buf, offset as u64, bytemuck::cast_slice(&packed));
+                        queue.write_buffer(&cost_buf, (idx * 4) as u64, bytemuck::bytes_of(&cost));
+                        warm_count += 1;
+                        if warm_count >= warm_inject { break; }
+                    }
+                }
+
                 eprintln!(
-                    "[{}] SYNC: reseeded {}/{} GPU chains from best (cost {})",
-                    now_iso(), reseeded, CHAIN_COUNT, global_best_cost,
+                    "[{}] SYNC: reseeded {} cold chains from best (cost {}, stagnant {})",
+                    now_iso(), reseeded, global_best_cost, dispatches_since_improvement,
                 );
             }
         }

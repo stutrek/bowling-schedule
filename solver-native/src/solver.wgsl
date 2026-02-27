@@ -32,6 +32,7 @@ struct Params {
 @group(0) @binding(4) var<storage, read_write> rng_states: array<u32>;
 @group(0) @binding(5) var<uniform> weights: Weights;
 @group(0) @binding(6) var<uniform> params: Params;
+@group(0) @binding(7) var<storage, read> move_thresh: array<u32, 12>;
 
 // ═══════════════════════════════════════════════════════════════════════
 // RNG: xoshiro128++
@@ -619,14 +620,43 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     var cost = costs[tid];
     var best_cost = best_costs[tid];
 
-    let temp = params.temp_base + f32(tid % 64u) * params.temp_step;
+    // Geometric temperature ladder: 512 distinct levels in [0.1, 10.0]
+    // Cold chains (low tid % 512) exploit near best; hot chains explore freely
+    let temp_levels = 512u;
+    let t_frac = f32(tid % temp_levels) / f32(temp_levels - 1u);
+    let temp = 0.1 * pow(100.0, t_frac);
 
     for (var iter = 0u; iter < params.iters_per_dispatch; iter++) {
         if (best_cost == 0u) { break; }
 
+        // Compound move: bundle multiple inter-quad swaps when cost is low
+        let compound_thresh = select(0u, select(25u, 50u, cost < 600u), cost < 1000u);
+        if (rng_range(&rng, 100u) < compound_thresh) {
+            var sq = save_all(&a);
+            let max_n = select(4u, select(6u, 12u, cost < 200u), cost < 400u);
+            let n_swaps = 2u + rng_range(&rng, max_n - 1u);
+            for (var k = 0u; k < n_swaps; k++) {
+                let cw = rng_range(&rng, WEEKS);
+                let cq1 = rng_range(&rng, QUADS);
+                var cq2 = rng_range(&rng, QUADS - 1u);
+                if (cq2 >= cq1) { cq2 += 1u; }
+                let cp1 = rng_range(&rng, POS);
+                let cp2 = rng_range(&rng, POS);
+                swap_positions(&a, cw, cq1, cp1, cw, cq2, cp2);
+            }
+            let new_cost = evaluate(&a);
+            let delta = i32(new_cost) - i32(cost);
+            if (delta <= 0 || rng_f32(&rng) < exp(f32(-delta) / temp)) {
+                cost = new_cost;
+                if (cost < best_cost) { best_cost = cost; write_best(&a, base); }
+            } else {
+                restore_all(&a, &sq);
+            }
+        } else {
+
         let move_id = rng_range(&rng, 100u);
 
-        if (move_id < 25u) {
+        if (move_id < move_thresh[0]) {
             let w = rng_range(&rng, WEEKS);
             let q1 = rng_range(&rng, QUADS);
             var q2 = rng_range(&rng, QUADS - 1u);
@@ -642,7 +672,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             } else {
                 swap_positions(&a, w, q1, p1, w, q2, p2);
             }
-        } else if (move_id < 40u) {
+        } else if (move_id < move_thresh[1]) {
             let w = rng_range(&rng, WEEKS);
             let q = rng_range(&rng, QUADS);
             let p1 = rng_range(&rng, POS);
@@ -657,7 +687,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             } else {
                 swap_positions(&a, w, q, p1, w, q, p2);
             }
-        } else if (move_id < 50u) {
+        } else if (move_id < move_thresh[2]) {
             let team = rng_range(&rng, TEAMS);
             let w1 = rng_range(&rng, WEEKS);
             var w2 = rng_range(&rng, WEEKS - 1u);
@@ -689,7 +719,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                     set_team(&a, w2, qi2, pi2, s3);
                 }
             }
-        } else if (move_id < 58u) {
+        } else if (move_id < move_thresh[3]) {
             let w = rng_range(&rng, WEEKS);
             let q1 = rng_range(&rng, QUADS);
             var q2 = rng_range(&rng, QUADS - 1u);
@@ -707,7 +737,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                 set_quad(&a, w, q1, get_quad(&a, w, q2));
                 set_quad(&a, w, q2, tmp2);
             }
-        } else if (move_id < 64u) {
+        } else if (move_id < move_thresh[4]) {
             let w1 = rng_range(&rng, WEEKS);
             var w2 = rng_range(&rng, WEEKS - 1u);
             if (w2 >= w1) { w2 += 1u; }
@@ -728,7 +758,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                     set_quad(&a, w2, q, tmp);
                 }
             }
-        } else if (move_id < 70u) {
+        } else if (move_id < move_thresh[5]) {
             let w = rng_range(&rng, WEEKS);
             let sq0 = get_quad(&a, w, 0u); let sq1 = get_quad(&a, w, 1u);
             let sq2 = get_quad(&a, w, 2u); let sq3 = get_quad(&a, w, 3u);
@@ -743,7 +773,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                 set_quad(&a, w, 0u, sq0); set_quad(&a, w, 1u, sq1);
                 set_quad(&a, w, 2u, sq2); set_quad(&a, w, 3u, sq3);
             }
-        } else if (move_id < 75u) {
+        } else if (move_id < move_thresh[6]) {
             let w = rng_range(&rng, WEEKS);
             let sq0 = get_quad(&a, w, 0u); let sq1 = get_quad(&a, w, 1u);
             let sq2 = get_quad(&a, w, 2u); let sq3 = get_quad(&a, w, 3u);
@@ -758,7 +788,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                 set_quad(&a, w, 0u, sq0); set_quad(&a, w, 1u, sq1);
                 set_quad(&a, w, 2u, sq2); set_quad(&a, w, 3u, sq3);
             }
-        } else if (move_id < 81u) {
+        } else if (move_id < move_thresh[7]) {
             let w = rng_range(&rng, WEEKS);
             let q = rng_range(&rng, QUADS);
             swap_positions(&a, w, q, 0u, w, q, 1u);
@@ -772,7 +802,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                 swap_positions(&a, w, q, 0u, w, q, 1u);
                 swap_positions(&a, w, q, 2u, w, q, 3u);
             }
-        } else if (move_id < 87u) {
+        } else if (move_id < move_thresh[8]) {
             var sq = save_all(&a);
             let did = move_guided_matchup(&a, &rng);
             if (did) {
@@ -785,7 +815,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                     restore_all(&a, &sq);
                 }
             }
-        } else if (move_id < 93u) {
+        } else if (move_id < move_thresh[9]) {
             var sq = save_all(&a);
             let did = move_guided_lane(&a, &rng);
             if (did) {
@@ -810,6 +840,37 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                 } else {
                     restore_all(&a, &sq);
                 }
+            }
+        }
+
+        } // end compound else
+
+        // Exhaustive quad-pair search on last iteration of dispatch
+        if (iter == params.iters_per_dispatch - 1u && cost > 0u) {
+            let ew = rng_range(&rng, WEEKS);
+            let eq1 = rng_range(&rng, QUADS);
+            var eq2 = rng_range(&rng, QUADS - 1u);
+            if (eq2 >= eq1) { eq2 += 1u; }
+            var best_delta = 0;
+            var best_ep1 = 0xFFFFFFFFu;
+            var best_ep2 = 0xFFFFFFFFu;
+            for (var ep1 = 0u; ep1 < POS; ep1++) {
+                for (var ep2 = 0u; ep2 < POS; ep2++) {
+                    swap_positions(&a, ew, eq1, ep1, ew, eq2, ep2);
+                    let nc = evaluate(&a);
+                    let d = i32(nc) - i32(cost);
+                    if (d < best_delta) {
+                        best_delta = d;
+                        best_ep1 = ep1;
+                        best_ep2 = ep2;
+                    }
+                    swap_positions(&a, ew, eq1, ep1, ew, eq2, ep2);
+                }
+            }
+            if (best_ep1 != 0xFFFFFFFFu) {
+                swap_positions(&a, ew, eq1, best_ep1, ew, eq2, best_ep2);
+                cost = u32(i32(cost) + best_delta);
+                if (cost < best_cost) { best_cost = cost; write_best(&a, base); }
             }
         }
     }

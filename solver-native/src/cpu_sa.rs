@@ -408,12 +408,13 @@ pub fn run_cpu_workers(
                                     best_a = a;
                                     best_cost = cost.total;
                                 }
+                                let real_cost = evaluate(&best_a, &w8);
                                 eprintln!(
-                                    "[{}] cpu {} exiting focus (\x1b[1m{}\x1b[0m) | cost: {}",
+                                    "[{}] cpu {} exiting focus (\x1b[1m{}\x1b[0m) | {}",
                                     now_iso(),
                                     core_id,
                                     name,
-                                    cost.total,
+                                    cost_label(&real_cost),
                                 );
                                 last_improvement = i;
                             }
@@ -863,12 +864,13 @@ pub fn run_cpu_workers(
                             } else {
                                 format!("{}M", i / 1_000_000)
                             };
+                            let breakdown = evaluate(&best_a, &w8);
                             eprintln!(
-                                "[{}] cpu {} @ {} | best: {} | temp: {:.2}{}",
+                                "[{}] cpu {} @ {} | {} | temp: {:.2}{}",
                                 now_iso(),
                                 core_id,
                                 label,
-                                best_cost,
+                                cost_label(&breakdown),
                                 active_temp,
                                 if let Some(ref name) = focus_name {
                                     format!(" | \x1b[1mfocus: {}\x1b[0m", name)
