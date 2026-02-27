@@ -558,6 +558,30 @@ async fn run_gpu(
                         let _ = fs::write(&filename, assignment_to_tsv(&out));
                         eprintln!("[{}] Saved {}", now_iso(), filename);
                     }
+
+                    // Burst reseed GPU chains from CPU best (same as GPU new-best path)
+                    let burst_count = (CHAIN_COUNT as usize) / 20;
+                    let mut burst_seeded = 0;
+                    let cpu_assign = sb.assignment;
+                    drop(sb);
+                    for _ in 0..burst_count * 4 {
+                        let idx = rng.random_range(0..CHAIN_COUNT as usize);
+                        if idx % TEMP_LEVELS >= COLD_THRESHOLD { continue; }
+                        let pert = 1 + (idx % TEMP_LEVELS) * 3 / COLD_THRESHOLD;
+                        let mut a = cpu_assign;
+                        solver_core::perturb(&mut a, &mut rng, pert);
+                        let packed = pack_assignment(&a);
+                        let cost = solver_core::evaluate(&a, &w8).total;
+                        let buf_offset = idx * ASSIGN_U32S * 4;
+                        queue.write_buffer(&assign_buf, buf_offset as u64, bytemuck::cast_slice(&packed));
+                        queue.write_buffer(&cost_buf, (idx * 4) as u64, bytemuck::bytes_of(&cost));
+                        burst_seeded += 1;
+                        if burst_seeded >= burst_count { break; }
+                    }
+                    eprintln!("[{}] SYNC: reseeded {} cold chains from best (cost {}, stagnant {})",
+                        now_iso(), burst_seeded, global_best_cost, dispatches_since_improvement);
+                } else {
+                    drop(sb);
                 }
             }
 
