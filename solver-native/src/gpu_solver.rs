@@ -16,9 +16,9 @@ const ITERS_PER_DISPATCH: u32 = 1000;
 const ASSIGN_U32S: usize = 48;
 const SYNC_INTERVAL: u64 = 10;
 
-const TEMP_LEVELS: usize = 512;
-const COLD_THRESHOLD: usize = 128;
-const WARM_THRESHOLD: usize = 384;
+const TEMP_LEVELS: usize = 256;
+const COLD_THRESHOLD: usize = 64;
+const WARM_THRESHOLD: usize = 192;
 
 const STAGNATION_DISPATCHES: u64 = 60;
 const ESCALATION_DISPATCHES: u64 = 300;
@@ -648,7 +648,9 @@ async fn run_gpu(
             continue;
         }
 
-        // 2. Read costs + sample median
+        // 2. Read costs + sample median + per-CPU-partition bests
+        let chains_per_cpu = if cpu_cores > 0 { chain_count as usize / cpu_cores } else { chain_count as usize };
+        let mut partition_bests: Vec<(u32, usize)> = vec![(u32::MAX, 0); cpu_cores]; // (cost, chain_idx)
         let (min_cost, min_chain) = {
             let data = costs_slice.get_mapped_range();
             let costs: &[u32] = bytemuck::cast_slice(&data);
@@ -656,6 +658,10 @@ async fn run_gpu(
             let mut best_idx = 0u32;
             for (i, &c) in costs.iter().enumerate() {
                 if c < best { best = c; best_idx = i as u32; }
+                let partition = (i / chains_per_cpu).min(cpu_cores - 1);
+                if c < partition_bests[partition].0 {
+                    partition_bests[partition] = (c, i);
+                }
             }
             gpu_median = sampled_median(costs, &mut rng);
             (best, best_idx)
@@ -738,18 +744,46 @@ async fn run_gpu(
                 if burst_seeded >= burst_count { break; }
             }
 
-            // Reseed some CPU workers from new best
-            for (i, cmd_tx) in cpu_workers.commands.iter().enumerate() {
-                if i % 2 == 0 { continue; } // reseed half
-                let mut a = assignment;
-                solver_core::perturb(&mut a, &mut rng, 3 + i);
-                let _ = cmd_tx.send(WorkerCommand::SetState(a));
-                if i < worker_metas.len() {
-                    worker_metas[i].reseeded_at = Instant::now();
-                    worker_metas[i].cost_at_reseed = global_best_cost;
+        }
+
+        // 3b. Feed per-partition GPU bests into controlling CPU workers
+        for (pi, &(pcost, pidx)) in partition_bests.iter().enumerate() {
+            if pcost == u32::MAX { continue; }
+            let cpu_best = worker_metas.get(pi)
+                .and_then(|m| m.last_report.as_ref())
+                .map(|r| solver_core::evaluate(&r.best_assignment, &w8).total)
+                .unwrap_or(u32::MAX);
+            if pcost < cpu_best {
+                // Read back the assignment from GPU
+                let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("Read Partition Best"),
+                });
+                let offset = pidx as u64 * ASSIGN_U32S as u64 * 4;
+                encoder.copy_buffer_to_buffer(&best_assign_buf, offset, &assign_readback_buf, 0, (ASSIGN_U32S * 4) as u64);
+                queue.submit(Some(encoder.finish()));
+
+                let assign_slice = assign_readback_buf.slice(..);
+                let (tx, rx) = std::sync::mpsc::channel();
+                assign_slice.map_async(wgpu::MapMode::Read, move |r| { let _ = tx.send(r); });
+                let _ = device.poll(wgpu::PollType::Wait);
+                let _ = rx.recv();
+
+                let packed: [u32; ASSIGN_U32S] = {
+                    let data = assign_slice.get_mapped_range();
+                    let slice: &[u32] = bytemuck::cast_slice(&data);
+                    let mut arr = [0u32; ASSIGN_U32S];
+                    arr.copy_from_slice(slice);
+                    arr
+                };
+                assign_readback_buf.unmap();
+
+                let assignment = unpack_assignment(&packed);
+                let _ = cpu_workers.commands[pi].send(WorkerCommand::SetState(assignment));
+                if pi < worker_metas.len() {
+                    worker_metas[pi].reseeded_at = Instant::now();
+                    worker_metas[pi].cost_at_reseed = pcost;
                 }
             }
-
         }
 
         // 4. Drain CPU reports
@@ -820,6 +854,34 @@ async fn run_gpu(
                     worker_metas[cid].prev_iter_time = Instant::now();
                 }
                 worker_metas[cid].last_report = Some(report);
+            }
+        }
+
+        // 4b. Reseed each CPU's GPU partition from that worker's personal best
+        for (pi, meta) in worker_metas.iter().enumerate() {
+            if let Some(ref report) = meta.last_report {
+                let cpu_best = solver_core::evaluate(&report.best_assignment, &w8).total;
+                let (gpu_part_best, _) = partition_bests[pi];
+                if cpu_best < gpu_part_best {
+                    let start = pi * chains_per_cpu;
+                    let end = ((pi + 1) * chains_per_cpu).min(chain_count as usize);
+                    let reseed_count = (end - start) / 20;
+                    let mut reseeded = 0;
+                    for _ in 0..reseed_count * 4 {
+                        let idx = start + rng.random_range(0..(end - start));
+                        if idx % TEMP_LEVELS >= COLD_THRESHOLD { continue; }
+                        let pert = 1 + (idx % TEMP_LEVELS) * 3 / COLD_THRESHOLD;
+                        let mut a = report.best_assignment;
+                        solver_core::perturb(&mut a, &mut rng, pert);
+                        let packed = pack_assignment(&a);
+                        let cost = solver_core::evaluate(&a, &w8).total;
+                        queue.write_buffer(&assign_buf, (idx * ASSIGN_U32S * 4) as u64, bytemuck::cast_slice(&packed));
+                        queue.write_buffer(&cost_buf, (idx * 4) as u64, bytemuck::bytes_of(&cost));
+                        chain_source[idx] = format!("cpu{}", pi);
+                        reseeded += 1;
+                        if reseeded >= reseed_count { break; }
+                    }
+                }
             }
         }
 

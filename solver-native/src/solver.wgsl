@@ -620,9 +620,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     var cost = costs[tid];
     var best_cost = best_costs[tid];
 
-    // Geometric temperature ladder: 512 distinct levels in [0.1, 10.0]
-    // Cold chains (low tid % 512) exploit near best; hot chains explore freely
-    let temp_levels = 512u;
+    // Geometric temperature ladder: 256 levels in [0.1, 10.0], matching workgroup size
+    // so every workgroup has an even spread of cold-to-hot chains
+    let temp_levels = 256u;
     let t_frac = f32(tid % temp_levels) / f32(temp_levels - 1u);
     let temp = 0.1 * pow(100.0, t_frac);
 
