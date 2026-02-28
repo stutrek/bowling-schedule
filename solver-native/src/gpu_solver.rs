@@ -1,12 +1,12 @@
 use bytemuck::{Pod, Zeroable};
 use rand::rngs::SmallRng;
 use rand::{Rng, SeedableRng};
-use solver_native::cpu_sa::SharedBest;
+use solver_native::cpu_sa::{self, CpuWorkers, WorkerCommand, WorkerReport};
 use solver_native::*;
 use std::fs;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 use wgpu::util::DeviceExt;
 
 const DEFAULT_CHAIN_COUNT: u32 = 32768;
@@ -16,14 +16,15 @@ const ITERS_PER_DISPATCH: u32 = 1000;
 const ASSIGN_U32S: usize = 48;
 const SYNC_INTERVAL: u64 = 10;
 
-// Temperature-aware reseeding: 512 levels geometric [0.1, 10.0]
 const TEMP_LEVELS: usize = 512;
-const COLD_THRESHOLD: usize = 128; // idx % 512 < 128 = cold chains (exploit)
-const WARM_THRESHOLD: usize = 384; // idx % 512 >= 384 = hot chains (explore)
+const COLD_THRESHOLD: usize = 128;
+const WARM_THRESHOLD: usize = 384;
 
-// Stagnation thresholds (in dispatches, ~1 dispatch/sec)
-const STAGNATION_DISPATCHES: u64 = 60; // ~1 min → aggressive mode
-const ESCALATION_DISPATCHES: u64 = 300; // ~5 min → escalated shakeup
+const STAGNATION_DISPATCHES: u64 = 60;
+const ESCALATION_DISPATCHES: u64 = 300;
+
+const VERIFY_INTERVAL_SECS: u64 = 30;
+
 
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
@@ -54,21 +55,201 @@ struct GpuParams {
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
 struct GpuMoveThresholds {
-    t: [u32; 12], // 11 cumulative thresholds (0-100) + 1 padding
+    t: [u32; 12],
 }
 
-// Default: matches original hardcoded values
 const THRESH_DEFAULT: GpuMoveThresholds = GpuMoveThresholds {
     t: [25, 40, 50, 58, 64, 70, 75, 81, 87, 93, 100, 0],
 };
-// High cost (>500): more structural/exploration moves
 const THRESH_HIGH_COST: GpuMoveThresholds = GpuMoveThresholds {
     t: [30, 40, 52, 62, 69, 75, 79, 82, 88, 94, 100, 0],
 };
-// Low cost (<200): more fine-grained moves
 const THRESH_LOW_COST: GpuMoveThresholds = GpuMoveThresholds {
     t: [20, 38, 46, 52, 57, 62, 67, 74, 82, 91, 100, 0],
 };
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Orchestrator state
+// ═══════════════════════════════════════════════════════════════════════════
+
+struct WorkerMeta {
+    reseeded_at: Instant,
+    cost_at_reseed: u32,
+    focus: Option<&'static str>,
+    last_report: Option<WorkerReport>,
+    prev_iterations: u64,
+    prev_iter_time: Instant,
+    iters_per_sec: u64,
+}
+
+struct GlobalBestMeta {
+    source: String,
+    found_at: Instant,
+}
+
+struct ProvenanceTally {
+    from_shakeup: u32,
+    from_normal: u32,
+    from_gpu: u32,
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Focus mode (orchestrator picks worst constraint)
+// ═══════════════════════════════════════════════════════════════════════════
+
+fn pick_focus_constraint(cost: &CostBreakdown, original: &Weights) -> (&'static str, Weights) {
+    let candidates = [
+        (cost.matchup_balance, "match"),
+        (cost.consecutive_opponents, "consec"),
+        (cost.early_late_balance, "el_bal"),
+        (cost.early_late_alternation, "el_alt"),
+        (cost.lane_balance, "lane"),
+        (cost.lane_switch_balance, "switch"),
+        (cost.late_lane_balance, "ll_bal"),
+        (cost.commissioner_overlap, "comm"),
+    ];
+
+    let &(_, name) = candidates
+        .iter()
+        .filter(|(v, _)| *v > 0)
+        .max_by_key(|(v, _)| *v)
+        .unwrap_or(&(0, "match"));
+
+    let mut w = Weights {
+        matchup_zero: 0, matchup_triple: 0, consecutive_opponents: 0,
+        early_late_balance: 0.0, early_late_alternation: 0,
+        lane_balance: 0.0, lane_switch: 0.0, late_lane_balance: 0.0,
+        commissioner_overlap: 0,
+    };
+
+    match name {
+        "match" => { w.matchup_zero = original.matchup_zero; w.matchup_triple = original.matchup_triple; }
+        "consec" => w.consecutive_opponents = original.consecutive_opponents,
+        "el_bal" => w.early_late_balance = original.early_late_balance,
+        "el_alt" => w.early_late_alternation = original.early_late_alternation,
+        "lane" => w.lane_balance = original.lane_balance,
+        "switch" => w.lane_switch = original.lane_switch,
+        "ll_bal" => w.late_lane_balance = original.late_lane_balance,
+        "comm" => w.commissioner_overlap = original.commissioner_overlap,
+        _ => unreachable!(),
+    }
+
+    (name, w)
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Table output
+// ═══════════════════════════════════════════════════════════════════════════
+
+fn fmt_elapsed(d: Duration) -> String {
+    let secs = d.as_secs();
+    format!("+{:02}:{:02}:{:02}", secs / 3600, (secs % 3600) / 60, secs % 60)
+}
+
+const FRESH_TABLE_INTERVAL_SECS: u64 = 300;
+
+fn print_table_banner(
+    global_best_cost: u32,
+    global_best_bd: &CostBreakdown,
+    meta: &GlobalBestMeta,
+    start_time: Instant,
+) {
+    let now = chrono::Local::now().format("%H:%M:%S");
+    let age = meta.found_at.elapsed().as_secs();
+    let age_str = if age < 60 { format!("{}s ago", age) }
+                  else if age < 3600 { format!("{}m{}s ago", age / 60, age % 60) }
+                  else { format!("{}h{}m ago", age / 3600, (age % 3600) / 60) };
+    eprintln!(
+        "── {} {} best={} from {} ({}) ──\x1b[K",
+        now, fmt_elapsed(start_time.elapsed()),
+        global_best_cost, meta.source, age_str,
+    );
+    eprintln!("   {}\x1b[K", cost_label(global_best_bd));
+}
+
+fn print_table_header() {
+    eprintln!(
+        "{:>9}  {:>4} {:>5}  {:>5} {:>5}  {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9}  {:>6}  {}\x1b[K",
+        "elapsed", "src", "temp", "cur", "best",
+        "match", "consec", "el_bal", "el_alt", "lane", "switch", "ll_bal", "comm",
+        "it/s", "state",
+    );
+}
+
+fn print_cpu_row(
+    elapsed: Duration,
+    core_id: usize,
+    report: &WorkerReport,
+    w8: &Weights,
+    meta: &WorkerMeta,
+    temp: f64,
+) {
+    let cur_bd = evaluate(&report.current_assignment, w8);
+    let best_bd = evaluate(&report.best_assignment, w8);
+    let state = match meta.focus {
+        Some(name) => format!("focus:{}", name),
+        None => {
+            let since = meta.reseeded_at.elapsed().as_secs();
+            if since < 30 { format!("shook+{}s", since) } else { "normal".to_string() }
+        }
+    };
+    let ips = if meta.iters_per_sec > 0 {
+        format!("{}k", meta.iters_per_sec / 1000)
+    } else {
+        "-".to_string()
+    };
+    eprintln!(
+        "{:>9}  cpu{:<1} {:>5.1}  {:>5} {:>5}  {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4}  {:>6}  {}\x1b[K",
+        fmt_elapsed(elapsed), core_id, temp,
+        cur_bd.total, best_bd.total,
+        cur_bd.matchup_balance, best_bd.matchup_balance,
+        cur_bd.consecutive_opponents, best_bd.consecutive_opponents,
+        cur_bd.early_late_balance, best_bd.early_late_balance,
+        cur_bd.early_late_alternation, best_bd.early_late_alternation,
+        cur_bd.lane_balance, best_bd.lane_balance,
+        cur_bd.lane_switch_balance, best_bd.lane_switch_balance,
+        cur_bd.late_lane_balance, best_bd.late_lane_balance,
+        cur_bd.commissioner_overlap, best_bd.commissioner_overlap,
+        ips,
+        state,
+    );
+}
+
+fn print_gpu_row(
+    elapsed: Duration,
+    gpu_best_cost: u32,
+    gpu_median: u32,
+    best_bd: &CostBreakdown,
+    gpu_ips: u64,
+) {
+    let ips = if gpu_ips > 0 {
+        format!("{}M", gpu_ips / 1_000_000)
+    } else {
+        "-".to_string()
+    };
+    eprintln!(
+        "{:>9}  gpu   {:>5}  ~{:<4} {:>5}  {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4}  {:>6}\x1b[K",
+        fmt_elapsed(elapsed),
+        "-", gpu_median, gpu_best_cost,
+        "-", best_bd.matchup_balance,
+        "-", best_bd.consecutive_opponents,
+        "-", best_bd.early_late_balance,
+        "-", best_bd.early_late_alternation,
+        "-", best_bd.lane_balance,
+        "-", best_bd.lane_switch_balance,
+        "-", best_bd.late_lane_balance,
+        "-", best_bd.commissioner_overlap,
+        ips,
+    );
+}
+
+fn print_event(elapsed: Duration, msg: &str) {
+    eprintln!("{:>9}  >>>  {}", fmt_elapsed(elapsed), msg);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// GPU helpers (unchanged)
+// ═══════════════════════════════════════════════════════════════════════════
 
 fn pack_assignment(a: &solver_core::Assignment) -> [u32; ASSIGN_U32S] {
     let mut packed = [0u32; ASSIGN_U32S];
@@ -110,15 +291,25 @@ fn detect_chain_count() -> u32 {
         Ok(a) => a,
         Err(_) => return DEFAULT_CHAIN_COUNT,
     };
-
     let limits = adapter.limits();
-    // Largest per-chain buffer is assign_buf: chain_count * ASSIGN_U32S * 4 bytes
     let bytes_per_chain = (ASSIGN_U32S as u64) * 4;
     let max_chains = limits.max_storage_buffer_binding_size as u64 / bytes_per_chain;
     let chain_count = max_chains.min(MAX_CHAIN_COUNT as u64).max(MIN_CHAIN_COUNT as u64) as u32;
-    // Round down to multiple of 256 (workgroup size)
     (chain_count / 256) * 256
 }
+
+fn sampled_median(costs: &[u32], rng: &mut SmallRng) -> u32 {
+    let n = costs.len();
+    if n == 0 { return u32::MAX; }
+    let sample_size = 64.min(n);
+    let mut samples: Vec<u32> = (0..sample_size).map(|_| costs[rng.random_range(0..n)]).collect();
+    samples.sort_unstable();
+    samples[samples.len() / 2]
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Main
+// ═══════════════════════════════════════════════════════════════════════════
 
 fn main() {
     let shutdown = Arc::new(AtomicBool::new(false));
@@ -159,42 +350,46 @@ fn main() {
         }
     }
 
-    let shared_best = Arc::new(Mutex::new(SharedBest::new()));
-
-    if !seeds.is_empty() {
-        let mut best_seed_cost = u32::MAX;
-        let mut best_seed_idx = 0;
-        for (i, a) in seeds.iter().enumerate() {
-            let c = solver_core::evaluate(a, &w8).total;
-            if c < best_seed_cost {
-                best_seed_cost = c;
-                best_seed_idx = i;
-            }
+    let mut best_seed: Option<(Assignment, u32)> = None;
+    for a in &seeds {
+        let c = solver_core::evaluate(a, &w8).total;
+        if best_seed.as_ref().map_or(true, |(_, bc)| c < *bc) {
+            best_seed = Some((*a, c));
         }
-        let mut sb = shared_best.lock().unwrap();
-        sb.cost = best_seed_cost;
-        sb.assignment = seeds[best_seed_idx];
-        drop(sb);
-        eprintln!("[{}] Best seed: cost {}", now_iso(), best_seed_cost);
     }
 
-    let available_cores = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(4);
+    let available_cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
     let cpu_cores = if no_cpu { 0 } else { available_cores.saturating_sub(2) };
 
-    let cpu_handles = cpu_sa::run_cpu_workers(
+    let cpu_temps: Vec<f64> = if cpu_cores <= 1 {
+        vec![1.0]
+    } else {
+        (0..cpu_cores)
+            .map(|i| 0.2 * (10.0f64).powf(i as f64 / (cpu_cores - 1) as f64))
+            .collect()
+    };
+    let cpu_temps_display = cpu_temps.clone();
+
+    let cpu_workers = cpu_sa::run_cpu_workers(
         cpu_cores,
         w8.clone(),
-        Arc::clone(&shared_best),
+        cpu_temps,
         Arc::clone(&shutdown),
-        results_dir.to_string(),
     );
+
+    if let Some((ref seed_a, seed_cost)) = best_seed {
+        for (i, cmd_tx) in cpu_workers.commands.iter().enumerate() {
+            let mut a = *seed_a;
+            solver_core::perturb(&mut a, &mut SmallRng::from_os_rng(), 5 + i * 2);
+            let _ = cmd_tx.send(WorkerCommand::SetState(a));
+        }
+        eprintln!("Best seed: cost {}", seed_cost);
+    }
 
     let chain_count = detect_chain_count();
     eprintln!(
-        "[{}] GPU solver: {} chains, {} iters/dispatch, {} seed files, {} CPU cores",
-        now_iso(), chain_count, ITERS_PER_DISPATCH, seeds.len(), cpu_cores,
+        "GPU solver: {} chains, {} iters/dispatch, {} seed files, {} CPU cores",
+        chain_count, ITERS_PER_DISPATCH, seeds.len(), cpu_cores,
     );
 
     let mut rng = SmallRng::from_os_rng();
@@ -205,11 +400,7 @@ fn main() {
     let mut best_cost_data = vec![u32::MAX; chain_count as usize];
 
     for i in 0..chain_count as usize {
-        let a = if i < seeds.len() {
-            seeds[i]
-        } else {
-            solver_core::random_assignment(&mut rng)
-        };
+        let a = if i < seeds.len() { seeds[i] } else { solver_core::random_assignment(&mut rng) };
         let packed = pack_assignment(&a);
         let cost = solver_core::evaluate(&a, &w8).total;
 
@@ -248,14 +439,15 @@ fn main() {
     pollster::block_on(run_gpu(
         assign_data, best_assign_data, cost_data, best_cost_data, rng_data,
         gpu_weights, gpu_params, w8, results_dir.to_string(), shutdown, rng,
-        Arc::clone(&shared_best),
+        cpu_workers, cpu_cores, cpu_temps_display,
     ));
-
-    for h in cpu_handles {
-        let _ = h.join();
-    }
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// GPU orchestrator loop
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[allow(clippy::too_many_arguments)]
 async fn run_gpu(
     assign_data: Vec<u32>,
     best_assign_data: Vec<u32>,
@@ -268,9 +460,12 @@ async fn run_gpu(
     results_dir: String,
     shutdown: Arc<AtomicBool>,
     mut rng: SmallRng,
-    shared_best: Arc<Mutex<SharedBest>>,
+    cpu_workers: CpuWorkers,
+    cpu_cores: usize,
+    cpu_temps_display: Vec<f64>,
 ) {
     let chain_count = gpu_params.chain_count;
+    let mut chain_source: Vec<String> = vec!["random".to_string(); chain_count as usize];
     let instance = wgpu::Instance::default();
     let adapter = instance
         .request_adapter(&wgpu::RequestAdapterOptions {
@@ -280,10 +475,7 @@ async fn run_gpu(
         .await
         .expect("No GPU adapter found");
 
-    eprintln!(
-        "[{}] GPU: {} ({:?})",
-        now_iso(), adapter.get_info().name, adapter.get_info().backend
-    );
+    eprintln!("GPU: {} ({:?})", adapter.get_info().name, adapter.get_info().backend);
 
     let (device, queue) = adapter
         .request_device(&wgpu::DeviceDescriptor {
@@ -341,7 +533,6 @@ async fn run_gpu(
         usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
     });
 
-    // Readback buffers: 128KB for all best_costs, 192B for one assignment
     let costs_readback_size = (chain_count as usize * 4) as u64;
     let costs_readback_buf = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("costs_readback"),
@@ -356,7 +547,6 @@ async fn run_gpu(
         mapped_at_creation: false,
     });
 
-    // SA pipeline
     let sa_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("SA BGL"),
         entries: &[
@@ -394,21 +584,92 @@ async fn run_gpu(
 
     let sa_workgroups = (chain_count + 255) / 256;
 
+    // ─── Orchestrator state ───────────────────────────────────────────────
     let mut global_best_cost = u32::MAX;
     let mut global_best_assignment: Option<solver_core::Assignment> = None;
     let mut dispatch_count = 0u64;
     let start_time = Instant::now();
-    let mut last_print = Instant::now();
+    let mut last_verify = Instant::now();
     let mut dispatches_since_improvement: u64 = 0;
-    let mut last_thresh_regime: u8 = 0; // 0=default, 1=high, 2=low
+    let mut last_thresh_regime: u8 = 0;
     let mut aggressive_logged = false;
+    let mut gpu_median = u32::MAX;
+    let mut gpu_best_cost = u32::MAX;
+    let mut focus_active = false;
 
-    eprintln!("[{}] Starting GPU SA...", now_iso());
+    let mut worker_metas: Vec<WorkerMeta> = (0..cpu_cores).map(|_| WorkerMeta {
+        reseeded_at: Instant::now(),
+        cost_at_reseed: u32::MAX,
+        focus: None,
+        last_report: None,
+        prev_iterations: 0,
+        prev_iter_time: Instant::now(),
+        iters_per_sec: 0,
+    }).collect();
 
+    let mut global_best_meta = GlobalBestMeta {
+        source: "none".to_string(),
+        found_at: Instant::now(),
+    };
+    let mut tally = ProvenanceTally { from_shakeup: 0, from_normal: 0, from_gpu: 0 };
+    let mut last_print = Instant::now();
+    let mut last_fresh_table = Instant::now();
+    let mut can_overwrite = false;
+    let mut prev_line_count: u32 = 0;
+
+    // ─── Main loop ────────────────────────────────────────────────────────
     loop {
         if shutdown.load(Ordering::Relaxed) { break; }
 
-        // SA dispatch
+        macro_rules! maybe_print_table {
+            () => {
+                if last_print.elapsed().as_millis() >= 1000 {
+                    let fresh = !can_overwrite
+                        || last_fresh_table.elapsed().as_secs() >= FRESH_TABLE_INTERVAL_SECS;
+                    if !fresh && prev_line_count > 0 {
+                        eprint!("\x1b[{}A", prev_line_count);
+                    } else {
+                        last_fresh_table = Instant::now();
+                    }
+                    let mut lines: u32 = 0;
+                    if let Some(ref best) = global_best_assignment {
+                        let best_bd = solver_core::evaluate(best, &w8);
+                        print_table_banner(global_best_cost, &best_bd, &global_best_meta, start_time);
+                        lines += 2;
+                    }
+                    print_table_header();
+                    lines += 1;
+                    let elapsed = start_time.elapsed();
+                    let gpu_ips = if elapsed.as_secs() > 0 {
+                        dispatch_count * ITERS_PER_DISPATCH as u64 * chain_count as u64 / elapsed.as_secs()
+                    } else { 0 };
+                    if let Some(ref best) = global_best_assignment {
+                        let best_bd = solver_core::evaluate(best, &w8);
+                        print_gpu_row(elapsed, gpu_best_cost, gpu_median, &best_bd, gpu_ips);
+                        lines += 1;
+                    }
+                    for (i, meta) in worker_metas.iter().enumerate() {
+                        if let Some(ref report) = meta.last_report {
+                            let temp = if i < cpu_temps_display.len() { cpu_temps_display[i] } else { 0.0 };
+                            print_cpu_row(elapsed, i, report, &w8, meta, temp);
+                            lines += 1;
+                        }
+                    }
+                    prev_line_count = lines;
+                    can_overwrite = true;
+                    last_print = Instant::now();
+                }
+            };
+        }
+
+        macro_rules! event {
+            ($($arg:tt)*) => {
+                print_event($($arg)*);
+                can_overwrite = false;
+            };
+        }
+
+        // 1. GPU dispatch (unchanged)
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("SA"),
         });
@@ -421,24 +682,21 @@ async fn run_gpu(
             pass.set_bind_group(0, &sa_bg, &[]);
             pass.dispatch_workgroups(sa_workgroups, 1, 1);
         }
-        // Copy best_costs to readback
         encoder.copy_buffer_to_buffer(&best_cost_buf, 0, &costs_readback_buf, 0, costs_readback_size);
         queue.submit(Some(encoder.finish()));
 
-        // Map and read best_costs
         let costs_slice = costs_readback_buf.slice(..);
         let (tx, rx) = std::sync::mpsc::channel();
         costs_slice.map_async(wgpu::MapMode::Read, move |r| { let _ = tx.send(r); });
         if device.poll(wgpu::PollType::Wait).is_err() {
-            eprintln!("[{}] GPU poll timeout, retrying...", now_iso());
             costs_readback_buf.unmap();
             continue;
         }
         if rx.recv().is_err() {
-            eprintln!("[{}] Map callback failed, retrying...", now_iso());
             continue;
         }
 
+        // 2. Read costs + sample median
         let (min_cost, min_chain) = {
             let data = costs_slice.get_mapped_range();
             let costs: &[u32] = bytemuck::cast_slice(&data);
@@ -447,19 +705,27 @@ async fn run_gpu(
             for (i, &c) in costs.iter().enumerate() {
                 if c < best { best = c; best_idx = i as u32; }
             }
+            gpu_median = sampled_median(costs, &mut rng);
             (best, best_idx)
         };
         costs_readback_buf.unmap();
+        gpu_best_cost = min_cost;
 
         dispatch_count += 1;
         dispatches_since_improvement += 1;
+        maybe_print_table!();
 
+        // 3. Check GPU improvement
         if min_cost < global_best_cost {
             global_best_cost = min_cost;
             dispatches_since_improvement = 0;
             aggressive_logged = false;
+            tally.from_gpu += 1;
+            global_best_meta = GlobalBestMeta {
+                source: format!("gpu({})", chain_source[min_chain as usize]),
+                found_at: Instant::now(),
+            };
 
-            // Read back winning assignment
             let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("Read Best"),
             });
@@ -483,35 +749,27 @@ async fn run_gpu(
             assign_readback_buf.unmap();
 
             let assignment = unpack_assignment(&packed);
-            let cpu_cost = solver_core::evaluate(&assignment, &w8);
-
-            eprintln!(
-                "[{}] NEW BEST: {} (chain {}, cpu verify: {}) | {}",
-                now_iso(), global_best_cost, min_chain, cpu_cost.total, cost_label(&cpu_cost),
-            );
-
+            let cpu_verify = solver_core::evaluate(&assignment, &w8);
             global_best_assignment = Some(assignment);
 
-            // Update shared best (visible to CPU workers)
-            {
-                let mut sb = shared_best.lock().unwrap();
-                if global_best_cost < sb.cost {
-                    sb.cost = global_best_cost;
-                    sb.assignment = assignment;
-                }
-            }
+            let verify_status = if cpu_verify.total == min_cost { "OK" } else { "MISMATCH" };
+            let seed_from = &chain_source[min_chain as usize];
+            event!(start_time.elapsed(), &format!(
+                "NEW BEST {} from gpu chain {} (seed: {}, verify: {}) | {}",
+                global_best_cost, min_chain, seed_from, verify_status, cost_label(&cpu_verify),
+            ));
 
-            if global_best_cost <= 160 {
+            if global_best_cost < 160 {
                 let ts = chrono::Local::now().format("%Y%m%d-%H%M%S%z");
                 let filename = format!("{}/{:04}-gpu-{}.tsv", results_dir, global_best_cost, ts);
                 let mut out = assignment;
                 reassign_commissioners(&mut out);
                 let _ = fs::write(&filename, assignment_to_tsv(&out));
-                eprintln!("[{}] Saved {}", now_iso(), filename);
+                event!(start_time.elapsed(), &format!("Saved {}", filename));
             }
 
-            // Burst reseed: immediately seed cold chains from new best
-            let burst_count = (chain_count as usize) / 20; // 5%
+            // Burst reseed cold GPU chains from GPU best
+            let burst_count = (chain_count as usize) / 20;
             let mut burst_seeded = 0;
             for _ in 0..burst_count * 4 {
                 let idx = rng.random_range(0..chain_count as usize);
@@ -521,16 +779,116 @@ async fn run_gpu(
                 solver_core::perturb(&mut a, &mut rng, pert);
                 let packed = pack_assignment(&a);
                 let cost = solver_core::evaluate(&a, &w8).total;
-                let buf_offset = idx * ASSIGN_U32S * 4;
-                queue.write_buffer(&assign_buf, buf_offset as u64, bytemuck::cast_slice(&packed));
+                queue.write_buffer(&assign_buf, (idx * ASSIGN_U32S * 4) as u64, bytemuck::cast_slice(&packed));
                 queue.write_buffer(&cost_buf, (idx * 4) as u64, bytemuck::bytes_of(&cost));
+                chain_source[idx] = "gpu".to_string();
                 burst_seeded += 1;
                 if burst_seeded >= burst_count { break; }
             }
-            eprintln!("[{}] Burst reseeded {} cold chains from new best", now_iso(), burst_seeded);
+
+            // Reseed some CPU workers from new best
+            for (i, cmd_tx) in cpu_workers.commands.iter().enumerate() {
+                if i % 2 == 0 { continue; } // reseed half
+                let mut a = assignment;
+                solver_core::perturb(&mut a, &mut rng, 3 + i);
+                let _ = cmd_tx.send(WorkerCommand::SetState(a));
+                if i < worker_metas.len() {
+                    worker_metas[i].reseeded_at = Instant::now();
+                    worker_metas[i].cost_at_reseed = global_best_cost;
+                }
+            }
+
+            // Exit focus mode on improvement
+            if focus_active {
+                focus_active = false;
+                for (i, cmd_tx) in cpu_workers.commands.iter().enumerate() {
+                    let _ = cmd_tx.send(WorkerCommand::SetWeights(w8.clone()));
+                    if i < worker_metas.len() { worker_metas[i].focus = None; }
+                }
+                event!(start_time.elapsed(), "Exiting focus mode (improvement found)");
+            }
         }
 
-        // Update move threshold regime based on cost
+        // 4. Drain CPU reports
+        while let Ok(report) = cpu_workers.reports.try_recv() {
+            let cid = report.core_id;
+            if cid < worker_metas.len() {
+                let real_best = solver_core::evaluate(&report.best_assignment, &w8).total;
+                if real_best < global_best_cost {
+                    global_best_cost = real_best;
+                    global_best_assignment = Some(report.best_assignment);
+                    dispatches_since_improvement = 0;
+                    aggressive_logged = false;
+                    global_best_meta = GlobalBestMeta {
+                        source: format!("cpu{}", cid),
+                        found_at: Instant::now(),
+                    };
+
+                    let since_reseed = worker_metas[cid].reseeded_at.elapsed().as_secs();
+                    let reseed_cost = worker_metas[cid].cost_at_reseed;
+                    if since_reseed < 30 {
+                        tally.from_shakeup += 1;
+                        event!(start_time.elapsed(), &format!(
+                            "NEW BEST {} from cpu{} (shook {}s ago, {}->{})",
+                            global_best_cost, cid, since_reseed, reseed_cost, global_best_cost,
+                        ));
+                    } else {
+                        tally.from_normal += 1;
+                        event!(start_time.elapsed(), &format!(
+                            "NEW BEST {} from cpu{} (normal, running {}s)",
+                            global_best_cost, cid, since_reseed,
+                        ));
+                    }
+
+                    if global_best_cost < 160 {
+                        let ts = chrono::Local::now().format("%Y%m%d-%H%M%S%z");
+                        let filename = format!("{}/{:04}-cpu{}-{}.tsv", results_dir, global_best_cost, cid, ts);
+                        let mut out = report.best_assignment;
+                        reassign_commissioners(&mut out);
+                        let _ = fs::write(&filename, assignment_to_tsv(&out));
+                        event!(start_time.elapsed(), &format!("Saved {}", filename));
+                    }
+
+                    // Burst reseed GPU chains from CPU best
+                    let burst_count = (chain_count as usize) / 20;
+                    let mut burst_seeded = 0;
+                    let source_label = format!("cpu{}", cid);
+                    for _ in 0..burst_count * 4 {
+                        let idx = rng.random_range(0..chain_count as usize);
+                        if idx % TEMP_LEVELS >= COLD_THRESHOLD { continue; }
+                        let pert = 1 + (idx % TEMP_LEVELS) * 3 / COLD_THRESHOLD;
+                        let mut a = report.best_assignment;
+                        solver_core::perturb(&mut a, &mut rng, pert);
+                        let packed = pack_assignment(&a);
+                        let cost = solver_core::evaluate(&a, &w8).total;
+                        queue.write_buffer(&assign_buf, (idx * ASSIGN_U32S * 4) as u64, bytemuck::cast_slice(&packed));
+                        queue.write_buffer(&cost_buf, (idx * 4) as u64, bytemuck::bytes_of(&cost));
+                        chain_source[idx] = source_label.clone();
+                        burst_seeded += 1;
+                        if burst_seeded >= burst_count { break; }
+                    }
+
+                    // Exit focus mode on improvement
+                    if focus_active {
+                        focus_active = false;
+                        for (j, cmd_tx) in cpu_workers.commands.iter().enumerate() {
+                            let _ = cmd_tx.send(WorkerCommand::SetWeights(w8.clone()));
+                            if j < worker_metas.len() { worker_metas[j].focus = None; }
+                        }
+                    }
+                }
+                let dt = worker_metas[cid].prev_iter_time.elapsed().as_secs_f64();
+                if dt > 0.1 {
+                    let di = report.iterations_total.saturating_sub(worker_metas[cid].prev_iterations);
+                    worker_metas[cid].iters_per_sec = (di as f64 / dt) as u64;
+                    worker_metas[cid].prev_iterations = report.iterations_total;
+                    worker_metas[cid].prev_iter_time = Instant::now();
+                }
+                worker_metas[cid].last_report = Some(report);
+            }
+        }
+
+        // 5. Move threshold regime (unchanged logic)
         let new_regime = if global_best_cost > 500 { 1u8 }
                          else if global_best_cost < 200 { 2u8 }
                          else { 0u8 };
@@ -542,153 +900,102 @@ async fn run_gpu(
             };
             queue.write_buffer(&move_thresh_buf, 0, bytemuck::bytes_of(&thresh));
             last_thresh_regime = new_regime;
-            eprintln!(
-                "[{}] Move threshold regime: {}",
-                now_iso(),
-                match new_regime { 1 => "high-cost (exploration)", 2 => "low-cost (fine-grained)", _ => "default" },
-            );
         }
 
-        if last_print.elapsed().as_secs() >= 2 {
-            let total_iters = dispatch_count * ITERS_PER_DISPATCH as u64 * chain_count as u64;
-            let elapsed = start_time.elapsed().as_secs_f64();
-            let rate = total_iters as f64 / elapsed / 1e6;
-            eprintln!(
-                "[{}] dispatch {} | {:.2}B total iters | {:.1}M iters/sec | best: {} | stagnant: {}",
-                now_iso(), dispatch_count, total_iters as f64 / 1e9, rate, global_best_cost, dispatches_since_improvement,
-            );
-            last_print = Instant::now();
-        }
-
+        // 6. Sync interval: GPU reseeding from CPU worker bests + stagnation
+        maybe_print_table!();
         if dispatch_count % SYNC_INTERVAL == 0 {
-            // Check if CPU found something better
-            {
-                let sb = shared_best.lock().unwrap();
-                if sb.cost < global_best_cost {
-                    let prev = global_best_cost;
-                    global_best_cost = sb.cost;
-                    global_best_assignment = Some(sb.assignment);
-                    dispatches_since_improvement = 0;
-                    aggressive_logged = false;
-                    let cpu_cost = solver_core::evaluate(&sb.assignment, &w8);
-                    eprintln!(
-                        "[{}] GPU adopted CPU best: {} (was {}) | {}",
-                        now_iso(), sb.cost, prev, cost_label(&cpu_cost),
-                    );
-
-                    if sb.cost <= 160 {
-                        let ts = chrono::Local::now().format("%Y%m%d-%H%M%S%z");
-                        let filename = format!("{}/{:04}-cpu-{}.tsv", results_dir, sb.cost, ts);
-                        let mut out = sb.assignment;
-                        reassign_commissioners(&mut out);
-                        let _ = fs::write(&filename, assignment_to_tsv(&out));
-                        eprintln!("[{}] Saved {}", now_iso(), filename);
-                    }
-
-                    // Burst reseed GPU chains from CPU best (same as GPU new-best path)
-                    let burst_count = (chain_count as usize) / 20;
-                    let mut burst_seeded = 0;
-                    let cpu_assign = sb.assignment;
-                    drop(sb);
-                    for _ in 0..burst_count * 4 {
-                        let idx = rng.random_range(0..chain_count as usize);
-                        if idx % TEMP_LEVELS >= COLD_THRESHOLD { continue; }
-                        let pert = 1 + (idx % TEMP_LEVELS) * 3 / COLD_THRESHOLD;
-                        let mut a = cpu_assign;
-                        solver_core::perturb(&mut a, &mut rng, pert);
-                        let packed = pack_assignment(&a);
-                        let cost = solver_core::evaluate(&a, &w8).total;
-                        let buf_offset = idx * ASSIGN_U32S * 4;
-                        queue.write_buffer(&assign_buf, buf_offset as u64, bytemuck::cast_slice(&packed));
-                        queue.write_buffer(&cost_buf, (idx * 4) as u64, bytemuck::bytes_of(&cost));
-                        burst_seeded += 1;
-                        if burst_seeded >= burst_count { break; }
-                    }
-                    eprintln!("[{}] SYNC: reseeded {} cold chains from best (cost {}, stagnant {})",
-                        now_iso(), burst_seeded, global_best_cost, dispatches_since_improvement);
-                } else {
-                    drop(sb);
-                }
-            }
-
             if let Some(ref best) = global_best_assignment {
-                // Temperature-aware reseeding: only reseed cold chains
                 let base_reseed = (chain_count as usize) / 10;
                 let reseed_count = if dispatches_since_improvement < 5 {
-                    base_reseed / 2 // less when actively improving
+                    base_reseed / 2
                 } else if dispatches_since_improvement > STAGNATION_DISPATCHES {
-                    base_reseed * 2 // more when stagnating
+                    base_reseed * 2
                 } else {
                     base_reseed
                 };
 
+                // Collect seed sources: global best + each CPU worker's personal best
+                let mut seed_sources: Vec<(Assignment, String)> = vec![(*best, global_best_meta.source.clone())];
+                for (si, meta) in worker_metas.iter().enumerate() {
+                    if let Some(ref report) = meta.last_report {
+                        seed_sources.push((report.best_assignment, format!("cpu{}", si)));
+                    }
+                }
+
                 let mut reseeded = 0;
                 let mut attempts = 0;
-                let max_attempts = reseed_count * 4;
-                while reseeded < reseed_count && attempts < max_attempts {
+                let num_sources = seed_sources.len();
+                while reseeded < reseed_count && attempts < reseed_count * 4 {
                     attempts += 1;
                     let idx = rng.random_range(0..chain_count as usize);
-                    let temp_level = idx % TEMP_LEVELS;
-
-                    // Only reseed cold chains
-                    if temp_level >= COLD_THRESHOLD {
-                        continue;
-                    }
-
-                    // Scale perturbation by temperature level within cold band
-                    let pert_max = 2 + (temp_level * 3 / COLD_THRESHOLD); // 2..5
+                    if idx % TEMP_LEVELS >= COLD_THRESHOLD { continue; }
+                    let pert_max = 2 + (idx % TEMP_LEVELS) * 3 / COLD_THRESHOLD;
                     let pert = rng.random_range(1..=pert_max);
-                    let mut a = *best;
+                    let si = rng.random_range(0..num_sources);
+                    let mut a = seed_sources[si].0;
                     solver_core::perturb(&mut a, &mut rng, pert);
                     let packed = pack_assignment(&a);
                     let cost = solver_core::evaluate(&a, &w8).total;
-                    let offset = idx * ASSIGN_U32S * 4;
-                    queue.write_buffer(&assign_buf, offset as u64, bytemuck::cast_slice(&packed));
+                    queue.write_buffer(&assign_buf, (idx * ASSIGN_U32S * 4) as u64, bytemuck::cast_slice(&packed));
                     queue.write_buffer(&cost_buf, (idx * 4) as u64, bytemuck::bytes_of(&cost));
+                    chain_source[idx] = seed_sources[si].1.clone();
                     reseeded += 1;
                 }
 
-                // Stagnation: aggressive mode — inject heavily perturbed chains into hot band
                 if dispatches_since_improvement >= STAGNATION_DISPATCHES {
                     if !aggressive_logged {
-                        eprintln!(
-                            "[{}] STAGNATION: aggressive mode (stagnant {} dispatches)",
-                            now_iso(), dispatches_since_improvement,
-                        );
+                        event!(start_time.elapsed(), &format!(
+                            "SHAKEUP: aggressive mode (stagnant {} dispatches)", dispatches_since_improvement,
+                        ));
                         aggressive_logged = true;
+
+                        // Enter focus mode for CPU workers
+                        if !focus_active {
+                            let best_bd = solver_core::evaluate(best, &w8);
+                            if best_bd.total > 0 {
+                                let (name, fw) = pick_focus_constraint(&best_bd, &w8);
+                                let half = cpu_workers.commands.len() / 2;
+                                for (i, cmd_tx) in cpu_workers.commands.iter().enumerate() {
+                                    if i < half {
+                                        let _ = cmd_tx.send(WorkerCommand::SetWeights(fw.clone()));
+                                        if i < worker_metas.len() { worker_metas[i].focus = Some(name); }
+                                    }
+                                }
+                                focus_active = true;
+                                event!(start_time.elapsed(), &format!("CPU focus: {} (half of workers)", name));
+                            }
+                        }
                     }
 
-                    let hot_inject_count = (chain_count as usize) / 100; // ~1% of hot chains
+                    let shakeup_src = global_best_meta.source.clone();
+                    let hot_inject_count = (chain_count as usize) / 100;
                     let mut hot_injected = 0;
                     for _ in 0..hot_inject_count * 4 {
                         let idx = rng.random_range(0..chain_count as usize);
-                        if idx % TEMP_LEVELS < WARM_THRESHOLD {
-                            continue;
-                        }
+                        if idx % TEMP_LEVELS < WARM_THRESHOLD { continue; }
                         let mut a = *best;
                         let pert = rng.random_range(20..=50);
                         solver_core::perturb(&mut a, &mut rng, pert);
                         let packed = pack_assignment(&a);
                         let cost = solver_core::evaluate(&a, &w8).total;
-                        let offset = idx * ASSIGN_U32S * 4;
-                        queue.write_buffer(&assign_buf, offset as u64, bytemuck::cast_slice(&packed));
+                        queue.write_buffer(&assign_buf, (idx * ASSIGN_U32S * 4) as u64, bytemuck::cast_slice(&packed));
                         queue.write_buffer(&cost_buf, (idx * 4) as u64, bytemuck::bytes_of(&cost));
+                        chain_source[idx] = shakeup_src.clone();
                         hot_injected += 1;
                         if hot_injected >= hot_inject_count { break; }
                     }
                 }
 
-                // Stagnation: escalated shakeup — broader perturbation reach
                 if dispatches_since_improvement >= ESCALATION_DISPATCHES
                     && dispatches_since_improvement % ESCALATION_DISPATCHES == 0
                 {
-                    eprintln!(
-                        "[{}] ESCALATED SHAKEUP (stagnant {} dispatches)",
-                        now_iso(), dispatches_since_improvement,
-                    );
+                    event!(start_time.elapsed(), &format!(
+                        "ESCALATED SHAKEUP (stagnant {} dispatches)", dispatches_since_improvement,
+                    ));
 
-                    // Extra cold reseeds with stronger perturbation
-                    let extra_cold = (chain_count as usize) / 5; // 20%
+                    let esc_src = global_best_meta.source.clone();
+                    let extra_cold = (chain_count as usize) / 5;
                     let mut extra_count = 0;
                     for _ in 0..extra_cold * 4 {
                         let idx = rng.random_range(0..chain_count as usize);
@@ -698,15 +1005,14 @@ async fn run_gpu(
                         solver_core::perturb(&mut a, &mut rng, pert);
                         let packed = pack_assignment(&a);
                         let cost = solver_core::evaluate(&a, &w8).total;
-                        let offset = idx * ASSIGN_U32S * 4;
-                        queue.write_buffer(&assign_buf, offset as u64, bytemuck::cast_slice(&packed));
+                        queue.write_buffer(&assign_buf, (idx * ASSIGN_U32S * 4) as u64, bytemuck::cast_slice(&packed));
                         queue.write_buffer(&cost_buf, (idx * 4) as u64, bytemuck::bytes_of(&cost));
+                        chain_source[idx] = esc_src.clone();
                         extra_count += 1;
                         if extra_count >= extra_cold { break; }
                     }
 
-                    // Inject into warm band too
-                    let warm_inject = (chain_count as usize) / 50; // ~2%
+                    let warm_inject = (chain_count as usize) / 50;
                     let mut warm_count = 0;
                     for _ in 0..warm_inject * 4 {
                         let idx = rng.random_range(0..chain_count as usize);
@@ -717,27 +1023,76 @@ async fn run_gpu(
                         solver_core::perturb(&mut a, &mut rng, pert);
                         let packed = pack_assignment(&a);
                         let cost = solver_core::evaluate(&a, &w8).total;
-                        let offset = idx * ASSIGN_U32S * 4;
-                        queue.write_buffer(&assign_buf, offset as u64, bytemuck::cast_slice(&packed));
+                        queue.write_buffer(&assign_buf, (idx * ASSIGN_U32S * 4) as u64, bytemuck::cast_slice(&packed));
                         queue.write_buffer(&cost_buf, (idx * 4) as u64, bytemuck::bytes_of(&cost));
+                        chain_source[idx] = esc_src.clone();
                         warm_count += 1;
                         if warm_count >= warm_inject { break; }
                     }
-                }
 
-                eprintln!(
-                    "[{}] SYNC: reseeded {} cold chains from best (cost {}, stagnant {})",
-                    now_iso(), reseeded, global_best_cost, dispatches_since_improvement,
-                );
+                    // Reseed ALL CPU workers from best with heavy perturbation
+                    for (i, cmd_tx) in cpu_workers.commands.iter().enumerate() {
+                        let mut a = *best;
+                        solver_core::perturb(&mut a, &mut rng, 15 + i * 3);
+                        let _ = cmd_tx.send(WorkerCommand::SetState(a));
+                        if i < worker_metas.len() {
+                            worker_metas[i].reseeded_at = Instant::now();
+                            worker_metas[i].cost_at_reseed = global_best_cost;
+                            worker_metas[i].focus = None;
+                        }
+                    }
+                    // Reset focus mode on escalated shakeup
+                    if focus_active {
+                        focus_active = false;
+                        for cmd_tx in &cpu_workers.commands {
+                            let _ = cmd_tx.send(WorkerCommand::SetWeights(w8.clone()));
+                        }
+                    }
+                }
+            }
+        }
+
+        // 7. Periodic GPU verification
+        if last_verify.elapsed().as_secs() >= VERIFY_INTERVAL_SECS {
+            if let Some(ref best) = global_best_assignment {
+                let verify_cost = solver_core::evaluate(best, &w8);
+                let status = if verify_cost.total == global_best_cost { "OK" } else { "MISMATCH" };
+                event!(start_time.elapsed(), &format!(
+                    "VERIFY: global best {} == cpu eval {} {}",
+                    global_best_cost, verify_cost.total, status,
+                ));
+            }
+            last_verify = Instant::now();
+        }
+
+        // 8. Table output (driven by wall clock, not dispatch count)
+        maybe_print_table!();
+
+        // 9. Periodic tally
+        if dispatch_count > 0 && dispatch_count % 300 == 0 {
+            let total = tally.from_shakeup + tally.from_normal + tally.from_gpu;
+            if total > 0 {
+                event!(start_time.elapsed(), &format!(
+                    "TALLY: {} bests from shakeup, {} normal, {} GPU ({} total)",
+                    tally.from_shakeup, tally.from_normal, tally.from_gpu, total,
+                ));
             }
         }
     }
 
+    // Shutdown: send shutdown to CPU workers and join
+    for cmd_tx in &cpu_workers.commands {
+        let _ = cmd_tx.send(WorkerCommand::Shutdown);
+    }
+    for h in cpu_workers.handles {
+        let _ = h.join();
+    }
+
     if let Some(best) = global_best_assignment {
-        eprintln!(
-            "[{}] Final best: {} | {}",
-            now_iso(), global_best_cost, cost_label(&solver_core::evaluate(&best, &w8)),
-        );
+        let final_cost = solver_core::evaluate(&best, &w8);
+        print_event(start_time.elapsed(), &format!(
+            "Final best: {} | {}", global_best_cost, cost_label(&final_cost),
+        ));
     }
 }
 

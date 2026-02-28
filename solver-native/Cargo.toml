@@ -4,44 +4,18 @@ version = "0.1.0"
 edition = "2021"
 
 [[bin]]
-name = "solver-native"
-path = "src/main.rs"
-
-[[bin]]
-name = "refine"
-path = "src/refine.rs"
-
-[[bin]]
-name = "construct"
-path = "src/construct.rs"
-
-[[bin]]
-name = "first-half"
-path = "src/first_half.rs"
-
-[[bin]]
-name = "complete"
-path = "src/complete.rs"
-
-[[bin]]
-name = "split-sa"
-path = "src/split_sa.rs"
+name = "solver"
+path = "src/gpu_solver.rs"
 
 [[bin]]
 name = "rescore"
 path = "src/rescore.rs"
 
-[[bin]]
-name = "gpu-solver"
-path = "src/gpu_solver.rs"
-
 [dependencies]
 solver-core = { path = "../solver-core" }
 rand = { version = "0.9", features = ["small_rng"] }
 chrono = "0.4"
-serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-toml = "0.8"
 ctrlc = "3.5.2"
 wgpu = "25"
 pollster = "0.4"

@@ -1,7 +1,7 @@
 use rand::rngs::SmallRng;
 use rand::Rng;
 
-use crate::*;
+use solver_core::*;
 
 const NUM_MOVES: usize = 11;
 const BASE_WEIGHTS: [f64; NUM_MOVES] = [

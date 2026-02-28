@@ -2,10 +2,10 @@ use rand::rngs::SmallRng;
 use rand::SeedableRng;
 use wasm_bindgen::prelude::*;
 
-use solver_core::{
-    self as core, Weights,
-    sa::SASolver,
-};
+mod sa;
+
+use solver_core::{self as core, Weights};
+use sa::SASolver;
 
 #[wasm_bindgen]
 pub struct WasmCostBreakdown {
