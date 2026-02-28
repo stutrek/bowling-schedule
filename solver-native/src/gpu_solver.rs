@@ -75,7 +75,6 @@ const THRESH_LOW_COST: GpuMoveThresholds = GpuMoveThresholds {
 struct WorkerMeta {
     reseeded_at: Instant,
     cost_at_reseed: u32,
-    focus: Option<&'static str>,
     last_report: Option<WorkerReport>,
     prev_iterations: u64,
     prev_iter_time: Instant,
@@ -96,46 +95,6 @@ struct ProvenanceTally {
 // ═══════════════════════════════════════════════════════════════════════════
 // Focus mode (orchestrator picks worst constraint)
 // ═══════════════════════════════════════════════════════════════════════════
-
-fn pick_focus_constraint(cost: &CostBreakdown, original: &Weights) -> (&'static str, Weights) {
-    let candidates = [
-        (cost.matchup_balance, "match"),
-        (cost.consecutive_opponents, "consec"),
-        (cost.early_late_balance, "el_bal"),
-        (cost.early_late_alternation, "el_alt"),
-        (cost.lane_balance, "lane"),
-        (cost.lane_switch_balance, "switch"),
-        (cost.late_lane_balance, "ll_bal"),
-        (cost.commissioner_overlap, "comm"),
-    ];
-
-    let &(_, name) = candidates
-        .iter()
-        .filter(|(v, _)| *v > 0)
-        .max_by_key(|(v, _)| *v)
-        .unwrap_or(&(0, "match"));
-
-    let mut w = Weights {
-        matchup_zero: 0, matchup_triple: 0, consecutive_opponents: 0,
-        early_late_balance: 0.0, early_late_alternation: 0,
-        lane_balance: 0.0, lane_switch: 0.0, late_lane_balance: 0.0,
-        commissioner_overlap: 0,
-    };
-
-    match name {
-        "match" => { w.matchup_zero = original.matchup_zero; w.matchup_triple = original.matchup_triple; }
-        "consec" => w.consecutive_opponents = original.consecutive_opponents,
-        "el_bal" => w.early_late_balance = original.early_late_balance,
-        "el_alt" => w.early_late_alternation = original.early_late_alternation,
-        "lane" => w.lane_balance = original.lane_balance,
-        "switch" => w.lane_switch = original.lane_switch,
-        "ll_bal" => w.late_lane_balance = original.late_lane_balance,
-        "comm" => w.commissioner_overlap = original.commissioner_overlap,
-        _ => unreachable!(),
-    }
-
-    (name, w)
-}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Table output
@@ -186,13 +145,8 @@ fn print_cpu_row(
 ) {
     let cur_bd = evaluate(&report.current_assignment, w8);
     let best_bd = evaluate(&report.best_assignment, w8);
-    let state = match meta.focus {
-        Some(name) => format!("focus:{}", name),
-        None => {
-            let since = meta.reseeded_at.elapsed().as_secs();
-            if since < 30 { format!("shook+{}s", since) } else { "normal".to_string() }
-        }
-    };
+    let since = meta.reseeded_at.elapsed().as_secs();
+    let state = if since < 30 { format!("shook+{}s", since) } else { "normal".to_string() };
     let ips = if meta.iters_per_sec > 0 {
         format!("{}k", meta.iters_per_sec / 1000)
     } else {
@@ -365,7 +319,7 @@ fn main() {
         vec![1.0]
     } else {
         (0..cpu_cores)
-            .map(|i| 0.2 * (10.0f64).powf(i as f64 / (cpu_cores - 1) as f64))
+            .map(|i| 0.3 * (7.0 / 0.3f64).powf(i as f64 / (cpu_cores - 1) as f64))
             .collect()
     };
     let cpu_temps_display = cpu_temps.clone();
@@ -595,12 +549,10 @@ async fn run_gpu(
     let mut aggressive_logged = false;
     let mut gpu_median = u32::MAX;
     let mut gpu_best_cost = u32::MAX;
-    let mut focus_active = false;
 
     let mut worker_metas: Vec<WorkerMeta> = (0..cpu_cores).map(|_| WorkerMeta {
         reseeded_at: Instant::now(),
         cost_at_reseed: u32::MAX,
-        focus: None,
         last_report: None,
         prev_iterations: 0,
         prev_iter_time: Instant::now(),
@@ -798,15 +750,6 @@ async fn run_gpu(
                 }
             }
 
-            // Exit focus mode on improvement
-            if focus_active {
-                focus_active = false;
-                for (i, cmd_tx) in cpu_workers.commands.iter().enumerate() {
-                    let _ = cmd_tx.send(WorkerCommand::SetWeights(w8.clone()));
-                    if i < worker_metas.len() { worker_metas[i].focus = None; }
-                }
-                event!(start_time.elapsed(), "Exiting focus mode (improvement found)");
-            }
         }
 
         // 4. Drain CPU reports
@@ -868,14 +811,6 @@ async fn run_gpu(
                         if burst_seeded >= burst_count { break; }
                     }
 
-                    // Exit focus mode on improvement
-                    if focus_active {
-                        focus_active = false;
-                        for (j, cmd_tx) in cpu_workers.commands.iter().enumerate() {
-                            let _ = cmd_tx.send(WorkerCommand::SetWeights(w8.clone()));
-                            if j < worker_metas.len() { worker_metas[j].focus = None; }
-                        }
-                    }
                 }
                 let dt = worker_metas[cid].prev_iter_time.elapsed().as_secs_f64();
                 if dt > 0.1 {
@@ -949,23 +884,6 @@ async fn run_gpu(
                             "SHAKEUP: aggressive mode (stagnant {} dispatches)", dispatches_since_improvement,
                         ));
                         aggressive_logged = true;
-
-                        // Enter focus mode for CPU workers
-                        if !focus_active {
-                            let best_bd = solver_core::evaluate(best, &w8);
-                            if best_bd.total > 0 {
-                                let (name, fw) = pick_focus_constraint(&best_bd, &w8);
-                                let half = cpu_workers.commands.len() / 2;
-                                for (i, cmd_tx) in cpu_workers.commands.iter().enumerate() {
-                                    if i < half {
-                                        let _ = cmd_tx.send(WorkerCommand::SetWeights(fw.clone()));
-                                        if i < worker_metas.len() { worker_metas[i].focus = Some(name); }
-                                    }
-                                }
-                                focus_active = true;
-                                event!(start_time.elapsed(), &format!("CPU focus: {} (half of workers)", name));
-                            }
-                        }
                     }
 
                     let shakeup_src = global_best_meta.source.clone();
@@ -1038,14 +956,6 @@ async fn run_gpu(
                         if i < worker_metas.len() {
                             worker_metas[i].reseeded_at = Instant::now();
                             worker_metas[i].cost_at_reseed = global_best_cost;
-                            worker_metas[i].focus = None;
-                        }
-                    }
-                    // Reset focus mode on escalated shakeup
-                    if focus_active {
-                        focus_active = false;
-                        for cmd_tx in &cpu_workers.commands {
-                            let _ = cmd_tx.send(WorkerCommand::SetWeights(w8.clone()));
                         }
                     }
                 }

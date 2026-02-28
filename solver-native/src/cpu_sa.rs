@@ -17,7 +17,6 @@ const BASE_WEIGHTS: [f64; NUM_MOVES] = [
 
 pub enum WorkerCommand {
     SetState(Assignment),
-    SetWeights(Weights),
     SetTemp(f64),
     Shutdown,
 }
@@ -78,7 +77,7 @@ fn worker_loop(
 ) {
     let mut rng = SmallRng::from_os_rng();
     let mut a = random_assignment(&mut rng);
-    let mut active_w8 = initial_w8;
+    let active_w8 = initial_w8;
     let mut active_temp = initial_temp;
     let mut cost = evaluate(&a, &active_w8);
     let mut best_a = a;
@@ -91,12 +90,6 @@ fn worker_loop(
             match cmd {
                 WorkerCommand::SetState(new_a) => {
                     a = new_a;
-                    cost = evaluate(&a, &active_w8);
-                    best_a = a;
-                    best_cost = cost.total;
-                }
-                WorkerCommand::SetWeights(new_w8) => {
-                    active_w8 = new_w8;
                     cost = evaluate(&a, &active_w8);
                     best_a = a;
                     best_cost = cost.total;
