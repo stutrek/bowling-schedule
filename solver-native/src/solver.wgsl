@@ -579,6 +579,12 @@ fn move_guided_early_late(a: ptr<function, array<u32, 48>>, s: ptr<function, arr
 // SA helpers
 // ═══════════════════════════════════════════════════════════════════════
 
+fn sa_accept(delta: i32, temp: f32, s: ptr<function, array<u32, 4>>) -> bool {
+    if (delta < 0) { return true; }
+    if (delta == 0) { return rng_f32(s) < 0.2; }
+    return rng_f32(s) < exp(f32(-delta) / temp);
+}
+
 fn write_best(a: ptr<function, array<u32, 48>>, base: u32) {
     for (var i = 0u; i < ASSIGN_SIZE; i++) {
         best_assignments[base + i] = (*a)[i];
@@ -628,10 +634,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         if (best_cost == 0u) { break; }
 
         // Compound move: bundle multiple inter-quad swaps when cost is low
-        let compound_thresh = select(0u, select(25u, 50u, cost < 600u), cost < 1000u);
-        if (rng_range(&rng, 100u) < compound_thresh) {
+        let compound_prob = clamp((1000.0 - f32(cost)) / 800.0, 0.0, 0.5);
+        if (rng_f32(&rng) < compound_prob) {
             var sq = save_all(&a);
-            let max_n = select(4u, select(6u, 12u, cost < 200u), cost < 400u);
+            let max_n = u32(clamp((800.0 - f32(cost)) / 50.0, 4.0, 12.0));
             let n_swaps = 2u + rng_range(&rng, max_n - 1u);
             for (var k = 0u; k < n_swaps; k++) {
                 let cw = rng_range(&rng, WEEKS);
@@ -644,7 +650,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             }
             let new_cost = evaluate(&a);
             let delta = i32(new_cost) - i32(cost);
-            if (delta <= 0 || rng_f32(&rng) < exp(f32(-delta) / temp)) {
+            if (sa_accept(delta, temp, &rng)) {
                 cost = new_cost;
                 if (cost < best_cost) { best_cost = cost; write_best(&a, base); }
             } else {
@@ -664,7 +670,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             swap_positions(&a, w, q1, p1, w, q2, p2);
             let new_cost = evaluate(&a);
             let delta = i32(new_cost) - i32(cost);
-            if (delta <= 0 || rng_f32(&rng) < exp(f32(-delta) / temp)) {
+            if (sa_accept(delta, temp, &rng)) {
                 cost = new_cost;
                 if (cost < best_cost) { best_cost = cost; write_best(&a, base); }
             } else {
@@ -679,7 +685,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             swap_positions(&a, w, q, p1, w, q, p2);
             let new_cost = evaluate(&a);
             let delta = i32(new_cost) - i32(cost);
-            if (delta <= 0 || rng_f32(&rng) < exp(f32(-delta) / temp)) {
+            if (sa_accept(delta, temp, &rng)) {
                 cost = new_cost;
                 if (cost < best_cost) { best_cost = cost; write_best(&a, base); }
             } else {
@@ -707,7 +713,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                 set_team(&a, w2, qi1, pi1, team);
                 let new_cost = evaluate(&a);
                 let delta = i32(new_cost) - i32(cost);
-                if (delta <= 0 || rng_f32(&rng) < exp(f32(-delta) / temp)) {
+                if (sa_accept(delta, temp, &rng)) {
                     cost = new_cost;
                     if (cost < best_cost) { best_cost = cost; write_best(&a, base); }
                 } else {
@@ -727,7 +733,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             set_quad(&a, w, q2, tmp);
             let new_cost = evaluate(&a);
             let delta = i32(new_cost) - i32(cost);
-            if (delta <= 0 || rng_f32(&rng) < exp(f32(-delta) / temp)) {
+            if (sa_accept(delta, temp, &rng)) {
                 cost = new_cost;
                 if (cost < best_cost) { best_cost = cost; write_best(&a, base); }
             } else {
@@ -746,7 +752,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             }
             let new_cost = evaluate(&a);
             let delta = i32(new_cost) - i32(cost);
-            if (delta <= 0 || rng_f32(&rng) < exp(f32(-delta) / temp)) {
+            if (sa_accept(delta, temp, &rng)) {
                 cost = new_cost;
                 if (cost < best_cost) { best_cost = cost; write_best(&a, base); }
             } else {
@@ -764,7 +770,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             set_quad(&a, w, 2u, sq0); set_quad(&a, w, 3u, sq1);
             let new_cost = evaluate(&a);
             let delta = i32(new_cost) - i32(cost);
-            if (delta <= 0 || rng_f32(&rng) < exp(f32(-delta) / temp)) {
+            if (sa_accept(delta, temp, &rng)) {
                 cost = new_cost;
                 if (cost < best_cost) { best_cost = cost; write_best(&a, base); }
             } else {
@@ -779,7 +785,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             set_quad(&a, w, 2u, sq3); set_quad(&a, w, 3u, sq2);
             let new_cost = evaluate(&a);
             let delta = i32(new_cost) - i32(cost);
-            if (delta <= 0 || rng_f32(&rng) < exp(f32(-delta) / temp)) {
+            if (sa_accept(delta, temp, &rng)) {
                 cost = new_cost;
                 if (cost < best_cost) { best_cost = cost; write_best(&a, base); }
             } else {
@@ -793,7 +799,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             swap_positions(&a, w, q, 2u, w, q, 3u);
             let new_cost = evaluate(&a);
             let delta = i32(new_cost) - i32(cost);
-            if (delta <= 0 || rng_f32(&rng) < exp(f32(-delta) / temp)) {
+            if (sa_accept(delta, temp, &rng)) {
                 cost = new_cost;
                 if (cost < best_cost) { best_cost = cost; write_best(&a, base); }
             } else {
@@ -806,7 +812,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             if (did) {
                 let new_cost = evaluate(&a);
                 let delta = i32(new_cost) - i32(cost);
-                if (delta <= 0 || rng_f32(&rng) < exp(f32(-delta) / temp)) {
+                if (sa_accept(delta, temp, &rng)) {
                     cost = new_cost;
                     if (cost < best_cost) { best_cost = cost; write_best(&a, base); }
                 } else {
@@ -819,7 +825,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             if (did) {
                 let new_cost = evaluate(&a);
                 let delta = i32(new_cost) - i32(cost);
-                if (delta <= 0 || rng_f32(&rng) < exp(f32(-delta) / temp)) {
+                if (sa_accept(delta, temp, &rng)) {
                     cost = new_cost;
                     if (cost < best_cost) { best_cost = cost; write_best(&a, base); }
                 } else {
@@ -832,7 +838,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             if (did) {
                 let new_cost = evaluate(&a);
                 let delta = i32(new_cost) - i32(cost);
-                if (delta <= 0 || rng_f32(&rng) < exp(f32(-delta) / temp)) {
+                if (sa_accept(delta, temp, &rng)) {
                     cost = new_cost;
                     if (cost < best_cost) { best_cost = cost; write_best(&a, base); }
                 } else {

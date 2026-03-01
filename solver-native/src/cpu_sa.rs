@@ -10,7 +10,7 @@ pub const BATCH_SIZE: u64 = 10_000;
 const STATS_RECOMPUTE: u64 = 10_000;
 const QUAD_PAIRS: [(usize, usize); 6] = [(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)];
 
-const NUM_MOVES: usize = 11;
+pub const NUM_MOVES: usize = 11;
 const BASE_WEIGHTS: [f64; NUM_MOVES] = [
     0.25, 0.15, 0.10, 0.08, 0.06, 0.06, 0.05, 0.06, 0.06, 0.06, 0.07,
 ];
@@ -21,6 +21,11 @@ pub enum WorkerCommand {
     Shutdown,
 }
 
+pub const MOVE_NAMES: [&str; NUM_MOVES] = [
+    "inter_q", "intra_q", "cross_wk", "quad_sw", "week_sw",
+    "el_flip", "lane_pr", "stay_sw", "g_match", "g_lane", "g_el",
+];
+
 pub struct WorkerReport {
     pub core_id: usize,
     pub best_assignment: Assignment,
@@ -28,6 +33,8 @@ pub struct WorkerReport {
     pub current_assignment: Assignment,
     pub current_cost: u32,
     pub iterations_total: u64,
+    pub move_rates: [f64; NUM_MOVES],
+    pub move_shares: [f64; NUM_MOVES],
 }
 
 pub struct CpuWorkers {
@@ -395,6 +402,8 @@ fn worker_loop(
             current_assignment: a,
             current_cost: cost.total,
             iterations_total,
+            move_rates: stats.last_rates,
+            move_shares: stats.last_shares,
         });
     }
 }
@@ -403,6 +412,8 @@ struct MoveStats {
     attempts: [u64; NUM_MOVES],
     accepts: [u64; NUM_MOVES],
     cumulative: [f64; NUM_MOVES],
+    last_rates: [f64; NUM_MOVES],
+    last_shares: [f64; NUM_MOVES],
 }
 
 impl MoveStats {
@@ -411,18 +422,27 @@ impl MoveStats {
             attempts: [0; NUM_MOVES],
             accepts: [0; NUM_MOVES],
             cumulative: [0.0; NUM_MOVES],
+            last_rates: [0.0; NUM_MOVES],
+            last_shares: [0.0; NUM_MOVES],
         };
         s.recompute();
         s
     }
 
     fn recompute(&mut self) {
+        let total_attempts: u64 = self.attempts.iter().sum();
         let mut weights = [0.0f64; NUM_MOVES];
         for m in 0..NUM_MOVES {
             let rate = if self.attempts[m] > 0 {
                 self.accepts[m] as f64 / self.attempts[m] as f64
             } else {
                 0.5
+            };
+            self.last_rates[m] = rate;
+            self.last_shares[m] = if total_attempts > 0 {
+                self.attempts[m] as f64 / total_attempts as f64
+            } else {
+                0.0
             };
             weights[m] = BASE_WEIGHTS[m] * (0.1 + rate);
         }

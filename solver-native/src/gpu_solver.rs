@@ -1,6 +1,6 @@
 use rand::rngs::SmallRng;
 use rand::{Rng, SeedableRng};
-use solver_native::cpu_sa::{self, CpuWorkers, WorkerCommand};
+use solver_native::cpu_sa::{self, CpuWorkers, WorkerCommand, NUM_MOVES, MOVE_NAMES};
 use solver_native::gpu_setup::create_gpu_resources;
 use solver_native::gpu_types::*;
 use solver_native::output::*;
@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
-const SYNC_INTERVAL: u64 = 10;
+const SYNC_INTERVAL: u64 = 3;
 
 const TEMP_LEVELS: usize = 256;
 
@@ -237,7 +237,9 @@ async fn run_gpu(
     let mut partitions: Vec<PartitionState> = (0..cpu_cores)
         .map(|_| PartitionState { dispatches_since_improvement: 0, aggressive_logged: false })
         .collect();
+    #[allow(unused_assignments)]
     let mut gpu_median = 0u32;
+    #[allow(unused_assignments)]
     let mut gpu_best_cost = 0u32;
 
     let mut worker_metas: Vec<WorkerMeta> = (0..cpu_cores).map(|_| WorkerMeta {
@@ -302,6 +304,32 @@ async fn run_gpu(
                             lines += 1;
                         }
                     }
+                    {
+                        let mut avg_rates = [0.0f64; NUM_MOVES];
+                        let mut avg_shares = [0.0f64; NUM_MOVES];
+                        let mut n = 0usize;
+                        for meta in worker_metas.iter() {
+                            if let Some(ref r) = meta.last_report {
+                                for m in 0..NUM_MOVES {
+                                    avg_rates[m] += r.move_rates[m];
+                                    avg_shares[m] += r.move_shares[m];
+                                }
+                                n += 1;
+                            }
+                        }
+                        if n > 0 {
+                            let nf = n as f64;
+                            let header: Vec<String> = (0..NUM_MOVES).map(|m| {
+                                format!("{:>7}", MOVE_NAMES[m])
+                            }).collect();
+                            let values: Vec<String> = (0..NUM_MOVES).map(|m| {
+                                format!("{:>4.1}/{:<2.0}", avg_rates[m] / nf * 100.0, avg_shares[m] / nf * 100.0)
+                            }).collect();
+                            eprintln!("  move:     {}\x1b[K", header.join(" "));
+                            eprintln!("  acc%/sel%: {}\x1b[K", values.join(" "));
+                            lines += 2;
+                        }
+                    }
                     eprint!("\x1b[J");
                     prev_line_count = lines;
                     can_overwrite = true;
@@ -318,6 +346,7 @@ async fn run_gpu(
         }
 
         // 1. GPU dispatch
+        let dispatch_start = Instant::now();
         let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("SA"),
         });
@@ -336,12 +365,40 @@ async fn run_gpu(
         let costs_slice = gpu.costs_readback_buf.slice(..);
         let (tx, rx) = std::sync::mpsc::channel();
         costs_slice.map_async(wgpu::MapMode::Read, move |r| { let _ = tx.send(r); });
-        if gpu.device.poll(wgpu::PollType::Wait).is_err() {
+
+        let poll_deadline = Instant::now() + std::time::Duration::from_secs(30);
+        let mut poll_ok = false;
+        loop {
+            match gpu.device.poll(wgpu::PollType::Poll) {
+                Ok(status) if status.is_queue_empty() => { poll_ok = true; break; }
+                Ok(_) => {
+                    if shutdown.load(Ordering::Relaxed) { break; }
+                    if Instant::now() > poll_deadline {
+                        eprintln!("GPU poll timed out after 30s at dispatch {} — device may be lost", dispatch_count);
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                Err(e) => {
+                    eprintln!("GPU poll error at dispatch {}: {:?}", dispatch_count, e);
+                    break;
+                }
+            }
+        }
+        if !poll_ok {
             gpu.costs_readback_buf.unmap();
             continue;
         }
-        if rx.recv().is_err() {
+        if rx.recv_timeout(std::time::Duration::from_secs(5)).is_err() {
+            eprintln!("GPU map_async recv timed out at dispatch {}", dispatch_count);
+            gpu.costs_readback_buf.unmap();
             continue;
+        }
+        let dispatch_ms = dispatch_start.elapsed().as_millis();
+        if dispatch_ms > 5000 {
+            eprintln!("WARNING: dispatch {} took {}ms (>5s) — GPU may be starving the system", dispatch_count, dispatch_ms);
+        } else if dispatch_count < 5 {
+            eprintln!("dispatch {} completed in {}ms", dispatch_count, dispatch_ms);
         }
 
         // 2. Read costs + sample median + per-CPU-partition bests
@@ -392,8 +449,22 @@ async fn run_gpu(
             let assign_slice = gpu.assign_readback_buf.slice(..);
             let (tx, rx) = std::sync::mpsc::channel();
             assign_slice.map_async(wgpu::MapMode::Read, move |r| { let _ = tx.send(r); });
-            let _ = gpu.device.poll(wgpu::PollType::Wait);
-            if rx.recv().is_err() {
+            let poll_deadline = Instant::now() + std::time::Duration::from_secs(30);
+            let mut assign_poll_ok = false;
+            loop {
+                match gpu.device.poll(wgpu::PollType::Poll) {
+                    Ok(status) if status.is_queue_empty() => { assign_poll_ok = true; break; }
+                    Ok(_) => {
+                        if Instant::now() > poll_deadline {
+                            eprintln!("GPU assign poll timed out for partition {}", pi);
+                            break;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(1));
+                    }
+                    Err(_) => break,
+                }
+            }
+            if !assign_poll_ok || rx.recv_timeout(std::time::Duration::from_secs(5)).is_err() {
                 gpu.assign_readback_buf.unmap();
                 continue;
             }
@@ -638,7 +709,7 @@ async fn run_gpu(
         // 8. Table output (driven by wall clock, not dispatch count)
         maybe_print_table!();
 
-        // 9. Periodic tally
+        // 9. Periodic tally + move stats
         if dispatch_count > 0 && dispatch_count % 300 == 0 {
             let total = tally.from_shakeup + tally.from_normal + tally.from_gpu;
             if total > 0 {
@@ -646,6 +717,7 @@ async fn run_gpu(
                     fmt_elapsed(start_time.elapsed()),
                     tally.from_shakeup, tally.from_normal, tally.from_gpu, total));
             }
+
         }
     }
 

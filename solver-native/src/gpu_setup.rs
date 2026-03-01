@@ -50,6 +50,10 @@ pub async fn create_gpu_resources(
         .await
         .expect("Failed to create device");
 
+    device.on_uncaptured_error(Box::new(|error| {
+        eprintln!("wgpu uncaptured error: {}", error);
+    }));
+
     let sa_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("SA Shader"),
         source: wgpu::ShaderSource::Wgsl(include_str!("solver.wgsl").into()),

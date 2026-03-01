@@ -2,10 +2,10 @@ use bytemuck::{Pod, Zeroable};
 use rand::rngs::SmallRng;
 use rand::Rng;
 
-pub const DEFAULT_CHAIN_COUNT: u32 = 32768;
+pub const DEFAULT_CHAIN_COUNT: u32 = 16384;
 pub const MIN_CHAIN_COUNT: u32 = 4096;
-pub const MAX_CHAIN_COUNT: u32 = 131072;
-pub const ITERS_PER_DISPATCH: u32 = 1000;
+pub const MAX_CHAIN_COUNT: u32 = 16384;
+pub const ITERS_PER_DISPATCH: u32 = 512;
 pub const ASSIGN_U32S: usize = 48;
 
 #[repr(C)]
