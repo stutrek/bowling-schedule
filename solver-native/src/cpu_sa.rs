@@ -91,8 +91,10 @@ fn worker_loop(
                 WorkerCommand::SetState(new_a) => {
                     a = new_a;
                     cost = evaluate(&a, &active_w8);
-                    best_a = a;
-                    best_cost = cost.total;
+                    if cost.total < best_cost {
+                        best_a = a;
+                        best_cost = cost.total;
+                    }
                 }
                 WorkerCommand::SetTemp(t) => {
                     active_temp = t;
