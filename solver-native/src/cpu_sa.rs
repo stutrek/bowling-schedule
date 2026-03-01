@@ -12,7 +12,7 @@ const QUAD_PAIRS: [(usize, usize); 6] = [(0, 1), (0, 2), (0, 3), (1, 2), (1, 3),
 
 pub const NUM_MOVES: usize = 11;
 const BASE_WEIGHTS: [f64; NUM_MOVES] = [
-    0.25, 0.15, 0.10, 0.08, 0.06, 0.06, 0.05, 0.06, 0.06, 0.06, 0.07,
+    0.10, 0.25, 0.10, 0.06, 0.06, 0.05, 0.04, 0.06, 0.05, 0.15, 0.08,
 ];
 
 pub enum WorkerCommand {

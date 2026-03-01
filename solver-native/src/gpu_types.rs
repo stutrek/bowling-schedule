@@ -41,13 +41,13 @@ pub struct GpuMoveThresholds {
 }
 
 pub const THRESH_DEFAULT: GpuMoveThresholds = GpuMoveThresholds {
-    t: [25, 40, 50, 58, 64, 70, 75, 81, 87, 93, 100, 0],
+    t: [10, 35, 45, 50, 58, 62, 66, 72, 77, 92, 100, 0],
 };
 pub const THRESH_HIGH_COST: GpuMoveThresholds = GpuMoveThresholds {
-    t: [30, 40, 52, 62, 69, 75, 79, 82, 88, 94, 100, 0],
+    t: [15, 33, 43, 50, 58, 63, 68, 74, 80, 92, 100, 0],
 };
 pub const THRESH_LOW_COST: GpuMoveThresholds = GpuMoveThresholds {
-    t: [20, 38, 46, 52, 57, 62, 67, 74, 82, 91, 100, 0],
+    t: [2, 35, 44, 46, 60, 62, 64, 70, 72, 98, 100, 0],
 };
 
 pub fn pack_assignment(a: &solver_core::Assignment) -> [u32; ASSIGN_U32S] {
