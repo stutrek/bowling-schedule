@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
-const SYNC_INTERVAL: u64 = 3;
+const SYNC_INTERVAL: u64 = 10;
 
 const TEMP_LEVELS: usize = 256;
 
@@ -256,11 +256,13 @@ async fn run_gpu(
         found_at: Instant::now(),
     };
     let mut tally = ProvenanceTally { from_shakeup: 0, from_normal: 0, from_gpu: 0 };
+    let mut partition_cpu_bests: Vec<u32> = vec![0; cpu_cores];
+    let mut partition_gpu_bests: Vec<u32> = vec![0; cpu_cores];
+    let mut partition_best_cost: Vec<u32> = vec![u32::MAX; cpu_cores];
+    let mut pending_events: Vec<String> = Vec::new();
     let mut last_print = Instant::now();
     let mut last_fresh_table = Instant::now();
-    let mut can_overwrite = false;
     let mut prev_line_count: u32 = 0;
-    let mut event_buffer: Vec<String> = Vec::new();
     let mut gpu_prev_dispatch: u64 = 0;
     let mut gpu_prev_dispatch_time = Instant::now();
     let mut gpu_ips: u64 = 0;
@@ -271,23 +273,21 @@ async fn run_gpu(
 
         macro_rules! maybe_print_table {
             () => {
-                if last_print.elapsed().as_millis() >= 1000 {
-                    let fresh = !can_overwrite
-                        || last_fresh_table.elapsed().as_secs() >= FRESH_TABLE_INTERVAL_SECS;
+                if last_print.elapsed().as_millis() >= 1000 || !pending_events.is_empty() {
+                    let fresh = last_fresh_table.elapsed().as_secs() >= FRESH_TABLE_INTERVAL_SECS;
                     if !fresh && prev_line_count > 0 {
-                        eprint!("\x1b[{}A\r", prev_line_count);
-                    } else {
+                        eprint!("\x1b[{}A\r\x1b[J", prev_line_count);
+                    } else if fresh {
                         last_fresh_table = Instant::now();
+                    }
+                    for msg in pending_events.drain(..) {
+                        eprintln!("{}", msg);
                     }
                     let mut lines: u32 = 0;
                     if let Some(ref best) = global_best_assignment {
                         let best_bd = solver_core::evaluate(best, &w8);
                         print_table_banner(global_best_cost, &best_bd, &global_best_meta, start_time);
                         lines += 2;
-                    }
-                    for msg in event_buffer.drain(..) {
-                        eprintln!("{}", msg);
-                        lines += 1;
                     }
                     print_table_header();
                     lines += 1;
@@ -330,9 +330,17 @@ async fn run_gpu(
                             lines += 2;
                         }
                     }
+                    {
+                        let part_hdr: Vec<String> = (0..cpu_cores).map(|i| format!("{:>5}", i)).collect();
+                        let part_vals: Vec<String> = (0..cpu_cores).map(|i| {
+                            format!("{:>2}/{:<2}", partition_cpu_bests[i], partition_gpu_bests[i])
+                        }).collect();
+                        eprintln!("  partition: {}\x1b[K", part_hdr.join(" "));
+                        eprintln!("  cpu/gpu:   {}\x1b[K", part_vals.join(" "));
+                        lines += 2;
+                    }
                     eprint!("\x1b[J");
                     prev_line_count = lines;
-                    can_overwrite = true;
                     last_print = Instant::now();
                 }
             };
@@ -340,8 +348,7 @@ async fn run_gpu(
 
         macro_rules! event {
             ($($arg:tt)*) => {
-                print_event($($arg)*);
-                can_overwrite = false;
+                pending_events.push(format_event($($arg)*));
             };
         }
 
@@ -485,9 +492,18 @@ async fn run_gpu(
             worker_metas[pi].reseeded_at = Instant::now();
             worker_metas[pi].cost_at_reseed = gpu_part_cost;
 
+            if gpu_part_cost < partition_best_cost[pi] {
+                let prev = partition_best_cost[pi];
+                partition_best_cost[pi] = gpu_part_cost;
+                partition_gpu_bests[pi] += 1;
+                event!(start_time.elapsed(), &format!(
+                    "PARTITION {} NEW BEST {} (was {}) from gpu chain {} (seed: {})",
+                    pi, gpu_part_cost, prev, gpu_part_chain, chain_source[gpu_part_chain],
+                ));
+            }
+
             // If this is also a new global best, do global bookkeeping
             if gpu_part_cost < global_best_cost {
-                let cpu_verify = solver_core::evaluate(&assignment, &w8);
                 global_best_cost = gpu_part_cost;
                 global_best_assignment = Some(assignment);
                 partitions[pi].dispatches_since_improvement = 0;
@@ -497,13 +513,6 @@ async fn run_gpu(
                     source: format!("gpu({})", chain_source[gpu_part_chain]),
                     found_at: Instant::now(),
                 };
-
-                let verify_status = if cpu_verify.total == gpu_part_cost { "OK" } else { "MISMATCH" };
-                event!(start_time.elapsed(), &format!(
-                    "NEW BEST {} from gpu partition {} chain {} (seed: {}, verify: {}) | {}",
-                    global_best_cost, pi, gpu_part_chain,
-                    chain_source[gpu_part_chain], verify_status, cost_label(&cpu_verify),
-                ));
 
                 if global_best_cost < 160 {
                     let ts = chrono::Local::now().format("%Y%m%d-%H%M%S%z");
@@ -530,6 +539,15 @@ async fn run_gpu(
             let cid = report.core_id;
             if cid < worker_metas.len() {
                 let real_best = solver_core::evaluate(&report.best_assignment, &w8).total;
+                if real_best < partition_best_cost[cid] {
+                    let prev = partition_best_cost[cid];
+                    partition_best_cost[cid] = real_best;
+                    partition_cpu_bests[cid] += 1;
+                    event!(start_time.elapsed(), &format!(
+                        "PARTITION {} NEW BEST {} (was {}) from cpu{}",
+                        cid, real_best, prev, cid,
+                    ));
+                }
                 if real_best < global_best_cost {
                     global_best_cost = real_best;
                     global_best_assignment = Some(report.best_assignment);
@@ -619,7 +637,7 @@ async fn run_gpu(
                 let stag = partitions[pi].dispatches_since_improvement;
 
                 // 6a. Maintenance reseeding across all temp levels
-                let base_reseed = p_len / 10;
+                let base_reseed = p_len / 50;
                 let reseed_count = if stag < 5 {
                     base_reseed / 2
                 } else if stag > STAGNATION_DISPATCHES {
@@ -648,8 +666,8 @@ async fn run_gpu(
                 // 6b. Stagnation: extra reseeding with heavier perturbation
                 if stag >= STAGNATION_DISPATCHES {
                     if !partitions[pi].aggressive_logged {
-                        event_buffer.push(format!("[{:>10}] SHAKEUP: partition {} aggressive (stagnant {} dispatches)",
-                            fmt_elapsed(start_time.elapsed()), pi, stag));
+                        event!(start_time.elapsed(), &format!(
+                            "SHAKEUP: partition {} aggressive (stagnant {} dispatches)", pi, stag));
                         partitions[pi].aggressive_logged = true;
                     }
 
@@ -674,8 +692,8 @@ async fn run_gpu(
 
                 // 6c. Escalated shakeup: full partition reseed with heavier perturbation + CPU shake
                 if stag >= ESCALATION_DISPATCHES && stag % ESCALATION_DISPATCHES == 0 {
-                    event_buffer.push(format!("[{:>10}] ESCALATED SHAKEUP: partition {} (stagnant {} dispatches)",
-                        fmt_elapsed(start_time.elapsed()), pi, stag));
+                    event!(start_time.elapsed(), &format!(
+                        "ESCALATED SHAKEUP: partition {} (stagnant {} dispatches)", pi, stag));
 
                     reseed_partition_chains(
                         &gpu.queue, &gpu.assign_buf, &gpu.best_assign_buf,
@@ -713,8 +731,8 @@ async fn run_gpu(
         if dispatch_count > 0 && dispatch_count % 300 == 0 {
             let total = tally.from_shakeup + tally.from_normal + tally.from_gpu;
             if total > 0 {
-                event_buffer.push(format!("[{:>10}] TALLY: {} shakeup, {} normal, {} GPU ({} total)",
-                    fmt_elapsed(start_time.elapsed()),
+                event!(start_time.elapsed(), &format!(
+                    "TALLY: {} shakeup, {} normal, {} GPU ({} total)",
                     tally.from_shakeup, tally.from_normal, tally.from_gpu, total));
             }
 
@@ -731,8 +749,8 @@ async fn run_gpu(
 
     if let Some(best) = global_best_assignment {
         let final_cost = solver_core::evaluate(&best, &w8);
-        print_event(start_time.elapsed(), &format!(
+        eprintln!("{}", format_event(start_time.elapsed(), &format!(
             "Final best: {} | {}", global_best_cost, cost_label(&final_cost),
-        ));
+        )));
     }
 }

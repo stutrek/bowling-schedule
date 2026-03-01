@@ -2,7 +2,7 @@ use crate::cpu_sa::WorkerReport;
 use solver_core::{cost_label, evaluate, CostBreakdown, Weights};
 use std::time::{Duration, Instant};
 
-pub const FRESH_TABLE_INTERVAL_SECS: u64 = 300;
+pub const FRESH_TABLE_INTERVAL_SECS: u64 = 600;
 
 pub struct WorkerMeta {
     pub reseeded_at: Instant,
@@ -113,6 +113,6 @@ pub fn print_gpu_row(
     );
 }
 
-pub fn print_event(elapsed: Duration, msg: &str) {
-    eprintln!("{:>9}  >>>  {}", fmt_elapsed(elapsed), msg);
+pub fn format_event(elapsed: Duration, msg: &str) -> String {
+    format!("{:>9}  >>>  {}", fmt_elapsed(elapsed), msg)
 }
