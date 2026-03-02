@@ -25,7 +25,6 @@ struct ProvenanceTally {
 
 struct PartitionState {
     dispatches_since_improvement: u64,
-    aggressive_logged: bool,
 }
 
 /// Returns true if the workgroup at `global_chain_idx` is a "reseeded" workgroup
@@ -253,7 +252,7 @@ async fn run_gpu(
     let mut last_verify = Instant::now();
     let mut last_thresh = THRESH_DEFAULT;
     let mut partitions: Vec<PartitionState> = (0..cpu_cores)
-        .map(|_| PartitionState { dispatches_since_improvement: 0, aggressive_logged: false })
+        .map(|_| PartitionState { dispatches_since_improvement: 0 })
         .collect();
 
     let mut worker_metas: Vec<WorkerMeta> = (0..cpu_cores).map(|_| WorkerMeta {
@@ -282,6 +281,7 @@ async fn run_gpu(
     let mut partition_medians: Vec<u32> = vec![0; cpu_cores];
     let mut exchange_swaps_total: u64 = 0;
     let mut exchange_attempts_total: u64 = 0;
+    let mut exchange_reset_time = Instant::now();
 
     let mut pending_events: Vec<String> = Vec::new();
     let mut last_print = Instant::now();
@@ -315,7 +315,7 @@ async fn run_gpu(
                     for (i, meta) in worker_metas.iter().enumerate() {
                         if let Some(ref report) = meta.last_report {
                             let temp = if i < cpu_temps_display.len() { cpu_temps_display[i] } else { 0.0 };
-                            print_cpu_row(i, report, &w8, meta, temp);
+                            print_cpu_row(i, report, &w8, meta, temp, partitions[i].dispatches_since_improvement);
                             lines += 1;
                         }
                     }
@@ -366,6 +366,11 @@ async fn run_gpu(
                         eprintln!("  gpu med:  {}\x1b[K", gpu_meds.join(""));
                         eprintln!("  wg best:  {}\x1b[K", wg_bests.join(""));
                         lines += 4;
+                        if exchange_reset_time.elapsed().as_secs() >= 300 {
+                            exchange_swaps_total = 0;
+                            exchange_attempts_total = 0;
+                            exchange_reset_time = Instant::now();
+                        }
                         if exchange_attempts_total > 0 {
                             let rate = exchange_swaps_total as f64 / exchange_attempts_total as f64 * 100.0;
                             let status = if rate > 80.0 { "wasteful — temps too close" }
@@ -543,7 +548,7 @@ async fn run_gpu(
             }
         }
 
-        if !counts_reset_done && start_time.elapsed().as_secs() >= 300 {
+        if !counts_reset_done && start_time.elapsed().as_secs() >= 180 {
             counts_reset_done = true;
             for i in 0..cpu_cores {
                 partition_cpu_bests[i] = 0;
@@ -637,7 +642,6 @@ async fn run_gpu(
                 global_best_cost = gpu_part_cost;
                 global_best_assignment = Some(assignment);
                 partitions[pi].dispatches_since_improvement = 0;
-                partitions[pi].aggressive_logged = false;
                 tally.from_gpu += 1;
                 global_best_meta = GlobalBestMeta {
                     source: format!("gpu-{}-wg{}-pod{}-T{:.1}", wg_type, wg_idx, pod_in_wg, temp_val),
@@ -686,7 +690,6 @@ async fn run_gpu(
                     global_best_cost = real_best;
                     global_best_assignment = Some(report.best_assignment);
                     partitions[cid].dispatches_since_improvement = 0;
-                    partitions[cid].aggressive_logged = false;
                     global_best_meta = GlobalBestMeta {
                         source: format!("cpu{}", cid),
                         found_at: Instant::now(),
@@ -792,9 +795,8 @@ async fn run_gpu(
                 let p_len = p_end - p_start;
                 let stag = partitions[pi].dispatches_since_improvement;
 
-                // 6a. Maintenance reseeding (reseeded workgroups only)
-                let reseed_half_len = p_len / 2;
-                let base_reseed = reseed_half_len / 50;
+                // 6a. Maintenance reseeding
+                let base_reseed = p_len / 50;
                 let reseed_count = if stag < 5 {
                     base_reseed / 2
                 } else if stag > STAGNATION_DISPATCHES {
@@ -804,7 +806,7 @@ async fn run_gpu(
                 };
 
                 for _ in 0..reseed_count {
-                    let idx = p_start + rng.random_range(0..reseed_half_len);
+                    let idx = p_start + rng.random_range(0..p_len);
                     let level_in_pod = (idx % TEMP_LEVELS) % POD_SIZE;
                     let t_frac = level_in_pod as f64 / (POD_SIZE - 1).max(1) as f64;
                     let pert = (t_frac * t_frac * 5.0) as usize;
@@ -821,17 +823,16 @@ async fn run_gpu(
                     chain_source[idx] = source_label.clone();
                 }
 
-                // 6b. Stagnation: extra reseeding with heavier perturbation (reseeded WGs only)
+                // 6b. Stagnation: extra reseeding with heavier perturbation
                 if stag >= STAGNATION_DISPATCHES {
-                    if !partitions[pi].aggressive_logged {
+                    if stag % STAGNATION_DISPATCHES == 0 {
                         event!(start_time.elapsed(), &format!(
-                            "SHAKEUP: partition {} aggressive (stagnant {} dispatches)", pi, stag));
-                        partitions[pi].aggressive_logged = true;
+                            "SHAKEUP: partition {} (stagnant {} dispatches)", pi, stag));
                     }
 
-                    let inject_count = reseed_half_len / 20;
+                    let inject_count = p_len / 20;
                     for _ in 0..inject_count {
-                        let idx = p_start + rng.random_range(0..reseed_half_len);
+                        let idx = p_start + rng.random_range(0..p_len);
                         let level_in_pod = (idx % TEMP_LEVELS) % POD_SIZE;
                         let t_frac = level_in_pod as f64 / (POD_SIZE - 1).max(1) as f64;
                         let pert = 3 + (t_frac * t_frac * 7.0) as usize;

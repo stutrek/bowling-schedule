@@ -47,7 +47,7 @@ pub fn print_table_header() {
         "{:>4} {:>5}  {:>5} {:>5}  {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9}  {:>6}  {}\x1b[K",
         "src", "temp", "cur", "best",
         "match", "consec", "el_bal", "el_alt", "lane", "switch", "ll_bal", "comm", "hs_rpt",
-        "it/s", "state",
+        "stag", "state",
     );
 }
 
@@ -57,16 +57,12 @@ pub fn print_cpu_row(
     w8: &Weights,
     meta: &WorkerMeta,
     temp: f64,
+    stagnation: u64,
 ) {
     let cur_bd = evaluate(&report.current_assignment, w8);
     let best_bd = evaluate(&report.best_assignment, w8);
     let since = meta.reseeded_at.elapsed().as_secs();
     let state = if since < 30 { format!("shook+{}s", since) } else { "normal".to_string() };
-    let ips = if meta.iters_per_sec > 0 {
-        format!("{}k", meta.iters_per_sec / 1000)
-    } else {
-        "-".to_string()
-    };
     let bold = if since < 30 { "\x1b[1m" } else { "" };
     let reset = if since < 30 { "\x1b[0m" } else { "" };
     eprintln!(
@@ -83,7 +79,7 @@ pub fn print_cpu_row(
         cur_bd.late_lane_balance, best_bd.late_lane_balance,
         cur_bd.commissioner_overlap, best_bd.commissioner_overlap,
         cur_bd.half_season_repeat, best_bd.half_season_repeat,
-        ips,
+        stagnation,
         state, reset,
     );
 }
