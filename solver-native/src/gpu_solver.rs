@@ -369,17 +369,13 @@ async fn run_gpu(
                         }
                     }
                     {
-                        let part_hdr: Vec<String> = (0..cpu_cores).map(|i| format!("{:>5}", i)).collect();
+                        let part_hdr: Vec<String> = (0..cpu_cores).map(|i| format!("{:>8}", i)).collect();
                         let part_vals: Vec<String> = (0..cpu_cores).map(|i| {
-                            format!("{:>2}/{:<2}", partition_cpu_bests[i], partition_gpu_bests[i])
-                        }).collect();
-                        let seeded_vals: Vec<String> = (0..cpu_cores).map(|i| {
-                            format!("{:>5}", partition_gpu_seeded[i])
+                            format!("{:>2}/{:<2}({:<2})", partition_cpu_bests[i], partition_gpu_bests[i], partition_gpu_seeded[i])
                         }).collect();
                         eprintln!("  partition: {}\x1b[K", part_hdr.join(" "));
                         eprintln!("  cpu/gpu:   {}\x1b[K", part_vals.join(" "));
-                        eprintln!("  seeded:    {}\x1b[K", seeded_vals.join(" "));
-                        lines += 3;
+                        lines += 2;
 
                         // Per-partition workgroup bests (R=reseeded, F=free)
                         let reseed_bests: Vec<String> = (0..cpu_cores).map(|pi| {
