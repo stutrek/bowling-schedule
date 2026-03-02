@@ -377,22 +377,25 @@ async fn run_gpu(
                         eprintln!("  cpu/gpu:   {}\x1b[K", part_vals.join(" "));
                         lines += 2;
 
-                        // Per-partition workgroup bests (R=reseeded, F=free)
                         let reseed_bests: Vec<String> = (0..cpu_cores).map(|pi| {
+                            let hot = worker_metas[pi].reseeded_at.elapsed().as_secs() < 30;
                             let wg_start = pi * wgs_per_partition;
                             let half = wgs_per_partition / 2;
                             let best = (wg_start..wg_start + half)
                                 .map(|w| wg_best_costs[w])
                                 .min().unwrap_or(u32::MAX);
-                            format!("{:>5}", best)
+                            let val = format!("{:>5}", best);
+                            if hot { format!("\x1b[1m{}\x1b[0m", val) } else { val }
                         }).collect();
                         let free_bests: Vec<String> = (0..cpu_cores).map(|pi| {
+                            let hot = worker_metas[pi].reseeded_at.elapsed().as_secs() < 30;
                             let wg_start = pi * wgs_per_partition;
                             let half = wgs_per_partition / 2;
                             let best = (wg_start + half..wg_start + wgs_per_partition)
                                 .map(|w| wg_best_costs[w])
                                 .min().unwrap_or(u32::MAX);
-                            format!("{:>5}", best)
+                            let val = format!("{:>5}", best);
+                            if hot { format!("\x1b[1m{}\x1b[0m", val) } else { val }
                         }).collect();
                         eprintln!("  reseed wg: {}\x1b[K", reseed_bests.join(" "));
                         eprintln!("  free wg:   {}\x1b[K", free_bests.join(" "));
@@ -636,6 +639,8 @@ async fn run_gpu(
             let _ = cpu_workers.commands[pi].send(WorkerCommand::SetState(assignment));
             worker_metas[pi].reseeded_at = Instant::now();
             worker_metas[pi].cost_at_reseed = gpu_part_cost;
+            event!(start_time.elapsed(), &format!(
+                "GPU SEEDS cpu{}: cost {} (cpu was {})", pi, gpu_part_cost, cpu_live_best));
 
             let wg_idx = gpu_part_chain / TEMP_LEVELS;
             let local_in_wg = gpu_part_chain % TEMP_LEVELS;
@@ -668,7 +673,7 @@ async fn run_gpu(
                     found_at: Instant::now(),
                 };
 
-                if global_best_cost < 160 {
+                if global_best_cost < 420 {
                     let ts = chrono::Local::now().format("%Y%m%d-%H%M%S%z");
                     let filename = format!("{}/{:04}-gpu-{}.tsv", results_dir, global_best_cost, ts);
                     let mut out = assignment;
@@ -683,7 +688,7 @@ async fn run_gpu(
                     &gpu.cost_buf, &gpu.best_cost_buf,
                     &mut chain_source, &mut rng, &w8,
                     &assignment, &format!("gpu-p{}", pi), p_start, p_end,
-                    true,
+                    false,
                 );
             }
         }
@@ -733,7 +738,7 @@ async fn run_gpu(
                         ));
                     }
 
-                    if global_best_cost < 160 {
+                    if global_best_cost < 420 {
                         let ts = chrono::Local::now().format("%Y%m%d-%H%M%S%z");
                         let filename = format!("{}/{:04}-cpu{}-{}.tsv", results_dir, global_best_cost, cid, ts);
                         let mut out = report.best_assignment;
@@ -750,7 +755,7 @@ async fn run_gpu(
                         &gpu.cost_buf, &gpu.best_cost_buf,
                         &mut chain_source, &mut rng, &w8,
                         &report.best_assignment, &source_label, p_start, p_end,
-                        true,
+                        false,
                     );
                 }
                 let dt = worker_metas[cid].prev_iter_time.elapsed().as_secs_f64();
@@ -885,7 +890,7 @@ async fn run_gpu(
                         &gpu.cost_buf, &gpu.best_cost_buf,
                         &mut chain_source, &mut rng, &w8,
                         &seed_assignment, &source_label, p_start, p_end,
-                        true,
+                        false,
                     );
 
                     let _ = cpu_workers.commands[pi].send(WorkerCommand::SetState(seed_assignment));

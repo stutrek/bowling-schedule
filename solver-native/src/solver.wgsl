@@ -644,7 +644,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     let level_in_pod = tid % params.pod_size;
     let t_frac = f32(level_in_pod) / f32(max(params.pod_size - 1u, 1u));
-    let temp = params.temp_base + t_frac * t_frac * (params.temp_step - params.temp_base);
+    let temp = params.temp_base * pow(params.temp_step / params.temp_base, t_frac);
 
     for (var iter = 0u; iter < params.iters_per_dispatch; iter++) {
         if (best_cost == 0u) { break; }

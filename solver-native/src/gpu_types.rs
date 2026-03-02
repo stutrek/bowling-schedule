@@ -49,17 +49,17 @@ pub const THRESH_DEFAULT: GpuMoveThresholds = GpuMoveThresholds {
 };
 pub const MAX_SWAP_PAIRS: usize = 8192;
 
-pub const GPU_TEMP_MIN: f64 = 1.0;
-pub const GPU_TEMP_MAX: f64 = 30.0;
-pub const CPU_TEMP_MIN: f64 = 11.0;
-pub const CPU_TEMP_MAX: f64 = 13.0;
+pub const GPU_TEMP_MIN: f64 = 5.0;
+pub const GPU_TEMP_MAX: f64 = 20.0;
+pub const CPU_TEMP_MIN: f64 = 12.0;
+pub const CPU_TEMP_MAX: f64 = 15.0;
 pub const TEMP_LEVELS: usize = 256;
 pub const POD_SIZE: usize = 8;
 
-/// Quadratic spacing: denser at cold end, sparser at hot end.
+/// Geometric spacing: uniform 1/T gaps for better replica exchange acceptance.
 pub fn temp_for_level(level: usize) -> f64 {
     let t_frac = level as f64 / (POD_SIZE - 1).max(1) as f64;
-    GPU_TEMP_MIN + t_frac * t_frac * (GPU_TEMP_MAX - GPU_TEMP_MIN)
+    GPU_TEMP_MIN * (GPU_TEMP_MAX / GPU_TEMP_MIN).powf(t_frac)
 }
 
 pub const THRESH_HIGH_COST: GpuMoveThresholds = GpuMoveThresholds {
