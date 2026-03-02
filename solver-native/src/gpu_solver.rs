@@ -377,29 +377,15 @@ async fn run_gpu(
                         eprintln!("  cpu/gpu:   {}\x1b[K", part_vals.join(" "));
                         lines += 2;
 
-                        let reseed_bests: Vec<String> = (0..cpu_cores).map(|pi| {
-                            let hot = worker_metas[pi].reseeded_at.elapsed().as_secs() < 30;
+                        let wg_bests: Vec<String> = (0..cpu_cores).map(|pi| {
                             let wg_start = pi * wgs_per_partition;
-                            let half = wgs_per_partition / 2;
-                            let best = (wg_start..wg_start + half)
+                            let best = (wg_start..wg_start + wgs_per_partition)
                                 .map(|w| wg_best_costs[w])
                                 .min().unwrap_or(u32::MAX);
-                            let val = format!("{:>5}", best);
-                            if hot { format!("\x1b[1m{}\x1b[0m", val) } else { val }
+                            format!("{:>8}", best)
                         }).collect();
-                        let free_bests: Vec<String> = (0..cpu_cores).map(|pi| {
-                            let hot = worker_metas[pi].reseeded_at.elapsed().as_secs() < 30;
-                            let wg_start = pi * wgs_per_partition;
-                            let half = wgs_per_partition / 2;
-                            let best = (wg_start + half..wg_start + wgs_per_partition)
-                                .map(|w| wg_best_costs[w])
-                                .min().unwrap_or(u32::MAX);
-                            let val = format!("{:>5}", best);
-                            if hot { format!("\x1b[1m{}\x1b[0m", val) } else { val }
-                        }).collect();
-                        eprintln!("  reseed wg: {}\x1b[K", reseed_bests.join(" "));
-                        eprintln!("  free wg:   {}\x1b[K", free_bests.join(" "));
-                        lines += 2;
+                        eprintln!("  wg best:   {}\x1b[K", wg_bests.join(""));
+                        lines += 1;
                         if exchange_attempts_total > 0 {
                             let rate = exchange_swaps_total as f64 / exchange_attempts_total as f64 * 100.0;
                             let status = if rate > 95.0 { "wasteful — temps too close" }

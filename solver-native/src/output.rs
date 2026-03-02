@@ -67,8 +67,11 @@ pub fn print_cpu_row(
     } else {
         "-".to_string()
     };
+    let bold = if since < 30 { "\x1b[1m" } else { "" };
+    let reset = if since < 30 { "\x1b[0m" } else { "" };
     eprintln!(
-        "cpu{:<1} {:>5.1}  {:>5} {:>5}  {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4}  {:>6}  {}\x1b[K",
+        "{}cpu{:<1} {:>5.1}  {:>5} {:>5}  {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4}  {:>6}  {}{}\x1b[K",
+        bold,
         core_id, temp,
         cur_bd.total, best_bd.total,
         cur_bd.matchup_balance, best_bd.matchup_balance,
@@ -81,7 +84,7 @@ pub fn print_cpu_row(
         cur_bd.commissioner_overlap, best_bd.commissioner_overlap,
         cur_bd.half_season_repeat, best_bd.half_season_repeat,
         ips,
-        state,
+        state, reset,
     );
 }
 
