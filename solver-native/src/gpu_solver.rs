@@ -36,10 +36,8 @@ fn is_reseeded_chain(global_chain: usize, p_start: usize, chains_per_cpu: usize)
     offset_in_partition < wgs_per_partition / 2
 }
 
-/// Reseed chains in [p_start..p_end) from `source`, with perturbation
-/// scaled by each chain's temperature level.
-/// If `reseeded_only` is true, only reseed chains in "reseeded" workgroups
-/// (the first half of workgroups within the partition).
+/// Reseed chains in [p_start..p_end) from `source` (unperturbed).
+/// Chains start as exact copies; the SA kernel and shakeups handle diversification.
 fn reseed_partition_chains(
     queue: &wgpu::Queue,
     assign_buf: &wgpu::Buffer,
@@ -47,26 +45,15 @@ fn reseed_partition_chains(
     cost_buf: &wgpu::Buffer,
     best_cost_buf: &wgpu::Buffer,
     chain_source: &mut [String],
-    rng: &mut SmallRng,
     w8: &solver_core::Weights,
     source: &solver_core::Assignment,
     source_label: &str,
     p_start: usize,
     p_end: usize,
-    reseeded_only: bool,
 ) {
-    let chains_per_cpu = p_end - p_start;
+    let packed = pack_assignment(source);
+    let cost = solver_core::evaluate(source, w8).total;
     for idx in p_start..p_end {
-        if reseeded_only && !is_reseeded_chain(idx, p_start, chains_per_cpu) {
-            continue;
-        }
-        let level_in_pod = (idx % TEMP_LEVELS) % POD_SIZE;
-        let t_frac = level_in_pod as f64 / (POD_SIZE - 1).max(1) as f64;
-        let pert = (t_frac * t_frac * 5.0) as usize;
-        let mut a = *source;
-        solver_core::perturb(&mut a, rng, pert);
-        let packed = pack_assignment(&a);
-        let cost = solver_core::evaluate(&a, w8).total;
         let offset_assign = (idx * ASSIGN_U32S * 4) as u64;
         let offset_cost = (idx * 4) as u64;
         queue.write_buffer(assign_buf, offset_assign, bytemuck::cast_slice(&packed));
@@ -268,10 +255,6 @@ async fn run_gpu(
     let mut partitions: Vec<PartitionState> = (0..cpu_cores)
         .map(|_| PartitionState { dispatches_since_improvement: 0, aggressive_logged: false })
         .collect();
-    #[allow(unused_assignments)]
-    let mut gpu_median = 0u32;
-    #[allow(unused_assignments)]
-    let mut gpu_best_cost = 0u32;
 
     let mut worker_metas: Vec<WorkerMeta> = (0..cpu_cores).map(|_| WorkerMeta {
         reseeded_at: Instant::now(),
@@ -290,11 +273,13 @@ async fn run_gpu(
     let mut partition_cpu_bests: Vec<u32> = vec![0; cpu_cores];
     let mut partition_gpu_bests: Vec<u32> = vec![0; cpu_cores];
     let mut partition_gpu_seeded: Vec<u32> = vec![0; cpu_cores];
+    let mut counts_reset_done = false;
     let mut partition_best_cost: Vec<u32> = vec![u32::MAX; cpu_cores];
     let num_workgroups = chain_count as usize / TEMP_LEVELS;
     let wgs_per_partition = if cpu_cores > 0 { num_workgroups / cpu_cores } else { num_workgroups };
     let mut wg_best_costs: Vec<u32> = vec![u32::MAX; num_workgroups];
     let mut wg_best_levels: Vec<usize> = vec![0; num_workgroups];
+    let mut partition_medians: Vec<u32> = vec![0; cpu_cores];
     let mut exchange_swaps_total: u64 = 0;
     let mut exchange_attempts_total: u64 = 0;
 
@@ -302,9 +287,6 @@ async fn run_gpu(
     let mut last_print = Instant::now();
     let mut last_fresh_table = Instant::now();
     let mut prev_line_count: u32 = 0;
-    let mut gpu_prev_dispatch: u64 = 0;
-    let mut gpu_prev_dispatch_time = Instant::now();
-    let mut gpu_ips: u64 = 0;
 
     // ─── Main loop ────────────────────────────────────────────────────────
     loop {
@@ -330,11 +312,6 @@ async fn run_gpu(
                     }
                     print_table_header();
                     lines += 1;
-                    if let Some(ref best) = global_best_assignment {
-                        let best_bd = solver_core::evaluate(best, &w8);
-                        print_gpu_row(gpu_best_cost, gpu_median, &best_bd, gpu_ips);
-                        lines += 1;
-                    }
                     for (i, meta) in worker_metas.iter().enumerate() {
                         if let Some(ref report) = meta.last_report {
                             let temp = if i < cpu_temps_display.len() { cpu_temps_display[i] } else { 0.0 };
@@ -369,31 +346,33 @@ async fn run_gpu(
                         }
                     }
                     {
-                        let part_hdr: Vec<String> = (0..cpu_cores).map(|i| format!("{:>8}", i)).collect();
+                        let part_hdr: Vec<String> = (0..cpu_cores).map(|i| format!("{:>11}", i)).collect();
                         let part_vals: Vec<String> = (0..cpu_cores).map(|i| {
-                            format!("{:>2}/{:<2}({:<2})", partition_cpu_bests[i], partition_gpu_bests[i], partition_gpu_seeded[i])
+                            let v = format!("{}/{}({})", partition_cpu_bests[i], partition_gpu_bests[i], partition_gpu_seeded[i]);
+                            format!("{:>11}", v)
                         }).collect();
-                        eprintln!("  partition: {}\x1b[K", part_hdr.join(" "));
-                        eprintln!("  cpu/gpu:   {}\x1b[K", part_vals.join(" "));
-                        lines += 2;
-
+                        let gpu_meds: Vec<String> = (0..cpu_cores).map(|pi| {
+                            format!("{:>11}", partition_medians[pi])
+                        }).collect();
                         let wg_bests: Vec<String> = (0..cpu_cores).map(|pi| {
                             let wg_start = pi * wgs_per_partition;
                             let best = (wg_start..wg_start + wgs_per_partition)
                                 .map(|w| wg_best_costs[w])
                                 .min().unwrap_or(u32::MAX);
-                            format!("{:>8}", best)
+                            format!("{:>11}", best)
                         }).collect();
-                        eprintln!("  wg best:   {}\x1b[K", wg_bests.join(""));
-                        lines += 1;
+                        eprintln!("  partition:{}\x1b[K", part_hdr.join(""));
+                        eprintln!("  cpu/gpu:  {}\x1b[K", part_vals.join(""));
+                        eprintln!("  gpu med:  {}\x1b[K", gpu_meds.join(""));
+                        eprintln!("  wg best:  {}\x1b[K", wg_bests.join(""));
+                        lines += 4;
                         if exchange_attempts_total > 0 {
                             let rate = exchange_swaps_total as f64 / exchange_attempts_total as f64 * 100.0;
-                            let status = if rate > 95.0 { "wasteful — temps too close" }
-                                else if rate > 80.0 { "high — could widen spacing" }
-                                else if rate > 50.0 { "excellent" }
-                                else if rate > 30.0 { "good" }
-                                else if rate > 15.0 { "ok — ladder is selective" }
-                                else if rate > 5.0  { "low — flow is slow" }
+                            let status = if rate > 80.0 { "wasteful — temps too close" }
+                                else if rate > 60.0 { "high — could widen spacing" }
+                                else if rate > 40.0 { "good" }
+                                else if rate > 25.0 { "ok" }
+                                else if rate > 10.0 { "low — flow is slow" }
                                 else { "awful — ladder is broken" };
                             eprintln!("  exchange:  {}/{} ({:.1}%) {}\x1b[K",
                                 exchange_swaps_total, exchange_attempts_total, rate, status);
@@ -475,7 +454,7 @@ async fn run_gpu(
         let chains_per_cpu = if cpu_cores > 0 { chain_count as usize / cpu_cores } else { chain_count as usize };
         let mut partition_bests: Vec<(u32, usize)> = vec![(u32::MAX, 0); cpu_cores];
         let current_costs_snapshot: Vec<u32>;
-        let min_cost = {
+        let _min_cost = {
             let data = costs_slice.get_mapped_range();
             let all: &[u32] = bytemuck::cast_slice(&data);
             let n = chain_count as usize;
@@ -499,21 +478,17 @@ async fn run_gpu(
                     wg_best_levels[wg] = i % TEMP_LEVELS;
                 }
             }
-            gpu_median = sampled_median(current_costs, &mut rng);
+            for pi in 0..cpu_cores {
+                let start = pi * chains_per_cpu;
+                let end = ((pi + 1) * chains_per_cpu).min(n);
+                partition_medians[pi] = sampled_median(&current_costs[start..end], &mut rng);
+            }
             best
         };
         gpu.costs_readback_buf.unmap();
-        gpu_best_cost = min_cost;
 
         dispatch_count += 1;
         for p in partitions.iter_mut() { p.dispatches_since_improvement += 1; }
-        let gpu_dt = gpu_prev_dispatch_time.elapsed().as_secs_f64();
-        if gpu_dt >= 1.0 {
-            let gpu_di = (dispatch_count - gpu_prev_dispatch) * ITERS_PER_DISPATCH as u64 * chain_count as u64;
-            gpu_ips = (gpu_di as f64 / gpu_dt) as u64;
-            gpu_prev_dispatch = dispatch_count;
-            gpu_prev_dispatch_time = Instant::now();
-        }
 
         // 2b. Replica exchange: even/odd adjacent-temperature swaps within pods
         {
@@ -566,6 +541,16 @@ async fn run_gpu(
                 }
                 gpu.queue.submit(Some(encoder.finish()));
             }
+        }
+
+        if !counts_reset_done && start_time.elapsed().as_secs() >= 300 {
+            counts_reset_done = true;
+            for i in 0..cpu_cores {
+                partition_cpu_bests[i] = 0;
+                partition_gpu_bests[i] = 0;
+                partition_gpu_seeded[i] = 0;
+            }
+            event!(start_time.elapsed(), "RESET partition counters (5-minute warmup)");
         }
 
         maybe_print_table!();
@@ -672,9 +657,8 @@ async fn run_gpu(
                 reseed_partition_chains(
                     &gpu.queue, &gpu.assign_buf, &gpu.best_assign_buf,
                     &gpu.cost_buf, &gpu.best_cost_buf,
-                    &mut chain_source, &mut rng, &w8,
+                    &mut chain_source, &w8,
                     &assignment, &format!("gpu-p{}", pi), p_start, p_end,
-                    false,
                 );
             }
         }
@@ -739,9 +723,8 @@ async fn run_gpu(
                     reseed_partition_chains(
                         &gpu.queue, &gpu.assign_buf, &gpu.best_assign_buf,
                         &gpu.cost_buf, &gpu.best_cost_buf,
-                        &mut chain_source, &mut rng, &w8,
+                        &mut chain_source, &w8,
                         &report.best_assignment, &source_label, p_start, p_end,
-                        false,
                     );
                 }
                 let dt = worker_metas[cid].prev_iter_time.elapsed().as_secs_f64();
@@ -874,9 +857,8 @@ async fn run_gpu(
                     reseed_partition_chains(
                         &gpu.queue, &gpu.assign_buf, &gpu.best_assign_buf,
                         &gpu.cost_buf, &gpu.best_cost_buf,
-                        &mut chain_source, &mut rng, &w8,
+                        &mut chain_source, &w8,
                         &seed_assignment, &source_label, p_start, p_end,
-                        false,
                     );
 
                     let _ = cpu_workers.commands[pi].send(WorkerCommand::SetState(seed_assignment));

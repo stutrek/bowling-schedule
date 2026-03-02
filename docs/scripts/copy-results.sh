@@ -18,11 +18,11 @@ trap "rm -f '$seen_file'" EXIT
 copied=0
 skipped=0
 
-# split-sa results: score <= 155
+# split-sa results: score < 420
 for f in "$SRC_DIR"/*.tsv; do
     [ -f "$f" ] || continue
     score=$(basename "$f" | cut -c1-4)
-    if [ "$score" -lt 156 ] 2>/dev/null; then
+    if [ "$score" -lt 420 ] 2>/dev/null; then
         hash=$(shasum "$f" | cut -d' ' -f1)
         if grep -q "^${hash}$" "$seen_file" 2>/dev/null; then
             skipped=$((skipped + 1))
@@ -34,11 +34,11 @@ for f in "$SRC_DIR"/*.tsv; do
     fi
 done
 
-# gpu results: score <= 155
+# gpu results: score < 420
 for f in "$GPU_DIR"/*.tsv; do
     [ -f "$f" ] || continue
     score=$(basename "$f" | cut -c1-4)
-    if [ "$score" -lt 156 ] 2>/dev/null; then
+    if [ "$score" -lt 420 ] 2>/dev/null; then
         hash=$(shasum "$f" | cut -d' ' -f1)
         if grep -q "^${hash}$" "$seen_file" 2>/dev/null; then
             skipped=$((skipped + 1))

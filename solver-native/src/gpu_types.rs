@@ -49,8 +49,8 @@ pub const THRESH_DEFAULT: GpuMoveThresholds = GpuMoveThresholds {
 };
 pub const MAX_SWAP_PAIRS: usize = 8192;
 
-pub const GPU_TEMP_MIN: f64 = 5.0;
-pub const GPU_TEMP_MAX: f64 = 20.0;
+pub const GPU_TEMP_MIN: f64 = 6.0;
+pub const GPU_TEMP_MAX: f64 = 18.0;
 pub const CPU_TEMP_MIN: f64 = 12.0;
 pub const CPU_TEMP_MAX: f64 = 15.0;
 pub const TEMP_LEVELS: usize = 256;
