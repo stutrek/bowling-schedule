@@ -24,7 +24,7 @@ The current schedule doesn't use quads -- teams can end up on completely differe
 
 ### The scheduling challenge
 
-Quads are great for bowlers, but they make scheduling harder. On top of the quad structure, the schedule needs to be fair across six dimensions -- and optimizing one often makes another worse. A single "cost" score (lower is better, 0 is perfect) measures how good a schedule is:
+Quads are great for bowlers, but they make scheduling harder. On top of the quad structure, the schedule needs to be fair across nine dimensions -- and optimizing one often makes another worse. A single "cost" score (lower is better, 0 is perfect) measures how good a schedule is:
 
 1. **Matchup balance** -- every pair of teams should play each other 1 or 2 times across the season (penalty for 0 or 3+)
 2. **Consecutive opponents** -- no pair should play each other in back-to-back weeks
@@ -33,7 +33,8 @@ Quads are great for bowlers, but they make scheduling harder. On top of the quad
 5. **Lane balance** -- each team should play on each of the 4 lanes roughly equally (6 times each)
 6. **Lane switches** -- each team should stay on their lane about half the time and switch about half the time
 7. **Last game lane balance** -- each team's 6 last games of the night should be spread evenly across the 4 lanes (1-2 times each). This prevents a team from always ending their night on a problematic lane.
-8. **Commissioner switch** -- there are two commissioners in the league. If both have early games the same week (or both late), one person has to cover double duty. The schedule minimizes the number of weeks the commissioners share the same time slot.
+8. **Commissioner overlap** -- there are two commissioners in the league. If both have early games the same week (or both late), one person has to cover double duty. The schedule minimizes the number of weeks the commissioners share the same time slot.
+9. **Half-season repeat** -- no pair of teams should play each other more than once in each half of the season. This spreads matchups across the full 12 weeks instead of clustering them.
 
 The relative importance of each constraint is configured in [weights.json](weights.json).
 
@@ -43,27 +44,27 @@ The position of a team within its quad determines three things at once: which la
 
 The solver uses a technique called [parallel tempering](https://en.wikipedia.org/wiki/Parallel_tempering), which is an advanced form of [simulated annealing](https://en.wikipedia.org/wiki/Simulated_annealing). The core idea: imagine trying to solve a jigsaw puzzle by randomly swapping pieces. If a swap makes things better, keep it. If it makes things worse, sometimes keep it anyway -- to avoid getting stuck in a dead end. Run many copies of this process at different levels of "willingness to accept bad swaps," and let them share good solutions with each other.
 
-The implementation lives in [`solver-native/src/split_sa.rs`](solver-native/src/split_sa.rs).
+The solver is a hybrid GPU+CPU system. The GPU runs thousands of parallel chains via wgpu compute shaders ([`solver.wgsl`](solver-native/src/solver.wgsl)), while CPU workers run alongside for refinement. The GPU chains are organized into pods of 8 temperature levels with geometric spacing, and the CPU workers each own one partition of the GPU chains. The GPU and CPU sides share solutions bidirectionally -- when a GPU chain finds a better schedule than its CPU partition owner, it seeds the CPU worker, and vice versa.
 
 ### Temperature ladder
 
-Each CPU core runs at a different "temperature." Cold cores are picky -- they mostly only accept swaps that improve the schedule. Hot cores are adventurous -- they'll accept worse schedules to explore new territory. The temperatures are spread in a geometric progression across all available cores.
+The GPU runs chains organized into pods of 8, with temperatures spaced geometrically from 6.0 to 18.0. CPU workers run at temperatures from 12.0 to 15.0 (one per core). Cold chains are picky -- they mostly only accept swaps that improve the schedule. Hot chains are adventurous -- they'll accept worse schedules to explore new territory.
 
 ### Move types
 
 Each iteration, the solver picks one of 11 types of random changes to try. The percentage is the base probability before adaptive adjustment.
 
 - **Inter-quad player swap (25%)** -- Pick two quads in the same week, swap one player between them. The workhorse move -- it directly changes matchups, lane assignments, and stay/switch in one step.
-- **Intra-quad player swap (15%)** -- Swap two players within the same quad. Changes lane and stay/switch assignments without affecting who plays whom.
+- **Intra-quad player swap (10%)** -- Swap two players within the same quad. Changes lane and stay/switch assignments without affecting who plays whom.
 - **Team cross-week swap (10%)** -- Pick a team, find where it sits in two different weeks, and swap its position with the displaced teams in both weeks. Helps spread out repeat matchups and balance early/late across the season.
-- **Quad swap (8%)** -- Trade two entire quads within a week. Moves all four players to different lanes at once.
+- **Quad swap (6%)** -- Trade two entire quads within a week. Moves all four players to different lanes at once.
 - **Week swap (6%)** -- Swap two entire weeks. Reorders the season without changing any matchups -- just changes when they happen, which helps avoid back-to-back repeat opponents.
-- **Early/late flip (6%)** -- Take everyone who was playing early in a week and make them late, and vice versa.
-- **Lane pair swap (5%)** -- Swap the two early quads with each other and the two late quads with each other. Moves teams between lane pairs (5-6 and 7-8) while preserving who plays early vs late.
+- **Early/late flip (5%)** -- Take everyone who was playing early in a week and make them late, and vice versa.
+- **Lane pair swap (4%)** -- Swap the two early quads with each other and the two late quads with each other. Moves teams between lane pairs (5-6 and 7-8) while preserving who plays early vs late.
 - **Stay/switch rotation (6%)** -- Within a quad, swap who stays on their lane vs who switches between games.
-- **Targeted: fix a missing matchup (6%)** -- Find two teams that haven't played each other, find a week where they're in neighboring quads, and swap one into the other's quad.
-- **Targeted: fix lane imbalance (6%)** -- Find the team with the most lopsided lane distribution, find a quad containing that team, and swap their position within the quad to change their lane.
-- **Targeted: fix early/late imbalance (7%)** -- Find the team that's played early (or late) too many times and flip a week's early/late assignment to correct it.
+- **Targeted: fix a missing matchup (5%)** -- Find two teams that haven't played each other, find a week where they're in neighboring quads, and swap one into the other's quad.
+- **Targeted: fix lane imbalance (15%)** -- Find the team with the most lopsided lane distribution, find a quad containing that team, and swap their position within the quad to change their lane.
+- **Targeted: fix early/late imbalance (8%)** -- Find the team that's played early (or late) too many times and flip a week's early/late assignment to correct it.
 
 ### Adaptive move selection
 
@@ -77,35 +78,38 @@ Near the end of optimization (when cost is already low), the solver bundles mult
 
 Every 100,000 iterations, the solver picks two quads in the same week and brute-forces every possible player swap between them (only 16 possibilities). It keeps the best one. A periodic sanity check that finds improvements the random moves might miss.
 
-### Sharing between cores
+### Replica exchange
 
-Every 100,000 iterations, all cores pause and adjacent-temperature pairs may swap their schedules. This is called [replica exchange](https://en.wikipedia.org/wiki/Parallel_tempering#Replica_exchange). It lets good solutions found by adventurous (hot) cores flow down to the picky (cold) cores for refinement.
+Every GPU dispatch, adjacent-temperature pairs within each pod may swap their schedules. This is called [replica exchange](https://en.wikipedia.org/wiki/Parallel_tempering#Replica_exchange). The swap decision uses the Metropolis criterion based on the cost difference and inverse-temperature gap. Even/odd parity alternates each dispatch so every adjacent pair gets a chance. This lets good solutions found by adventurous (hot) chains flow down to the picky (cold) chains for refinement.
+
+### GPU-CPU feedback
+
+Every 10 dispatches, each CPU worker's best solution is used to reseed a fraction of its GPU partition chains (with perturbation scaled by temperature level). When a GPU chain beats its CPU partition owner, the GPU solution is sent to the CPU worker for further refinement. This bidirectional flow combines the GPU's massive exploration with the CPU's deeper per-chain optimization.
 
 ### Anti-stagnation
 
-If the best known score hasn't improved in a while, the solver shakes things up. Cores that converged to the same solution get re-seeded from a scrambled version of the global best. The hottest cores (top third of the temperature ladder) also get re-seeded. The amount of scrambling increases the longer stagnation persists.
+If a partition's best score hasn't improved in 60 dispatches, it enters stagnation mode: extra GPU chains are reseeded with heavier perturbation. If stagnation persists to 300 dispatches, an escalated shakeup reseeds the entire GPU partition and resets the CPU worker.
 
-### Auto-save and restart
+### Auto-save
 
-The solver saves the schedule to a TSV file whenever cost drops below 100. On reaching cost 0 (a perfect schedule), it saves immediately and starts a fresh search for another solution.
-
-### Phase modes
-
-The solver can run in three modes:
-
-- **`--full`** -- Solve the entire 12-week schedule at once. All weeks and quads are unlocked.
-- **Phase 1** (default) -- Solve the first 7.5 weeks. Useful for breaking the problem in half.
-- **Phase 2** (`--phase2`) -- Solve the second half, seeded from Phase 1 results.
+The solver saves the schedule to a TSV file whenever cost drops below 420.
 
 ## Results
 
-Best known result: **cost 85** (matchup 0, consecutive 0, early/late balance 0, alternation 60, lane 20, switch 5). This can be loaded in the web viewer via the "Load Best" button.
+Best known result: **cost 300**. Results are saved to `solver-native/results/gpu/` with filenames like `0300-cpu5-20260301-212702-0500.tsv`. These can be loaded in the web viewer.
 
 ## Architecture
 
 - `solver-core/` -- Shared Rust library with data structures, the evaluation function, and TSV I/O
-- `solver-native/` -- Command-line solver binaries. `split-sa` is the primary solver; other binaries (`construct`, `first-half`, `complete`, `refine`) are earlier experiments
-- `solver-wasm/` -- Browser-compatible build of the evaluation function, used by the web UI
+- `solver-native/` -- Command-line solver binaries: `solver` (GPU+CPU hybrid solver) and `rescore` (re-evaluates TSV files with updated weights and renames score prefixes)
+  - `gpu_solver.rs` -- Main binary: GPU dispatch loop, CPU worker coordination, partition management
+  - `cpu_sa.rs` -- CPU simulated annealing workers with the 11-move set and adaptive selection
+  - `gpu_setup.rs` -- wgpu device/buffer/pipeline creation
+  - `gpu_types.rs` -- GPU buffer layouts, temperature constants, pack/unpack helpers
+  - `output.rs` -- Terminal table output and event formatting
+  - `solver.wgsl` -- GPU compute shader implementing SA iterations
+  - `exchange.wgsl` -- GPU compute shader for replica exchange swaps
+- `solver-wasm/` -- Browser-compatible WASM build of the evaluation function and a single-threaded SA solver, used by the web UI
 - `docs/` -- Next.js web app with WASM-powered scoring, an interactive schedule editor, and TSV import/export
 - `src/` -- Original TypeScript prototypes (pinsetter1-6 and early SA attempts)
 
@@ -137,39 +141,30 @@ Constructed a perfect early/late assignment matrix, then tried to optimize match
 
 ### Constraint satisfaction / backtracking
 
-Tried building the schedule by placing teams one at a time, backtracking when constraints were violated -- like solving a Sudoku (`construct.rs`, `first_half.rs`). Could find partial solutions but didn't scale to the full 12-week schedule with all six soft constraints.
+Tried building the schedule by placing teams one at a time, backtracking when constraints were violated -- like solving a Sudoku (`construct.rs`, `first_half.rs`). Could find partial solutions but didn't scale to the full 12-week schedule with all the soft constraints.
 
 ## Running It
 
-The GPU solver is the recommended way to run. It uses your GPU for massively parallel chain exploration while also running CPU workers alongside it. Chain count automatically adapts to your GPU's buffer size, and CPU workers use all available cores minus two (reserved for the GPU and OS).
+The solver uses your GPU for massively parallel chain exploration while also running CPU workers alongside it. Chain count automatically adapts to your GPU's buffer size (4,096-16,384 chains), and CPU workers use all available cores minus two (reserved for the GPU and OS).
 
 ```bash
-# Run the GPU solver (auto-detects GPU size and CPU cores)
-cargo run --release --bin gpu-solver
+# Run the solver (auto-detects GPU size and CPU cores)
+cargo run --release --bin solver
 
 # Run without CPU workers (GPU only)
-cargo run --release --bin gpu-solver -- --no-cpu
+cargo run --release --bin solver -- --no-cpu
 
 # Run without seeding from previous results
-cargo run --release --bin gpu-solver -- --no-seed
+cargo run --release --bin solver -- --no-seed
 ```
 
 Results are saved to `solver-native/results/gpu/`.
 
-The CPU-only solver is also available:
+To re-evaluate existing results with updated weights:
 
 ```bash
-# Solve the full schedule using all available cores
-cargo run --release --bin split-sa -- --full
-
-# Specify number of cores
-cargo run --release --bin split-sa -- --full --cores 10
-
-# Seed from an existing schedule
-cargo run --release --bin split-sa -- --full --cores 10 path/to/seed.tsv
+cargo run --release --bin rescore -- ../weights.json results/gpu
 ```
-
-Results are saved to `solver-native/results/split-sa/full/`.
 
 To run the web viewer:
 
