@@ -636,6 +636,14 @@ async fn run_gpu(
                     pi, gpu_part_cost, prev, wg_idx, pod_in_wg, level_in_pod, temp_val, wg_type,
                     chain_source[gpu_part_chain],
                 ));
+                if gpu_part_cost < 420 {
+                    let ts = chrono::Local::now().format("%Y%m%d-%H%M%S%z");
+                    let filename = format!("{}/{:04}-gpu-p{}-{}.tsv", results_dir, gpu_part_cost, pi, ts);
+                    let mut out = assignment;
+                    reassign_commissioners(&mut out);
+                    let _ = fs::write(&filename, assignment_to_tsv(&out));
+                    event!(start_time.elapsed(), &format!("Saved {}", filename));
+                }
             }
 
             // If this is also a new global best, do global bookkeeping
@@ -649,14 +657,6 @@ async fn run_gpu(
                     found_at: Instant::now(),
                 };
 
-                if global_best_cost < 420 {
-                    let ts = chrono::Local::now().format("%Y%m%d-%H%M%S%z");
-                    let filename = format!("{}/{:04}-gpu-{}.tsv", results_dir, global_best_cost, ts);
-                    let mut out = assignment;
-                    reassign_commissioners(&mut out);
-                    let _ = fs::write(&filename, assignment_to_tsv(&out));
-                    event!(start_time.elapsed(), &format!("Saved {}", filename));
-                }
 
                 let p_end = ((pi + 1) * chains_per_cpu).min(chain_count as usize);
                 reseed_partition_chains(
@@ -687,6 +687,14 @@ async fn run_gpu(
                         cid, real_best, prev, cid,
                         if since_reseed < 30 { " (gpu-seeded)" } else { "" },
                     ));
+                    if real_best < 420 {
+                        let ts = chrono::Local::now().format("%Y%m%d-%H%M%S%z");
+                        let filename = format!("{}/{:04}-cpu{}-{}.tsv", results_dir, real_best, cid, ts);
+                        let mut out = report.best_assignment;
+                        reassign_commissioners(&mut out);
+                        let _ = fs::write(&filename, assignment_to_tsv(&out));
+                        event!(start_time.elapsed(), &format!("Saved {}", filename));
+                    }
                 }
                 if real_best < global_best_cost {
                     global_best_cost = real_best;
@@ -713,14 +721,6 @@ async fn run_gpu(
                         ));
                     }
 
-                    if global_best_cost < 420 {
-                        let ts = chrono::Local::now().format("%Y%m%d-%H%M%S%z");
-                        let filename = format!("{}/{:04}-cpu{}-{}.tsv", results_dir, global_best_cost, cid, ts);
-                        let mut out = report.best_assignment;
-                        reassign_commissioners(&mut out);
-                        let _ = fs::write(&filename, assignment_to_tsv(&out));
-                        event!(start_time.elapsed(), &format!("Saved {}", filename));
-                    }
 
                     let p_start = cid * chains_per_cpu;
                     let p_end = ((cid + 1) * chains_per_cpu).min(chain_count as usize);
