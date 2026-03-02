@@ -629,6 +629,7 @@ async fn run_gpu(
             if gpu_part_cost < partition_best_cost[pi] {
                 let prev = partition_best_cost[pi];
                 partition_best_cost[pi] = gpu_part_cost;
+                partitions[pi].dispatches_since_improvement = 0;
                 partition_gpu_bests[pi] += 1;
                 event!(start_time.elapsed(), &format!(
                     "PARTITION {} NEW BEST {} (was {}) from gpu wg={} pod={} lvl={}/T={:.1} type={} (seed: {})",
@@ -675,6 +676,7 @@ async fn run_gpu(
                 if real_best < partition_best_cost[cid] {
                     let prev = partition_best_cost[cid];
                     partition_best_cost[cid] = real_best;
+                    partitions[cid].dispatches_since_improvement = 0;
                     partition_cpu_bests[cid] += 1;
                     let since_reseed = worker_metas[cid].reseeded_at.elapsed().as_secs();
                     if since_reseed < 30 {
@@ -825,7 +827,7 @@ async fn run_gpu(
 
                 // 6b. Stagnation: extra reseeding with heavier perturbation
                 if stag >= STAGNATION_DISPATCHES {
-                    if stag % STAGNATION_DISPATCHES == 0 {
+                    if stag % STAGNATION_DISPATCHES < SYNC_INTERVAL {
                         event!(start_time.elapsed(), &format!(
                             "SHAKEUP: partition {} (stagnant {} dispatches)", pi, stag));
                     }
@@ -851,7 +853,7 @@ async fn run_gpu(
                 }
 
                 // 6c. Escalated shakeup: reseed reseeded WGs + CPU shake
-                if stag >= ESCALATION_DISPATCHES && stag % ESCALATION_DISPATCHES == 0 {
+                if stag >= ESCALATION_DISPATCHES && stag % ESCALATION_DISPATCHES < SYNC_INTERVAL {
                     event!(start_time.elapsed(), &format!(
                         "ESCALATED SHAKEUP: partition {} (stagnant {} dispatches)", pi, stag));
 
