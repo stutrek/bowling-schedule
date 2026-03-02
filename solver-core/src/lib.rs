@@ -21,6 +21,7 @@ pub struct Weights {
     pub lane_switch: f64,
     pub late_lane_balance: f64,
     pub commissioner_overlap: u32,
+    pub half_season_repeat: u32,
 }
 
 #[derive(Clone)]
@@ -33,6 +34,7 @@ pub struct CostBreakdown {
     pub lane_switch_balance: u32,
     pub late_lane_balance: u32,
     pub commissioner_overlap: u32,
+    pub half_season_repeat: u32,
     pub total: u32,
 }
 
@@ -116,8 +118,27 @@ pub fn evaluate(a: &Assignment, w8: &Weights) -> CostBreakdown {
         }
     }
 
+    let mut half_season_repeat: u32 = 0;
+    const HALF: usize = WEEKS / 2;
+    for i in 0..TEAMS {
+        for j in (i + 1)..TEAMS {
+            let idx = i * TEAMS + j;
+            let mut fh = 0u32;
+            let mut sh = 0u32;
+            for w in 0..HALF {
+                fh += week_matchup[w * TEAMS * TEAMS + idx] as u32;
+            }
+            for w in HALF..WEEKS {
+                sh += week_matchup[w * TEAMS * TEAMS + idx] as u32;
+            }
+            if fh > 1 { half_season_repeat += (fh - 1) * w8.half_season_repeat; }
+            if sh > 1 { half_season_repeat += (sh - 1) * w8.half_season_repeat; }
+        }
+    }
+
     let mut consecutive_opponents: u32 = 0;
     for w in 0..(WEEKS - 1) {
+        if w == 4 || w == 5 { continue; }
         let b1 = w * TEAMS * TEAMS;
         let b2 = (w + 1) * TEAMS * TEAMS;
         for i in 0..TEAMS {
@@ -197,7 +218,8 @@ pub fn evaluate(a: &Assignment, w8: &Weights) -> CostBreakdown {
         + lane_balance
         + lane_switch_balance
         + late_lane_balance
-        + commissioner_overlap;
+        + commissioner_overlap
+        + half_season_repeat;
 
     CostBreakdown {
         matchup_balance,
@@ -208,6 +230,7 @@ pub fn evaluate(a: &Assignment, w8: &Weights) -> CostBreakdown {
         lane_switch_balance,
         late_lane_balance,
         commissioner_overlap,
+        half_season_repeat,
         total,
     }
 }
@@ -264,10 +287,11 @@ pub fn assignment_to_tsv(a: &Assignment) -> String {
 
 pub fn cost_label(c: &CostBreakdown) -> String {
     format!(
-        "total: {:>4} matchup: {:>3} consec: {:>3} el_bal: {:>3} el_alt: {:>3} lane: {:>3} switch: {:>3} ll_bal: {:>3} comm: {:>3}",
+        "total: {:>4} matchup: {:>3} consec: {:>3} el_bal: {:>3} el_alt: {:>3} lane: {:>3} switch: {:>3} ll_bal: {:>3} comm: {:>3} hs_rpt: {:>3}",
         c.total, c.matchup_balance, c.consecutive_opponents,
         c.early_late_balance, c.early_late_alternation, c.lane_balance,
         c.lane_switch_balance, c.late_lane_balance, c.commissioner_overlap,
+        c.half_season_repeat,
     )
 }
 

@@ -5,7 +5,7 @@ use rand::Rng;
 pub const DEFAULT_CHAIN_COUNT: u32 = 16384;
 pub const MIN_CHAIN_COUNT: u32 = 4096;
 pub const MAX_CHAIN_COUNT: u32 = 16384;
-pub const ITERS_PER_DISPATCH: u32 = 512;
+pub const ITERS_PER_DISPATCH: u32 = 128;
 pub const ASSIGN_U32S: usize = 48;
 
 #[repr(C)]
@@ -20,9 +20,9 @@ pub struct GpuWeights {
     pub lane_switch: f32,
     pub late_lane_balance: f32,
     pub commissioner_overlap: u32,
+    pub half_season_repeat: u32,
     pub _pad0: u32,
     pub _pad1: u32,
-    pub _pad2: u32,
 }
 
 #[repr(C)]
@@ -32,6 +32,10 @@ pub struct GpuParams {
     pub chain_count: u32,
     pub temp_base: f32,
     pub temp_step: f32,
+    pub pod_size: u32,
+    pub _pad0: u32,
+    pub _pad1: u32,
+    pub _pad2: u32,
 }
 
 #[repr(C)]
@@ -43,6 +47,21 @@ pub struct GpuMoveThresholds {
 pub const THRESH_DEFAULT: GpuMoveThresholds = GpuMoveThresholds {
     t: [10, 35, 45, 50, 58, 62, 66, 72, 77, 92, 100, 0],
 };
+pub const MAX_SWAP_PAIRS: usize = 8192;
+
+pub const GPU_TEMP_MIN: f64 = 1.0;
+pub const GPU_TEMP_MAX: f64 = 30.0;
+pub const CPU_TEMP_MIN: f64 = 11.0;
+pub const CPU_TEMP_MAX: f64 = 13.0;
+pub const TEMP_LEVELS: usize = 256;
+pub const POD_SIZE: usize = 8;
+
+/// Quadratic spacing: denser at cold end, sparser at hot end.
+pub fn temp_for_level(level: usize) -> f64 {
+    let t_frac = level as f64 / (POD_SIZE - 1).max(1) as f64;
+    GPU_TEMP_MIN + t_frac * t_frac * (GPU_TEMP_MAX - GPU_TEMP_MIN)
+}
+
 pub const THRESH_HIGH_COST: GpuMoveThresholds = GpuMoveThresholds {
     t: [15, 33, 43, 50, 58, 63, 68, 74, 80, 92, 100, 0],
 };

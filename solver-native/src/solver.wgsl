@@ -16,6 +16,7 @@ struct Weights {
     lane_switch: f32,
     late_lane_balance: f32,
     commissioner_overlap: u32,
+    half_season_repeat: u32,
 }
 
 struct Params {
@@ -23,6 +24,7 @@ struct Params {
     chain_count: u32,
     temp_base: f32,
     temp_step: f32,
+    pod_size: u32,
 }
 
 @group(0) @binding(0) var<storage, read_write> assignments: array<u32>;
@@ -112,7 +114,7 @@ fn get_matchup(m: ptr<function, array<u32, 30>>, lo: u32, hi: u32) -> u32 {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// Bitset helpers for consecutive opponents
+// Bitset helpers for consecutive opponents + guided matchup move
 // ═══════════════════════════════════════════════════════════════════════
 
 fn set_pair_bit(bits: ptr<function, array<u32, 4>>, lo: u32, hi: u32) {
@@ -122,15 +124,17 @@ fn set_pair_bit(bits: ptr<function, array<u32, 4>>, lo: u32, hi: u32) {
 
 // ═══════════════════════════════════════════════════════════════════════
 // Cost function — Pass 1: matchups + early/late
-// Scratch: matchups 30 u32 (120B) + el 16 u32 (64B) = 184B
+// Scratch: fh/sh matchups 60 u32 (240B) + el 16 u32 (64B) = 304B
 // ═══════════════════════════════════════════════════════════════════════
 
 fn eval_matchups_early_late(a: ptr<function, array<u32, 48>>) -> u32 {
-    var matchups: array<u32, 30>;
+    var fh: array<u32, 30>;
+    var sh: array<u32, 30>;
     var el: array<u32, 16>;
-    for (var i = 0u; i < 30u; i++) { matchups[i] = 0u; }
+    for (var i = 0u; i < 30u; i++) { fh[i] = 0u; sh[i] = 0u; }
     for (var i = 0u; i < 16u; i++) { el[i] = 0u; }
 
+    let half = WEEKS / 2u;
     for (var w = 0u; w < WEEKS; w++) {
         let week_bit = 1u << w;
         for (var q = 0u; q < QUADS; q++) {
@@ -139,10 +143,17 @@ fn eval_matchups_early_late(a: ptr<function, array<u32, 48>>) -> u32 {
             let pc = get_team(a, w, q, 2u);
             let pd = get_team(a, w, q, 3u);
 
-            inc_matchup(&matchups, min(pa, pb), max(pa, pb));
-            inc_matchup(&matchups, min(pc, pd), max(pc, pd));
-            inc_matchup(&matchups, min(pa, pd), max(pa, pd));
-            inc_matchup(&matchups, min(pc, pb), max(pc, pb));
+            if (w < half) {
+                inc_matchup(&fh, min(pa, pb), max(pa, pb));
+                inc_matchup(&fh, min(pc, pd), max(pc, pd));
+                inc_matchup(&fh, min(pa, pd), max(pa, pd));
+                inc_matchup(&fh, min(pc, pb), max(pc, pb));
+            } else {
+                inc_matchup(&sh, min(pa, pb), max(pa, pb));
+                inc_matchup(&sh, min(pc, pd), max(pc, pd));
+                inc_matchup(&sh, min(pa, pd), max(pa, pd));
+                inc_matchup(&sh, min(pc, pb), max(pc, pb));
+            }
 
             if (q < 2u) {
                 el[pa] |= week_bit;
@@ -155,17 +166,22 @@ fn eval_matchups_early_late(a: ptr<function, array<u32, 48>>) -> u32 {
 
     var total = 0u;
 
-    // Matchup balance
+    // Matchup balance + half-season repeat
     for (var i = 0u; i < TEAMS; i++) {
         for (var j = i + 1u; j < TEAMS; j++) {
-            let c = get_matchup(&matchups, i, j);
+            let fc = get_matchup(&fh, i, j);
+            let sc = get_matchup(&sh, i, j);
+            let c = fc + sc;
             total += u32(c == 0u) * weights.matchup_zero;
             total += u32(max(c, 2u) - 2u) * weights.matchup_triple;
+            total += u32(max(fc, 1u) - 1u) * weights.half_season_repeat;
+            total += u32(max(sc, 1u) - 1u) * weights.half_season_repeat;
         }
     }
 
     // Consecutive opponents (bitset per week-pair, temporary 8 u32s)
     for (var w = 0u; w < WEEKS - 1u; w++) {
+        if (w == 4u || w == 5u) { continue; }
         var pw: array<u32, 4>;
         var pw1: array<u32, 4>;
         for (var k = 0u; k < 4u; k++) { pw[k] = 0u; pw1[k] = 0u; }
@@ -626,9 +642,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     var cost = costs[tid];
     var best_cost = best_costs[tid];
 
-    let temp_levels = 256u;
-    let t_frac = f32(tid % temp_levels) / f32(temp_levels - 1u);
-    let temp = params.temp_base + t_frac * (params.temp_step - params.temp_base);
+    let level_in_pod = tid % params.pod_size;
+    let t_frac = f32(level_in_pod) / f32(max(params.pod_size - 1u, 1u));
+    let temp = params.temp_base + t_frac * t_frac * (params.temp_step - params.temp_base);
 
     for (var iter = 0u; iter < params.iters_per_dispatch; iter++) {
         if (best_cost == 0u) { break; }

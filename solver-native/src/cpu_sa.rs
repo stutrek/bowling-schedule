@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{mpsc, Arc};
 use std::thread;
 
@@ -41,6 +41,7 @@ pub struct CpuWorkers {
     pub handles: Vec<thread::JoinHandle<()>>,
     pub commands: Vec<mpsc::Sender<WorkerCommand>>,
     pub reports: mpsc::Receiver<WorkerReport>,
+    pub live_best_costs: Vec<Arc<AtomicU32>>,
 }
 
 pub fn run_cpu_workers(
@@ -52,10 +53,14 @@ pub fn run_cpu_workers(
     let (report_tx, report_rx) = mpsc::channel();
     let mut cmd_txs = Vec::with_capacity(num_cores);
     let mut handles = Vec::with_capacity(num_cores);
+    let mut live_best_costs = Vec::with_capacity(num_cores);
 
     for core_id in 0..num_cores {
         let (cmd_tx, cmd_rx) = mpsc::channel();
         cmd_txs.push(cmd_tx);
+
+        let live_best = Arc::new(AtomicU32::new(u32::MAX));
+        live_best_costs.push(Arc::clone(&live_best));
 
         let w8 = w8.clone();
         let temp = temps[core_id];
@@ -63,7 +68,7 @@ pub fn run_cpu_workers(
         let report_tx = report_tx.clone();
 
         handles.push(thread::spawn(move || {
-            worker_loop(core_id, w8, temp, shutdown, cmd_rx, report_tx);
+            worker_loop(core_id, w8, temp, shutdown, cmd_rx, report_tx, live_best);
         }));
     }
 
@@ -71,6 +76,7 @@ pub fn run_cpu_workers(
         handles,
         commands: cmd_txs,
         reports: report_rx,
+        live_best_costs,
     }
 }
 
@@ -81,6 +87,7 @@ fn worker_loop(
     shutdown: Arc<AtomicBool>,
     cmd_rx: mpsc::Receiver<WorkerCommand>,
     report_tx: mpsc::Sender<WorkerReport>,
+    live_best_cost: Arc<AtomicU32>,
 ) {
     let mut rng = SmallRng::from_os_rng();
     let mut a = random_assignment(&mut rng);
@@ -101,6 +108,7 @@ fn worker_loop(
                     if cost.total < best_cost {
                         best_a = a;
                         best_cost = cost.total;
+                        live_best_cost.store(best_cost, Ordering::Relaxed);
                     }
                 }
                 WorkerCommand::SetTemp(t) => {
@@ -394,6 +402,7 @@ fn worker_loop(
             }
         }
         iterations_total = batch_end;
+        live_best_cost.store(best_cost, Ordering::Relaxed);
 
         let _ = report_tx.send(WorkerReport {
             core_id,

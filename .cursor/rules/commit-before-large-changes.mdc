@@ -1,0 +1,12 @@
+---
+description: Remind user to git commit before large changes
+alwaysApply: true
+---
+
+# Commit before large changes
+
+Before starting any task that will touch 3+ files or make significant structural changes, check `git status` for uncommitted work. If there are unstaged or staged changes, remind the user:
+
+> "You have uncommitted changes. Want to commit before I proceed, so you have a clean rollback point?"
+
+Wait for confirmation before continuing with the large change.

@@ -44,15 +44,14 @@ pub fn print_table_banner(
 
 pub fn print_table_header() {
     eprintln!(
-        "{:>9}  {:>4} {:>5}  {:>5} {:>5}  {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9}  {:>6}  {}\x1b[K",
-        "elapsed", "src", "temp", "cur", "best",
-        "match", "consec", "el_bal", "el_alt", "lane", "switch", "ll_bal", "comm",
+        "{:>4} {:>5}  {:>5} {:>5}  {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9}  {:>6}  {}\x1b[K",
+        "src", "temp", "cur", "best",
+        "match", "consec", "el_bal", "el_alt", "lane", "switch", "ll_bal", "comm", "hs_rpt",
         "it/s", "state",
     );
 }
 
 pub fn print_cpu_row(
-    elapsed: Duration,
     core_id: usize,
     report: &WorkerReport,
     w8: &Weights,
@@ -69,8 +68,8 @@ pub fn print_cpu_row(
         "-".to_string()
     };
     eprintln!(
-        "{:>9}  cpu{:<1} {:>5.1}  {:>5} {:>5}  {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4}  {:>6}  {}\x1b[K",
-        fmt_elapsed(elapsed), core_id, temp,
+        "cpu{:<1} {:>5.1}  {:>5} {:>5}  {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4}  {:>6}  {}\x1b[K",
+        core_id, temp,
         cur_bd.total, best_bd.total,
         cur_bd.matchup_balance, best_bd.matchup_balance,
         cur_bd.consecutive_opponents, best_bd.consecutive_opponents,
@@ -80,13 +79,13 @@ pub fn print_cpu_row(
         cur_bd.lane_switch_balance, best_bd.lane_switch_balance,
         cur_bd.late_lane_balance, best_bd.late_lane_balance,
         cur_bd.commissioner_overlap, best_bd.commissioner_overlap,
+        cur_bd.half_season_repeat, best_bd.half_season_repeat,
         ips,
         state,
     );
 }
 
 pub fn print_gpu_row(
-    elapsed: Duration,
     gpu_best_cost: u32,
     gpu_median: u32,
     best_bd: &CostBreakdown,
@@ -98,8 +97,7 @@ pub fn print_gpu_row(
         "-".to_string()
     };
     eprintln!(
-        "{:>9}  gpu   {:>5}  ~{:<4} {:>5}  {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4}  {:>6}\x1b[K",
-        fmt_elapsed(elapsed),
+        "gpu   {:>5}  ~{:<4} {:>5}  {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4}  {:>6}\x1b[K",
         "-", gpu_median, gpu_best_cost,
         "-", best_bd.matchup_balance,
         "-", best_bd.consecutive_opponents,
@@ -109,6 +107,7 @@ pub fn print_gpu_row(
         "-", best_bd.lane_switch_balance,
         "-", best_bd.late_lane_balance,
         "-", best_bd.commissioner_overlap,
+        "-", best_bd.half_season_repeat,
         ips,
     );
 }

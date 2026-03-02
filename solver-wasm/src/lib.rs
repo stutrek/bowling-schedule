@@ -17,6 +17,7 @@ pub struct WasmCostBreakdown {
     pub lane_switch_balance: u32,
     pub late_lane_balance: u32,
     pub commissioner_overlap: u32,
+    pub half_season_repeat: u32,
     pub total: u32,
 }
 
@@ -30,6 +31,7 @@ fn to_wasm_cost(c: &core::CostBreakdown) -> WasmCostBreakdown {
         lane_switch_balance: c.lane_switch_balance,
         late_lane_balance: c.late_lane_balance,
         commissioner_overlap: c.commissioner_overlap,
+        half_season_repeat: c.half_season_repeat,
         total: c.total,
     }
 }
@@ -53,6 +55,7 @@ impl SolverResult {
             lane_switch_balance: self.cost.lane_switch_balance,
             late_lane_balance: self.cost.late_lane_balance,
             commissioner_overlap: self.cost.commissioner_overlap,
+            half_season_repeat: self.cost.half_season_repeat,
             total: self.cost.total,
         }
     }
