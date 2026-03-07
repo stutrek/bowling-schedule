@@ -9,14 +9,15 @@ use solver_core::summer::*;
 pub const BATCH_SIZE: u64 = 10_000;
 const STATS_RECOMPUTE: u64 = 10_000;
 
-pub const NUM_MOVES: usize = 9;
+pub const NUM_MOVES: usize = 12;
 const BASE_WEIGHTS: [f64; NUM_MOVES] = [
-    0.20, 0.12, 0.14, 0.06, 0.06, 0.10, 0.10, 0.10, 0.12,
+    0.14, 0.10, 0.10, 0.04, 0.04, 0.10, 0.10, 0.08, 0.10, 0.08, 0.06, 0.06,
 ];
 
 pub const MOVE_NAMES: [&str; NUM_MOVES] = [
-    "tm_swap", "mtch_sw", "opp_sw", "week_sw",
+    "tm_swap", "mtch_sw", "opp_sw", "ln_week",
     "slot_sw", "g_match", "g_lane", "g_slot", "g_lnsw",
+    "pr_swap", "g_ln_xs", "ln_chas",
 ];
 
 pub enum SummerWorkerCommand {
@@ -157,12 +158,15 @@ fn worker_loop(
                     0 => do_team_swap(&mut a, &mut cost, &mut best_a, &mut best_cost, &active_w8, active_temp, &mut rng),
                     1 => do_matchup_swap(&mut a, &mut cost, &mut best_a, &mut best_cost, &active_w8, active_temp, &mut rng),
                     2 => do_opponent_swap(&mut a, &mut cost, &mut best_a, &mut best_cost, &active_w8, active_temp, &mut rng),
-                    3 => do_week_swap(&mut a, &mut cost, &mut best_a, &mut best_cost, &active_w8, active_temp, &mut rng),
+                    3 => do_lane_swap_week(&mut a, &mut cost, &mut best_a, &mut best_cost, &active_w8, active_temp, &mut rng),
                     4 => do_slot_swap(&mut a, &mut cost, &mut best_a, &mut best_cost, &active_w8, active_temp, &mut rng),
                     5 => do_guided_matchup(&mut a, &mut cost, &mut best_a, &mut best_cost, &active_w8, active_temp, &mut rng),
                     6 => do_guided_lane(&mut a, &mut cost, &mut best_a, &mut best_cost, &active_w8, active_temp, &mut rng),
                     7 => do_guided_slot(&mut a, &mut cost, &mut best_a, &mut best_cost, &active_w8, active_temp, &mut rng),
-                    _ => do_guided_lane_switch(&mut a, &mut cost, &mut best_a, &mut best_cost, &active_w8, active_temp, &mut rng),
+                    8 => do_guided_lane_switch(&mut a, &mut cost, &mut best_a, &mut best_cost, &active_w8, active_temp, &mut rng),
+                    9 => do_pair_swap_in_slot(&mut a, &mut cost, &mut best_a, &mut best_cost, &active_w8, active_temp, &mut rng),
+                    10 => do_guided_lane_cross_slot(&mut a, &mut cost, &mut best_a, &mut best_cost, &active_w8, active_temp, &mut rng),
+                    _ => do_lane_chase(&mut a, &mut cost, &mut best_a, &mut best_cost, &active_w8, active_temp, &mut rng),
                 };
 
                 if accepted { stats.accepts[move_id] += 1; }
@@ -376,20 +380,26 @@ fn do_opponent_swap(
     }
 }
 
-// ─── Move 3: week_swap ─────────────────────────────────────────────────────
+// ─── Move 3: lane_swap_week — swap two entire lanes across all slots in a week
 
-fn do_week_swap(
+fn do_lane_swap_week(
     a: &mut SummerAssignment, cost: &mut SummerCostBreakdown,
     best_a: &mut SummerAssignment, best_cost: &mut u32,
     w8: &SummerWeights, temp: f64, rng: &mut SmallRng,
 ) -> bool {
-    let w1 = rng.random_range(0..S_WEEKS);
-    let mut w2 = rng.random_range(0..(S_WEEKS - 1));
-    if w2 >= w1 { w2 += 1; }
+    let w = rng.random_range(0..S_WEEKS);
+    let p1 = rng.random_range(0..S_PAIRS);
+    let mut p2 = rng.random_range(0..(S_PAIRS - 1));
+    if p2 >= p1 { p2 += 1; }
 
-    let tmp = a[w1];
-    a[w1] = a[w2];
-    a[w2] = tmp;
+    let saved = *a;
+    for s in 0..S_SLOTS {
+        if is_valid_position(s, p1) && is_valid_position(s, p2) {
+            let tmp = a[w][s][p1];
+            a[w][s][p1] = a[w][s][p2];
+            a[w][s][p2] = tmp;
+        }
+    }
 
     let new_cost = evaluate_summer(a, w8);
     let delta = new_cost.total as i64 - cost.total as i64;
@@ -398,8 +408,7 @@ fn do_week_swap(
         if cost.total < *best_cost { *best_cost = cost.total; *best_a = *a; }
         true
     } else {
-        a[w2] = a[w1];
-        a[w1] = tmp;
+        *a = saved;
         false
     }
 }
@@ -830,6 +839,251 @@ fn do_guided_lane_switch(
         if fix_side == 0 { a[w][fix_s][fix_p].0 = their_team; } else { a[w][fix_s][fix_p].1 = their_team; }
         if swap_side == 0 { a[w][fix_s][target_p].0 = worst_team; } else { a[w][fix_s][target_p].1 = worst_team; }
     } else {
+        return false;
+    }
+
+    let new_cost = evaluate_summer(a, w8);
+    let delta = new_cost.total as i64 - cost.total as i64;
+    if sa_accept(delta, temp, rng) {
+        *cost = new_cost;
+        if cost.total < *best_cost { *best_cost = cost.total; *best_a = *a; }
+        true
+    } else {
+        *a = saved;
+        false
+    }
+}
+
+// ─── Move 9: pair_swap_in_slot ─────────────────────────────────────────────
+
+fn do_pair_swap_in_slot(
+    a: &mut SummerAssignment, cost: &mut SummerCostBreakdown,
+    best_a: &mut SummerAssignment, best_cost: &mut u32,
+    w8: &SummerWeights, temp: f64, rng: &mut SmallRng,
+) -> bool {
+    let w = rng.random_range(0..S_WEEKS);
+    let s = rng.random_range(0..S_SLOTS);
+    let p1 = rng.random_range(0..S_PAIRS);
+    if !is_valid_position(s, p1) || a[w][s][p1].0 == EMPTY { return false; }
+    let mut p2 = rng.random_range(0..(S_PAIRS - 1));
+    if p2 >= p1 { p2 += 1; }
+    if !is_valid_position(s, p2) || a[w][s][p2].0 == EMPTY { return false; }
+
+    let saved = *a;
+    let tmp = a[w][s][p1];
+    a[w][s][p1] = a[w][s][p2];
+    a[w][s][p2] = tmp;
+
+    let new_cost = evaluate_summer(a, w8);
+    let delta = new_cost.total as i64 - cost.total as i64;
+    if sa_accept(delta, temp, rng) {
+        *cost = new_cost;
+        if cost.total < *best_cost { *best_cost = cost.total; *best_a = *a; }
+        true
+    } else {
+        *a = saved;
+        false
+    }
+}
+
+// ─── Move 10: guided_lane_cross_slot ──────────────────────────────────────
+
+fn do_guided_lane_cross_slot(
+    a: &mut SummerAssignment, cost: &mut SummerCostBreakdown,
+    best_a: &mut SummerAssignment, best_cost: &mut u32,
+    w8: &SummerWeights, temp: f64, rng: &mut SmallRng,
+) -> bool {
+    // Compute lane counts
+    let mut lane_counts = [0i32; S_TEAMS * S_LANES];
+    for w in 0..S_WEEKS {
+        for s in 0..S_SLOTS {
+            for p in 0..S_PAIRS {
+                let (t1, t2) = a[w][s][p];
+                if t1 == EMPTY { continue; }
+                lane_counts[t1 as usize * S_LANES + p] += 1;
+                lane_counts[t2 as usize * S_LANES + p] += 1;
+            }
+        }
+    }
+
+    let target = (S_WEEKS as f64 * 3.0) / S_LANES as f64;
+    let mut worst_team = 0usize;
+    let mut worst_lane = 0usize;
+    let mut worst_dev = 0.0f64;
+    let mut worst_over = false;
+    for t in 0..S_TEAMS {
+        for l in 0..S_LANES {
+            let dev = lane_counts[t * S_LANES + l] as f64 - target;
+            if dev.abs() > worst_dev {
+                worst_dev = dev.abs();
+                worst_team = t;
+                worst_lane = l;
+                worst_over = dev > 0.0;
+            }
+        }
+    }
+    if worst_dev < 1.0 { return false; }
+
+    // Team_swap worst_team from over-represented lane to a different lane across slots
+    let saved = *a;
+    let w = rng.random_range(0..S_WEEKS);
+    let positions = find_team_pos(a, w, worst_team as u8);
+    if positions.is_empty() { return false; }
+
+    // Find a position on the source lane
+    let source_pos: Vec<_> = if worst_over {
+        positions.iter().filter(|&&(_, p, _)| p == worst_lane).collect()
+    } else {
+        positions.iter().filter(|&&(_, p, _)| p != worst_lane).collect()
+    };
+    if source_pos.is_empty() { return false; }
+    let &(sf, pf, side_f) = source_pos[rng.random_range(0..source_pos.len())];
+
+    // Find a target in a different slot on a different lane pair
+    let mut targets: Vec<(usize, usize, usize)> = Vec::new();
+    for s in 0..S_SLOTS {
+        if s == sf { continue; }
+        for p in 0..S_PAIRS {
+            if !is_valid_position(s, p) || a[w][s][p].0 == EMPTY { continue; }
+            let on_target = if worst_over { p != worst_lane } else { p == worst_lane };
+            if !on_target { continue; }
+            targets.push((s, p, 0));
+            targets.push((s, p, 1));
+        }
+    }
+    if targets.is_empty() { return false; }
+    let (st, pt, side_t) = targets[rng.random_range(0..targets.len())];
+
+    let my_team = worst_team as u8;
+    let their_team = if side_t == 0 { a[w][st][pt].0 } else { a[w][st][pt].1 };
+
+    // Check constraints
+    if team_in_slot(a, w, st, my_team, Some(pt)) { return false; }
+    if team_in_slot(a, w, sf, their_team, Some(pf)) { return false; }
+    let my_opp = if side_f == 0 { a[w][sf][pf].1 } else { a[w][sf][pf].0 };
+    let their_opp = if side_t == 0 { a[w][st][pt].1 } else { a[w][st][pt].0 };
+    if my_opp == their_team || their_opp == my_team { return false; }
+
+    // Perform team swap
+    if side_f == 0 { a[w][sf][pf].0 = their_team; } else { a[w][sf][pf].1 = their_team; }
+    if side_t == 0 { a[w][st][pt].0 = my_team; } else { a[w][st][pt].1 = my_team; }
+
+    let new_cost = evaluate_summer(a, w8);
+    let delta = new_cost.total as i64 - cost.total as i64;
+    if sa_accept(delta, temp, rng) {
+        *cost = new_cost;
+        if cost.total < *best_cost { *best_cost = cost.total; *best_a = *a; }
+        true
+    } else {
+        *a = saved;
+        false
+    }
+}
+
+// ─── Move 11: lane_chase — multi-week compound move to fix worst lane imbalance ──
+
+fn do_lane_chase(
+    a: &mut SummerAssignment, cost: &mut SummerCostBreakdown,
+    best_a: &mut SummerAssignment, best_cost: &mut u32,
+    w8: &SummerWeights, temp: f64, rng: &mut SmallRng,
+) -> bool {
+    // Compute lane counts
+    let mut lane_counts = [0i32; S_TEAMS * S_LANES];
+    for w in 0..S_WEEKS {
+        for s in 0..S_SLOTS {
+            for p in 0..S_PAIRS {
+                let (t1, t2) = a[w][s][p];
+                if t1 == EMPTY { continue; }
+                lane_counts[t1 as usize * S_LANES + p] += 1;
+                lane_counts[t2 as usize * S_LANES + p] += 1;
+            }
+        }
+    }
+
+    let target = (S_WEEKS as f64 * 3.0) / S_LANES as f64;
+    let mut worst_team = 0usize;
+    let mut worst_lane = 0usize;
+    let mut worst_dev = 0.0f64;
+    let mut worst_over = false;
+    for t in 0..S_TEAMS {
+        for l in 0..S_LANES {
+            let dev = lane_counts[t * S_LANES + l] as f64 - target;
+            if dev.abs() > worst_dev {
+                worst_dev = dev.abs();
+                worst_team = t;
+                worst_lane = l;
+                worst_over = dev > 0.0;
+            }
+        }
+    }
+    if worst_dev < 1.0 { return false; }
+
+    let saved = *a;
+    let mut changed = false;
+
+    // Iterate all weeks, trying to fix the team's lane in each
+    let w_start = rng.random_range(0..S_WEEKS);
+    for w_off in 0..S_WEEKS {
+        let w = (w_start + w_off) % S_WEEKS;
+        let positions = find_team_pos(a, w, worst_team as u8);
+        if positions.is_empty() { continue; }
+
+        // Find team on the source lane (over: on worst_lane, under: not on worst_lane)
+        let source: Vec<_> = if worst_over {
+            positions.iter().filter(|&&(_, p, _)| p == worst_lane).collect()
+        } else {
+            positions.iter().filter(|&&(_, p, _)| p != worst_lane).collect()
+        };
+        if source.is_empty() { continue; }
+        let &(sf, pf, side_f) = source[rng.random_range(0..source.len())];
+
+        // Strategy 1: pair-swap within the same slot
+        let target_lanes: Vec<usize> = if worst_over {
+            (0..S_PAIRS).filter(|&p| p != worst_lane && is_valid_position(sf, p) && a[w][sf][p].0 != EMPTY).collect()
+        } else {
+            vec![worst_lane].into_iter().filter(|&p| is_valid_position(sf, p) && a[w][sf][p].0 != EMPTY).collect()
+        };
+        let mut did_swap = false;
+        for &tp in &target_lanes {
+            // Pair-swap: swap entire matchups between pf and tp in slot sf
+            let tmp = a[w][sf][pf];
+            a[w][sf][pf] = a[w][sf][tp];
+            a[w][sf][tp] = tmp;
+            changed = true;
+            did_swap = true;
+            break;
+        }
+        if did_swap { continue; }
+
+        // Strategy 2: team-swap across slots
+        let mut did_cross_slot = false;
+        for s in 0..S_SLOTS {
+            if s == sf { continue; }
+            if did_cross_slot { break; }
+            for p in 0..S_PAIRS {
+                if !is_valid_position(s, p) || a[w][s][p].0 == EMPTY { continue; }
+                let on_target = if worst_over { p != worst_lane } else { p == worst_lane };
+                if !on_target { continue; }
+
+                let side_t = rng.random_range(0..2usize);
+                let their_team = if side_t == 0 { a[w][s][p].0 } else { a[w][s][p].1 };
+
+                if team_in_slot(a, w, s, worst_team as u8, Some(p)) { continue; }
+                if team_in_slot(a, w, sf, their_team, Some(pf)) { continue; }
+                let my_opp = if side_f == 0 { a[w][sf][pf].1 } else { a[w][sf][pf].0 };
+                let their_opp = if side_t == 0 { a[w][s][p].1 } else { a[w][s][p].0 };
+                if my_opp == their_team || their_opp == worst_team as u8 { continue; }
+
+                if side_f == 0 { a[w][sf][pf].0 = their_team; } else { a[w][sf][pf].1 = their_team; }
+                if side_t == 0 { a[w][s][p].0 = worst_team as u8; } else { a[w][s][p].1 = worst_team as u8; }
+                changed = true;
+                did_cross_slot = true;
+                break;
+            }
+        }
+    }
+
+    if !changed {
         return false;
     }
 

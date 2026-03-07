@@ -30,7 +30,7 @@ pub struct GpuSummerMoveThresholds {
 }
 
 pub const SUMMER_THRESH_DEFAULT: GpuSummerMoveThresholds = GpuSummerMoveThresholds {
-    t: [20, 32, 46, 52, 58, 68, 78, 88, 100, 0, 0, 0],
+    t: [14, 24, 34, 38, 42, 52, 62, 70, 80, 88, 94, 100],
 };
 
 pub fn pack_summer_assignment(a: &SummerAssignment) -> [u32; SUMMER_ASSIGN_U32S] {

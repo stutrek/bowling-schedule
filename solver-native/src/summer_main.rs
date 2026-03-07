@@ -16,6 +16,13 @@ const SYNC_INTERVAL: u64 = 10;
 const STAGNATION_DISPATCHES: u64 = 900;
 const ESCALATION_DISPATCHES: u64 = 4500;
 const VERIFY_INTERVAL_SECS: u64 = 30;
+const SUMMER_GPU_TEMP_MIN: f64 = 4.0;
+const SUMMER_GPU_TEMP_MAX: f64 = 12.0;
+
+fn summer_temp_for_level(level: usize) -> f64 {
+    let t_frac = level as f64 / (POD_SIZE - 1).max(1) as f64;
+    SUMMER_GPU_TEMP_MIN * (SUMMER_GPU_TEMP_MAX / SUMMER_GPU_TEMP_MIN).powf(t_frac)
+}
 
 struct ProvenanceTally {
     from_shakeup: u32,
@@ -138,7 +145,7 @@ pub fn run(shutdown: Arc<AtomicBool>, args: &[String]) {
         pods_per_wg, num_wgs, total_pods, POD_SIZE,
     );
     {
-        let temps: Vec<String> = (0..POD_SIZE).map(|l| format!("{:.1}", temp_for_level(l))).collect();
+        let temps: Vec<String> = (0..POD_SIZE).map(|l| format!("{:.1}", summer_temp_for_level(l))).collect();
         eprintln!("  pod temps: [{}]", temps.join(", "));
     }
     eprintln!(
@@ -188,8 +195,8 @@ pub fn run(shutdown: Arc<AtomicBool>, args: &[String]) {
     let gpu_params = GpuParams {
         iters_per_dispatch: ITERS_PER_DISPATCH,
         chain_count,
-        temp_base: GPU_TEMP_MIN as f32,
-        temp_step: GPU_TEMP_MAX as f32,
+        temp_base: SUMMER_GPU_TEMP_MIN as f32,
+        temp_step: SUMMER_GPU_TEMP_MAX as f32,
         pod_size: POD_SIZE as u32,
         _pad0: 0, _pad1: 0, _pad2: 0,
     };
@@ -539,7 +546,7 @@ async fn run_gpu(
 
             let p_start = pi * chains_per_cpu;
             let level_in_pod = (gpu_part_chain % TEMP_LEVELS) % POD_SIZE;
-            let temp_val = temp_for_level(level_in_pod);
+            let temp_val = summer_temp_for_level(level_in_pod);
 
             if gpu_part_cost < partition_best_cost[pi] {
                 let prev = partition_best_cost[pi];
@@ -549,11 +556,13 @@ async fn run_gpu(
                 event!(start_time.elapsed(), &format!(
                     "PARTITION {} NEW BEST {} (was {}) from gpu T={:.1}", pi, gpu_part_cost, prev, temp_val));
 
-                let ts = chrono::Local::now().format("%Y%m%d-%H%M%S%z");
-                let filename = format!("{}/{:04}-gpu-p{}-{}.tsv", results_dir, gpu_part_cost, pi, ts);
-                let mut out = assignment;
-                reassign_summer_commissioners(&mut out);
-                let _ = fs::write(&filename, summer_assignment_to_tsv(&out));
+                if gpu_part_cost < 1500 {
+                    let ts = chrono::Local::now().format("%Y%m%d-%H%M%S%z");
+                    let filename = format!("{}/{:04}-gpu-p{}-{}.tsv", results_dir, gpu_part_cost, pi, ts);
+                    let mut out = assignment;
+                    reassign_summer_commissioners(&mut out);
+                    let _ = fs::write(&filename, summer_assignment_to_tsv(&out));
+                }
             }
 
             if gpu_part_cost < global_best_cost {
@@ -592,8 +601,8 @@ async fn run_gpu(
                         let chain_b = pod_base + level + 1;
                         let cost_a = current_costs_snapshot[chain_a] as f64;
                         let cost_b = current_costs_snapshot[chain_b] as f64;
-                        let temp_a = temp_for_level(level);
-                        let temp_b = temp_for_level(level + 1);
+                        let temp_a = summer_temp_for_level(level);
+                        let temp_b = summer_temp_for_level(level + 1);
                         let delta = (1.0 / temp_a - 1.0 / temp_b) * (cost_a - cost_b);
                         attempts += 1;
                         if delta >= 0.0 || rng.random::<f64>() < delta.exp() {
@@ -644,11 +653,13 @@ async fn run_gpu(
                     event!(start_time.elapsed(), &format!(
                         "PARTITION {} NEW BEST {} (was {}) from cpu{}", cid, real_best, prev, cid));
 
-                    let ts = chrono::Local::now().format("%Y%m%d-%H%M%S%z");
-                    let filename = format!("{}/{:04}-cpu{}-{}.tsv", results_dir, real_best, cid, ts);
-                    let mut out = report.best_assignment;
-                    reassign_summer_commissioners(&mut out);
-                    let _ = fs::write(&filename, summer_assignment_to_tsv(&out));
+                    if real_best < 1500 {
+                        let ts = chrono::Local::now().format("%Y%m%d-%H%M%S%z");
+                        let filename = format!("{}/{:04}-cpu{}-{}.tsv", results_dir, real_best, cid, ts);
+                        let mut out = report.best_assignment;
+                        reassign_summer_commissioners(&mut out);
+                        let _ = fs::write(&filename, summer_assignment_to_tsv(&out));
+                    }
                 }
                 if real_best < global_best_cost {
                     global_best_cost = real_best;
@@ -696,7 +707,7 @@ async fn run_gpu(
             if n > 0 {
                 let nf = n as f64;
                 let base_weights: [f64; NUM_MOVES] = [
-                    0.20, 0.12, 0.14, 0.06, 0.06, 0.10, 0.10, 0.10, 0.12,
+                    0.14, 0.10, 0.10, 0.04, 0.04, 0.10, 0.10, 0.08, 0.10, 0.08, 0.06, 0.06,
                 ];
                 let mut weights = [0.0f64; NUM_MOVES];
                 for m in 0..NUM_MOVES {
