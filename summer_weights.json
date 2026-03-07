@@ -1,0 +1,11 @@
+{
+    "matchup_balance": 80,
+    "lane_switch_consecutive": 60,
+    "lane_switch_post_break": 20,
+    "time_gap_large": 60,
+    "time_gap_consecutive": 30,
+    "lane_balance": 60,
+    "commissioner_overlap": 30,
+    "repeat_matchup_same_night": 30,
+    "slot_balance": 30
+}

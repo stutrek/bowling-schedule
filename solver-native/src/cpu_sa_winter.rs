@@ -4,7 +4,7 @@ use std::thread;
 
 use rand::rngs::SmallRng;
 use rand::{Rng, SeedableRng};
-use solver_core::*;
+use solver_core::winter::*;
 
 pub const BATCH_SIZE: u64 = 10_000;
 const STATS_RECOMPUTE: u64 = 10_000;

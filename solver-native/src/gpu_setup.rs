@@ -28,8 +28,12 @@ pub async fn create_gpu_resources(
     cost_data: &[u32],
     best_cost_data: &[u32],
     rng_data: &[u32],
-    gpu_weights: &GpuWeights,
+    weights_bytes: &[u8],
     gpu_params: &GpuParams,
+    thresh_bytes: &[u8],
+    assign_u32s: usize,
+    sa_shader_source: &str,
+    exchange_shader_source: &str,
 ) -> GpuResources {
     let chain_count = gpu_params.chain_count;
 
@@ -60,7 +64,7 @@ pub async fn create_gpu_resources(
 
     let sa_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("SA Shader"),
-        source: wgpu::ShaderSource::Wgsl(include_str!("solver.wgsl").into()),
+        source: wgpu::ShaderSource::Wgsl(sa_shader_source.into()),
     });
 
     let assign_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -90,7 +94,7 @@ pub async fn create_gpu_resources(
     });
     let weights_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("weights"),
-        contents: bytemuck::bytes_of(gpu_weights),
+        contents: weights_bytes,
         usage: wgpu::BufferUsages::UNIFORM,
     });
     let params_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -100,7 +104,7 @@ pub async fn create_gpu_resources(
     });
     let move_thresh_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("move_thresholds"),
-        contents: bytemuck::bytes_of(&THRESH_DEFAULT),
+        contents: thresh_bytes,
         usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
     });
 
@@ -113,7 +117,7 @@ pub async fn create_gpu_resources(
     });
     let assign_readback_buf = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("assign_readback"),
-        size: (ASSIGN_U32S * 4) as u64,
+        size: (assign_u32s * 4) as u64,
         usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
@@ -158,7 +162,7 @@ pub async fn create_gpu_resources(
     // Exchange (replica swap) pipeline
     let exchange_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("Exchange Shader"),
-        source: wgpu::ShaderSource::Wgsl(include_str!("exchange.wgsl").into()),
+        source: wgpu::ShaderSource::Wgsl(exchange_shader_source.into()),
     });
 
     let swap_pairs_buf = device.create_buffer(&wgpu::BufferDescriptor {

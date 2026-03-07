@@ -4,7 +4,8 @@ use wasm_bindgen::prelude::*;
 
 mod sa;
 
-use solver_core::{self as core, Weights};
+use solver_core::winter as core;
+use core::Weights;
 use sa::SASolver;
 
 #[wasm_bindgen]
