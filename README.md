@@ -1,18 +1,24 @@
 # Bowling Schedule Optimizer
 
-An optimized 12-week bowling schedule for 16 teams across 4 lanes (5, 6, 7, 8), built with a quad-based structure that's better for bowlers and easier for computers to optimize.
+Optimized bowling schedules for a league with two seasons -- a 16-team winter season and a 12-team summer season. Both use [parallel tempering](https://en.wikipedia.org/wiki/Parallel_tempering) (GPU+CPU hybrid) to find schedules that balance many competing constraints simultaneously.
 
 **[Try the interactive web UI →](https://stutrek.github.io/bowling-schedule/)**
 
-## The Problem and the Big Improvement
+---
+
+## Winter Schedule
+
+An optimized 12-week schedule for 16 teams across 4 lanes (5, 6, 7, 8), built with a quad-based structure that's better for bowlers and easier for computers to optimize.
+
+### The Problem and the Big Improvement
 
 The current schedule has 16 teams playing two games each week. But a team can end up on completely different lanes between their two games -- maybe lanes 5 and 7, or lanes 6 and 8. This causes real problems on bowling night.
 
-### Quads
+#### Quads
 
 The new schedule uses **quads**. A quad is a group of 4 teams assigned to one lane pair for one half of a night. They play two games back-to-back on the same two lanes. Between games, you either bowl on the same lane twice, or you switch to the lane next to you -- on the same ball return. Every team in your quad plays every other team in your quad across the two games. Each week has 4 quads (2 early, 2 late), and every team appears in exactly one quad per week.
 
-### Why quads are better
+#### Why quads are better
 
 The current schedule doesn't use quads -- teams can end up on completely different lanes between their two games. Keeping teams on the same lane pair means:
 
@@ -40,17 +46,17 @@ The relative importance of each constraint is configured in [weights.json](weigh
 
 The position of a team within its quad determines three things at once: which lane they're on, who they play, and whether they stay or switch. This compact representation means a single swap of two players between quads changes matchups, lane balance, and stay/switch all at once -- which is why the optimizer can explore the search space so efficiently.
 
-## The Algorithm
+### The Algorithm
 
-The solver uses a technique called [parallel tempering](https://en.wikipedia.org/wiki/Parallel_tempering), which is an advanced form of [simulated annealing](https://en.wikipedia.org/wiki/Simulated_annealing). The core idea: imagine trying to solve a jigsaw puzzle by randomly swapping pieces. If a swap makes things better, keep it. If it makes things worse, sometimes keep it anyway -- to avoid getting stuck in a dead end. Run many copies of this process at different levels of "willingness to accept bad swaps," and let them share good solutions with each other.
+The solver uses [parallel tempering](https://en.wikipedia.org/wiki/Parallel_tempering), an advanced form of [simulated annealing](https://en.wikipedia.org/wiki/Simulated_annealing). The core idea: imagine trying to solve a jigsaw puzzle by randomly swapping pieces. If a swap makes things better, keep it. If it makes things worse, sometimes keep it anyway -- to avoid getting stuck in a dead end. Run many copies of this process at different levels of "willingness to accept bad swaps," and let them share good solutions with each other.
 
 The solver is a hybrid GPU+CPU system. The GPU runs thousands of parallel chains via wgpu compute shaders ([`solver.wgsl`](solver-native/src/solver.wgsl)), while CPU workers run alongside for refinement. The GPU chains are organized into pods of 8 temperature levels with geometric spacing, and the CPU workers each own one partition of the GPU chains. The GPU and CPU sides share solutions bidirectionally -- when a GPU chain finds a better schedule than its CPU partition owner, it seeds the CPU worker, and vice versa.
 
-### Temperature ladder
+#### Temperature ladder
 
 The GPU runs chains organized into pods of 8, with temperatures spaced geometrically from 6.0 to 18.0. CPU workers run at temperatures from 12.0 to 15.0 (one per core). Cold chains are picky -- they mostly only accept swaps that improve the schedule. Hot chains are adventurous -- they'll accept worse schedules to explore new territory.
 
-### Move types
+#### Move types
 
 Each iteration, the solver picks one of 11 types of random changes to try. The percentage is the base probability before adaptive adjustment.
 
@@ -66,86 +72,23 @@ Each iteration, the solver picks one of 11 types of random changes to try. The p
 - **Targeted: fix lane imbalance (15%)** -- Find the team with the most lopsided lane distribution, find a quad containing that team, and swap their position within the quad to change their lane.
 - **Targeted: fix early/late imbalance (8%)** -- Find the team that's played early (or late) too many times and flip a week's early/late assignment to correct it.
 
-### Adaptive move selection
+#### Adaptive move selection
 
 The solver tracks which move types are producing accepted changes and gives them higher probability. Move weights are recomputed every 10,000 iterations based on each move's recent acceptance rate.
 
-### Compound moves
+#### Compound moves
 
 Near the end of optimization (when cost is already low), the solver bundles multiple inter-quad swaps together as one big move -- up to 12 swaps at once. This helps escape dead ends that single swaps can't get out of.
 
-### Exhaustive search
+#### Exhaustive search
 
 Every 100,000 iterations, the solver picks two quads in the same week and brute-forces every possible player swap between them (only 16 possibilities). It keeps the best one. A periodic sanity check that finds improvements the random moves might miss.
 
-### Replica exchange
-
-Every GPU dispatch, adjacent-temperature pairs within each pod may swap their schedules. This is called [replica exchange](https://en.wikipedia.org/wiki/Parallel_tempering#Replica_exchange). The swap decision uses the Metropolis criterion based on the cost difference and inverse-temperature gap. Even/odd parity alternates each dispatch so every adjacent pair gets a chance. This lets good solutions found by adventurous (hot) chains flow down to the picky (cold) chains for refinement.
-
-### GPU-CPU feedback
-
-Every 10 dispatches, each CPU worker's best solution is used to reseed a fraction of its GPU partition chains (with perturbation scaled by temperature level). When a GPU chain beats its CPU partition owner, the GPU solution is sent to the CPU worker for further refinement. This bidirectional flow combines the GPU's massive exploration with the CPU's deeper per-chain optimization.
-
-### Anti-stagnation
-
-If a partition's best score hasn't improved in 60 dispatches, it enters stagnation mode: extra GPU chains are reseeded with heavier perturbation. If stagnation persists to 300 dispatches, an escalated shakeup reseeds the entire GPU partition and resets the CPU worker.
-
-### Auto-save
-
-The solver saves the schedule to a TSV file whenever cost drops below 420.
-
-## Results
+### Winter results
 
 Best known result: **cost 300**. Results are saved to `solver-native/results/gpu/` with filenames like `0300-cpu5-20260301-212702-0500.tsv`. These can be loaded in the web viewer.
 
-## Architecture
-
-- `solver-core/` -- Shared Rust library with data structures, the evaluation function, and TSV I/O
-- `solver-native/` -- Command-line solver binaries: `solver` (GPU+CPU hybrid solver) and `rescore` (re-evaluates TSV files with updated weights and renames score prefixes)
-  - `gpu_solver.rs` -- Main binary: GPU dispatch loop, CPU worker coordination, partition management
-  - `cpu_sa.rs` -- CPU simulated annealing workers with the 11-move set and adaptive selection
-  - `gpu_setup.rs` -- wgpu device/buffer/pipeline creation
-  - `gpu_types.rs` -- GPU buffer layouts, temperature constants, pack/unpack helpers
-  - `output.rs` -- Terminal table output and event formatting
-  - `solver.wgsl` -- GPU compute shader implementing SA iterations
-  - `exchange.wgsl` -- GPU compute shader for replica exchange swaps
-- `solver-wasm/` -- Browser-compatible WASM build of the evaluation function and a single-threaded SA solver, used by the web UI
-- `docs/` -- Next.js web app with WASM-powered scoring, an interactive schedule editor, and TSV import/export
-- `src/` -- Original TypeScript prototypes (pinsetter1-6 and early SA attempts)
-
-## What Didn't Work
-
-### Manual scheduling
-
-The original schedule was created by hand. It was decent, but the goal was to do better with software.
-
-### Rule-based construction (pinsetter1-6)
-
-Six different TypeScript algorithms that try to build a schedule step by step using mathematical patterns -- rotations, interleaving, remappings. Pinsetter1 came closest: perfect matchups, early/late, alternation, and consecutive opponents. But it couldn't get lane balance right. The fundamental issue is that you can't build a schedule with simple rules and have all six constraints come out balanced.
-
-### Locking early/late and optimizing the rest
-
-Restricted the solver to only make changes that preserve the early/late assignments. Early/late metrics were perfect, but matchup balance was catastrophic (5120 penalty). The constraint was too tight -- teams that always shared the same time slot could never be paired against each other.
-
-### Hybrid: pinsetter1 + simulated annealing
-
-Used pinsetter1's schedule as a starting point, then ran the optimizer with limited moves to fix lane balance. Failed because converting between data formats lost information about player positions, corrupting the schedule.
-
-### Prioritizing "hard" constraints
-
-Tried making some constraints 1000x more important than others ([lexicographic optimization](https://en.wikipedia.org/wiki/Lexicographic_optimization)). Made the scoring landscape too steep for the solver to navigate -- it could never satisfy the hard constraints because accepting any move that helped a soft constraint was nearly impossible.
-
-### Build early/late first, then matchups
-
-Constructed a perfect early/late assignment matrix, then tried to optimize matchups within that framework. Got good matchups, but introduced early/late alternation violations -- fixing one dimension broke another.
-
-### Constraint satisfaction / backtracking
-
-Tried building the schedule by placing teams one at a time, backtracking when constraints were violated -- like solving a Sudoku (`construct.rs`, `first_half.rs`). Could find partial solutions but didn't scale to the full 12-week schedule with all the soft constraints.
-
-## Running It
-
-The solver uses your GPU for massively parallel chain exploration while also running CPU workers alongside it. Chain count automatically adapts to your GPU's buffer size (4,096-16,384 chains), and CPU workers use all available cores minus two (reserved for the GPU and OS).
+### Running the winter solver
 
 ```bash
 # Run the solver (auto-detects GPU size and CPU cores)
@@ -160,16 +103,137 @@ cargo run --release --bin solver -- --no-seed
 
 Results are saved to `solver-native/results/gpu/`.
 
-To re-evaluate existing results with updated weights:
+---
+
+## Summer Schedule
+
+A 10-week schedule for 12 teams with 3 games per team per week. The summer league has a different structure and different constraints than the winter season.
+
+### The structure
+
+Each week has 5 game slots and 4 lanes. Games 1-4 use all 4 lanes (8 teams playing, 4 matchups per slot). Game 5 only uses lanes 3-4 (4 teams playing, 2 matchups). This gives 18 matchups per week and exactly 3 games per team.
+
+Each team ideally plays two consecutive games and a third game with a one-game break -- for example, games 1, 2, and 4. Some teams must play three consecutive games or have a two-game break for the math to work out.
+
+### The fixed template approach
+
+The solver uses a **fixed day template** -- an ideal arrangement of 12 positions across the 5 game slots that guarantees good game spacing by construction. The only variables are:
+
+- **Which team fills which position** each week (a permutation of 12 teams)
+- **Whether to swap lanes 1-2** each week (a boolean per week)
+- **Whether to swap lanes 3-4** each week (a boolean per week)
+
+This reduces the search space dramatically compared to treating every position as independent. The template is the same every week; only the team assignments and lane swaps change.
+
+The template guarantees these properties by construction:
+
+- Consecutive games are always on the same lane -- no switching between back-to-back games
+- For games 1-4, teams that switch lanes are always on the same lane pair (lanes 5-6 or 7-8), so they stay on the same ball return
+- All teams in game 5 have a break before their slot, so they're ready to start at any moment
+- Every team gets exactly one break game -- it's never three games in a row, never a two-game gap
+
+### Constraints
+
+Six penalties, weighted in [summer_fixed_weights.json](summer_fixed_weights.json):
+
+1. **Matchup balance** -- every pair of teams should play each other 2 or 3 times across the season. Penalty scales with distance from this range.
+2. **Slot balance** -- each team should play in each game slot a balanced number of times. Slots 1-4: 6-7 times each. Slot 5: 3-4 times.
+3. **Lane balance** -- each team should play on each lane a balanced number of times. Lanes 1-2: 6-7 times each (they only get traffic from games 1-4). Lanes 3-4: 8-9 times each (they get traffic from all 5 games).
+4. **Game 5 lane balance** -- within a team's game 5 appearances, they should be on lane 3 and lane 4 roughly equally.
+5. **Same lane balance** -- some template positions stay on the same lane for all 3 games in slots 1-4. Each team should land in these "same lane" positions 3-4 times across the season.
+6. **Commissioner overlap** -- two player-commissioners need coverage across the night. The schedule minimizes how often any pair of teams both appears in game 1 and game 5. In post-processing, the best pair gets assigned to teams 1 and 2.
+
+### The algorithm
+
+The same parallel tempering approach as the winter solver -- GPU+CPU hybrid with replica exchange, adaptive move selection, and partition-based stagnation detection. The key difference is the move set, which is much simpler because of the fixed template structure:
+
+- **Team swap (15%)** -- Swap two teams' positions in a random week.
+- **Toggle lanes 1-2 (13%)** -- Flip the lane 1-2 swap flag for a random week.
+- **Toggle lanes 3-4 (13%)** -- Flip the lane 3-4 swap flag for a random week.
+- **Week swap (13%)** -- Swap all data between two weeks.
+- **Guided matchup (16%)** -- Find the most over- or under-matched pair and make a targeted swap.
+- **Guided slot (15%)** -- Find the worst slot imbalance and swap teams to fix it.
+- **Guided lane (15%)** -- Find the worst lane imbalance and toggle a lane swap or move a team.
+
+All four basic moves are self-inverse (applying the same move again undoes it). The three guided moves identify the worst cost component and make targeted changes to improve it.
+
+### Summer results
+
+Best known result: **cost 140**. Results are saved to `solver-native/results/summer-fixed/`.
+
+### Running the summer solver
 
 ```bash
-cargo run --release --bin rescore -- ../weights.json results/gpu
+# Run the summer-fixed solver
+cargo run --release --bin solver -- --league summer-fixed
+
+# Run without CPU workers (GPU only)
+cargo run --release --bin solver -- --league summer-fixed --no-cpu
+
+# Run without seeding from previous results
+cargo run --release --bin solver -- --league summer-fixed --no-seed
 ```
 
-To run the web viewer:
+---
+
+## Shared Infrastructure
+
+Both solvers share the same parallel tempering infrastructure:
+
+- **Replica exchange** -- Adjacent-temperature chains within each pod may swap schedules every dispatch using the Metropolis criterion. Even/odd parity alternation ensures every pair gets a chance. Good solutions found by hot chains flow down to cold chains for refinement.
+- **GPU-CPU feedback** -- Every 10 dispatches, CPU workers' best solutions reseed GPU partition chains (with perturbation). GPU chains that beat their CPU partition owner send their solution back. This bidirectional flow combines massive GPU exploration with deeper CPU optimization.
+- **Anti-stagnation** -- Partitions that stop improving get extra reseeding. Prolonged stagnation triggers an escalated shakeup that resets the entire partition.
+- **Adaptive thresholds** -- GPU move selection probabilities are updated based on CPU workers' acceptance rates.
+
+## Architecture
+
+- `solver-core/` -- Shared Rust library with data structures, evaluation functions, and TSV I/O for both seasons
+  - `winter.rs` -- Winter schedule types, evaluation, and moves
+  - `summer_fixed.rs` -- Summer fixed-template types, evaluation, 7 moves, TSV parsing
+- `solver-native/` -- Command-line solver binary with GPU+CPU hybrid solver for both seasons
+  - `gpu_solver.rs` -- Main binary entry point, dispatches to winter or summer solver
+  - `gpu_setup.rs` -- wgpu device/buffer/pipeline creation (shared)
+  - `gpu_types.rs` -- GPU parameters, temperature constants, chain count detection (shared)
+  - Winter: `winter_main.rs`, `cpu_sa_winter.rs`, `solver.wgsl`, `exchange.wgsl`, `gpu_types_winter.rs`, `output_winter.rs`
+  - Summer: `summer_fixed_main.rs`, `cpu_sa_summer_fixed.rs`, `summer_fixed_solver.wgsl`, `summer_fixed_exchange.wgsl`, `gpu_types_summer_fixed.rs`, `output_summer_fixed.rs`
+- `solver-wasm/` -- Browser-compatible WASM build of the evaluation function and a single-threaded SA solver, used by the web UI
+- `docs/` -- Next.js web app with WASM-powered scoring, an interactive schedule editor, and TSV import/export
+- `src/` -- Original TypeScript prototypes (pinsetter1-6 and early SA attempts)
+
+## What Didn't Work
+
+### Winter
+
+**Manual scheduling.** The original schedule was created by hand. It was decent, but the goal was to do better with software.
+
+**Rule-based construction (pinsetter1-6).** Six different TypeScript algorithms that try to build a schedule step by step using mathematical patterns -- rotations, interleaving, remappings. Pinsetter1 came closest: perfect matchups, early/late, alternation, and consecutive opponents. But it couldn't get lane balance right. The fundamental issue is that you can't build a schedule with simple rules and have all six constraints come out balanced.
+
+**Locking early/late and optimizing the rest.** Restricted the solver to only make changes that preserve the early/late assignments. Early/late metrics were perfect, but matchup balance was catastrophic (5120 penalty). The constraint was too tight -- teams that always shared the same time slot could never be paired against each other.
+
+**Hybrid: pinsetter1 + simulated annealing.** Used pinsetter1's schedule as a starting point, then ran the optimizer with limited moves to fix lane balance. Failed because converting between data formats lost information about player positions, corrupting the schedule.
+
+**Prioritizing "hard" constraints.** Tried making some constraints 1000x more important than others ([lexicographic optimization](https://en.wikipedia.org/wiki/Lexicographic_optimization)). Made the scoring landscape too steep for the solver to navigate -- it could never satisfy the hard constraints because accepting any move that helped a soft constraint was nearly impossible.
+
+**Build early/late first, then matchups.** Constructed a perfect early/late assignment matrix, then tried to optimize matchups within that framework. Got good matchups, but introduced early/late alternation violations -- fixing one dimension broke another.
+
+**Constraint satisfaction / backtracking.** Tried building the schedule by placing teams one at a time, backtracking when constraints were violated -- like solving a Sudoku (`construct.rs`, `first_half.rs`). Could find partial solutions but didn't scale to the full 12-week schedule with all the soft constraints.
+
+### Summer
+
+**Building the schedule from scratch.** The original summer solver treated every position as an independent variable -- 200 logical positions across 10 weeks, with 15 different SA moves and a GPU+CPU hybrid. It could get close but struggled to balance all constraints simultaneously because the search space was too large and the constraints were too intertwined. Lane switching penalties and game spacing constraints fought with matchup balance and lane balance, making it hard for the solver to make progress on one without regressing on another.
+
+**The fix: a fixed day template.** Instead of optimizing every position, the solver now uses a single ideal day layout as a fixed template and only varies which team fills which role each week. This guarantees good game spacing by construction and reduces the search space from 200 independent positions to 12-team permutations plus lane swap flags -- a dramatically simpler problem that the solver handles easily.
+
+## Running the web viewer
 
 ```bash
 cd docs
 npm install
 npm run dev
+```
+
+## Re-evaluating results with updated weights
+
+```bash
+cargo run --release --bin rescore -- ../weights.json results/gpu
 ```

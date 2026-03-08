@@ -13,39 +13,29 @@ export default function SummerCostBreakdownTable() {
             desc: 'Every pair plays 2-3 times across the season',
         },
         {
-            label: 'Lane switches (consecutive)',
-            value: cost.laneSwitches,
-            desc: 'Changing lanes between back-to-back games',
-        },
-        {
-            label: 'Lane switches (post-break)',
-            value: cost.laneSwitchBreak,
-            desc: 'Changing lanes across a gap',
-        },
-        {
-            label: 'Time gaps',
-            value: cost.timeGaps,
-            desc: '3 consecutive games or 2+ slot gap between games',
+            label: 'Slot balance',
+            value: cost.slotBalance,
+            desc: 'Games 1-4: 6-7 each; Game 5: 3-4 each',
         },
         {
             label: 'Lane balance',
             value: cost.laneBalance,
-            desc: 'Each team on each lane 7-8 times',
+            desc: 'Lanes 1-2: 6-7 times; Lanes 3-4: 8-9 times',
+        },
+        {
+            label: 'Game 5 lane balance',
+            value: cost.game5LaneBalance,
+            desc: 'Game 5 appearances split evenly between lanes 3 and 4',
+        },
+        {
+            label: 'Same lane balance',
+            value: cost.sameLaneBalance,
+            desc: 'Same lane for all games 1-4: 3-4 times per team',
         },
         {
             label: 'Commissioner overlap',
             value: cost.commissionerOverlap,
             desc: 'Min pair co-appearance in games 1 and 5',
-        },
-        {
-            label: 'Repeat matchup same night',
-            value: cost.repeatMatchupSameNight,
-            desc: 'Same pair matched more than once per week',
-        },
-        {
-            label: 'Slot balance',
-            value: cost.slotBalance,
-            desc: 'Games 1-4: 6-7 each; Game 5: 3-4 each',
         },
     ];
 
