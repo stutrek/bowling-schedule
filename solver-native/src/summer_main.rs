@@ -182,7 +182,7 @@ pub fn run(shutdown: Arc<AtomicBool>, args: &[String]) {
         matchup_balance: w8.matchup_balance,
         lane_switch_consecutive: w8.lane_switch_consecutive,
         lane_switch_post_break: w8.lane_switch_post_break,
-        _pad_lpc: 0,
+        third_game_diff_lane: w8.third_game_diff_lane,
         time_gap_large: w8.time_gap_large,
         time_gap_consecutive: w8.time_gap_consecutive,
         lane_balance: w8.lane_balance,
@@ -528,12 +528,18 @@ async fn run_gpu(
             let verify_bd = evaluate_summer(&assignment, &w8);
             let verify_cost = verify_bd.total;
             if verify_cost != gpu_part_cost {
+                let gpu_style = evaluate_summer_gpu_style(&assignment, &w8);
                 event!(start_time.elapsed(), &format!(
-                    "GPU EVAL MISMATCH p{}: gpu={} cpu={} [mb={} ls={} tg={} lb={} co={} rm={} sb={}]",
-                    pi, gpu_part_cost, verify_cost,
+                    "GPU EVAL MISMATCH p{}: gpu={} cpu={} gpu_style={} [mb={} ls={} tg={} lb={} co={} rm={} sb={}]",
+                    pi, gpu_part_cost, verify_cost, gpu_style.total,
                     verify_bd.matchup_balance, verify_bd.lane_switches, verify_bd.time_gaps,
                     verify_bd.lane_balance, verify_bd.commissioner_overlap,
                     verify_bd.repeat_matchup_same_night, verify_bd.slot_balance));
+                event!(start_time.elapsed(), &format!(
+                    "  gpu_style: [mb={} ls={} tg={} lb={} co={} rm={} sb={}]",
+                    gpu_style.matchup_balance, gpu_style.lane_switches, gpu_style.time_gaps,
+                    gpu_style.lane_balance, gpu_style.commissioner_overlap,
+                    gpu_style.repeat_matchup_same_night, gpu_style.slot_balance));
                 let tsv = summer_assignment_to_tsv(&assignment);
                 let mismatch_file = format!("{}/MISMATCH-gpu{}-cpu{}.tsv", results_dir, gpu_part_cost, verify_cost);
                 let _ = fs::write(&mismatch_file, &tsv);

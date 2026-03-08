@@ -18,7 +18,7 @@ struct Weights {
     matchup_balance: u32,
     lane_switch_consecutive: u32,
     lane_switch_post_break: u32,
-    _pad_lpc: u32,
+    third_game_diff_lane: u32,
     time_gap_large: u32,
     time_gap_consecutive: u32,
     lane_balance: u32,
@@ -255,6 +255,16 @@ fn evaluate(a: ptr<function, array<u32, 200>>) -> u32 {
                     } else {
                         total += weights.lane_switch_post_break;
                     }
+                }
+            }
+            // One game on different lane from the other two
+            if (gc == 3u) {
+                var ndiff = 0u;
+                if (game_pairs[0u] != game_pairs[1u]) { ndiff += 1u; }
+                if (game_pairs[0u] != game_pairs[2u]) { ndiff += 1u; }
+                if (game_pairs[1u] != game_pairs[2u]) { ndiff += 1u; }
+                if (ndiff == 2u) {
+                    total += weights.third_game_diff_lane;
                 }
             }
             } // end if gc >= 2
@@ -680,6 +690,13 @@ fn move_guided_lane_switch(a: ptr<function, array<u32, 200>>, s: ptr<function, a
                 if (gap == 0u) { pen += weights.lane_switch_consecutive; }
                 else { pen += weights.lane_switch_post_break; }
             }
+        }
+        if (gc == 3u) {
+            var ld = 0u;
+            if (gp[0u] != gp[1u]) { ld += 1u; }
+            if (gp[0u] != gp[2u]) { ld += 1u; }
+            if (gp[1u] != gp[2u]) { ld += 1u; }
+            if (ld == 2u) { pen += weights.third_game_diff_lane; }
         }
         if (pen > worst_penalty) { worst_penalty = pen; worst_team = t; }
     }

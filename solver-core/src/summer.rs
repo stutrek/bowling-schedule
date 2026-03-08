@@ -18,6 +18,7 @@ pub struct SummerWeights {
     pub matchup_balance: u32,
     pub lane_switch_consecutive: u32,
     pub lane_switch_post_break: u32,
+    pub third_game_diff_lane: u32,
     pub time_gap_large: u32,
     pub time_gap_consecutive: u32,
     pub lane_balance: u32,
@@ -153,7 +154,9 @@ pub fn evaluate_summer(a: &SummerAssignment, w8: &SummerWeights) -> SummerCostBr
 
                 // Track slots per team per week
                 team_week_slots[w][t1].push(s);
-                team_week_slots[w][t2].push(s);
+                if t2 != t1 {
+                    team_week_slots[w][t2].push(s);
+                }
             }
         }
 
@@ -201,6 +204,14 @@ pub fn evaluate_summer(a: &SummerAssignment, w8: &SummerWeights) -> SummerCostBr
                     } else {
                         lane_switches += w8.lane_switch_post_break;
                     }
+                }
+            }
+
+            // One game on different lane from the other two
+            if games.len() == 3 {
+                let (p0, p1, p2) = (games[0].1, games[1].1, games[2].1);
+                if (p0 == p1 && p2 != p0) || (p0 == p2 && p1 != p0) || (p1 == p2 && p0 != p1) {
+                    lane_switches += w8.third_game_diff_lane;
                 }
             }
         }
@@ -622,6 +633,14 @@ pub fn evaluate_summer_gpu_style(a: &SummerAssignment, w8: &SummerWeights) -> Su
                     }
                 }
             }
+
+            // One game on different lane from the other two
+            if gc == 3 {
+                let (p0, p1, p2) = (game_pairs[0], game_pairs[1], game_pairs[2]);
+                if (p0 == p1 && p2 != p0) || (p0 == p2 && p1 != p0) || (p1 == p2 && p0 != p1) {
+                    lane_switches += w8.third_game_diff_lane;
+                }
+            }
         }
     }
 
@@ -736,6 +755,7 @@ mod tests {
             matchup_balance: 80,
             lane_switch_consecutive: 60,
             lane_switch_post_break: 20,
+            third_game_diff_lane: 20,
             time_gap_large: 60,
             time_gap_consecutive: 30,
             lane_balance: 60,

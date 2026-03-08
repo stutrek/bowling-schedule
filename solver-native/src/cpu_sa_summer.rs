@@ -784,6 +784,12 @@ fn do_guided_lane_switch(
                 }
             }
         }
+        if positions.len() == 3 {
+            let (p0, p1, p2) = (positions[0].1, positions[1].1, positions[2].1);
+            if (p0 == p1 && p2 != p0) || (p0 == p2 && p1 != p0) || (p1 == p2 && p0 != p1) {
+                pen += w8.third_game_diff_lane;
+            }
+        }
 
         if pen > worst_penalty {
             worst_penalty = pen;
@@ -1127,6 +1133,11 @@ fn exhaustive_local_search(
 
                     if team_in_slot(a, w, s2, t1, Some(p2)) { continue; }
                     if team_in_slot(a, w, s1, t2, Some(p1)) { continue; }
+
+                    // Check we don't create same-team matchups
+                    let opp1 = if side1 == 0 { a[w][s1][p1].1 } else { a[w][s1][p1].0 };
+                    let opp2 = if side2 == 0 { a[w][s2][p2].1 } else { a[w][s2][p2].0 };
+                    if opp1 == t2 || opp2 == t1 { continue; }
 
                     if side1 == 0 { a[w][s1][p1].0 = t2; } else { a[w][s1][p1].1 = t2; }
                     if side2 == 0 { a[w][s2][p2].0 = t1; } else { a[w][s2][p2].1 = t1; }

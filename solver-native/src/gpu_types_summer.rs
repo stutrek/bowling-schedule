@@ -12,7 +12,7 @@ pub struct GpuSummerWeights {
     pub matchup_balance: u32,
     pub lane_switch_consecutive: u32,
     pub lane_switch_post_break: u32,
-    pub _pad_lpc: u32,
+    pub third_game_diff_lane: u32,
     pub time_gap_large: u32,
     pub time_gap_consecutive: u32,
     pub lane_balance: u32,
