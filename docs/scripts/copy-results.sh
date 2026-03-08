@@ -75,7 +75,7 @@ copied=$((copied + 1))
 echo "Copied $copied winter TSV files to $DEST_DIR ($skipped duplicates skipped)"
 
 # --- Summer results ---
-SUMMER_SRC="$REPO_ROOT/solver-native/results/gpu-summer"
+SUMMER_SRC="$REPO_ROOT/solver-native/results/summer-fixed"
 SUMMER_DEST="$REPO_ROOT/docs/public/summer-results"
 
 mkdir -p "$SUMMER_DEST"

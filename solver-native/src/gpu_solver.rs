@@ -23,8 +23,9 @@ fn main() {
     match league {
         "winter" => solver_native::winter_main::run(shutdown, &args),
         "summer" => solver_native::summer_main::run(shutdown, &args),
+        "summer-fixed" => solver_native::summer_fixed_main::run(shutdown, &args),
         other => {
-            eprintln!("Unknown league: {}. Use --league winter or --league summer", other);
+            eprintln!("Unknown league: {}. Use --league winter, summer, or summer-fixed", other);
             std::process::exit(1);
         }
     }

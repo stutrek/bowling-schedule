@@ -1,0 +1,8 @@
+{
+    "matchup_balance": 80,
+    "slot_balance": 60,
+    "lane_balance": 60,
+    "game5_lane_balance": 40,
+    "same_lane_balance": 40,
+    "commissioner_overlap": 30
+}
