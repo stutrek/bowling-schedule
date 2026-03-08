@@ -18,7 +18,6 @@ pub struct SummerWeights {
     pub matchup_balance: u32,
     pub lane_switch_consecutive: u32,
     pub lane_switch_post_break: u32,
-    pub third_game_diff_lane: u32,
     pub time_gap_large: u32,
     pub time_gap_consecutive: u32,
     pub lane_balance: u32,
@@ -31,6 +30,7 @@ pub struct SummerWeights {
 pub struct SummerCostBreakdown {
     pub matchup_balance: u32,
     pub lane_switches: u32,
+    pub lane_switch_break: u32,
     pub time_gaps: u32,
     pub lane_balance: u32,
     pub commissioner_overlap: u32,
@@ -176,8 +176,9 @@ pub fn evaluate_summer(a: &SummerAssignment, w8: &SummerWeights) -> SummerCostBr
         }
     }
 
-    // 2. Lane switches
+    // 2. Lane switches (consecutive) and lane switch break (across gap)
     let mut lane_switches: u32 = 0;
+    let mut lane_switch_break: u32 = 0;
     for w in 0..S_WEEKS {
         for t in 0..S_TEAMS {
             let mut games: Vec<(usize, usize, usize)> = Vec::new();
@@ -202,16 +203,8 @@ pub fn evaluate_summer(a: &SummerAssignment, w8: &SummerWeights) -> SummerCostBr
                     if gap == 0 {
                         lane_switches += w8.lane_switch_consecutive;
                     } else {
-                        lane_switches += w8.lane_switch_post_break;
+                        lane_switch_break += w8.lane_switch_post_break;
                     }
-                }
-            }
-
-            // One game on different lane from the other two
-            if games.len() == 3 {
-                let (p0, p1, p2) = (games[0].1, games[1].1, games[2].1);
-                if (p0 == p1 && p2 != p0) || (p0 == p2 && p1 != p0) || (p1 == p2 && p0 != p1) {
-                    lane_switches += w8.third_game_diff_lane;
                 }
             }
         }
@@ -311,6 +304,7 @@ pub fn evaluate_summer(a: &SummerAssignment, w8: &SummerWeights) -> SummerCostBr
 
     let total = matchup_balance
         + lane_switches
+        + lane_switch_break
         + time_gaps
         + lane_balance
         + commissioner_overlap
@@ -320,6 +314,7 @@ pub fn evaluate_summer(a: &SummerAssignment, w8: &SummerWeights) -> SummerCostBr
     SummerCostBreakdown {
         matchup_balance,
         lane_switches,
+        lane_switch_break,
         time_gaps,
         lane_balance,
         commissioner_overlap,
@@ -377,8 +372,8 @@ pub fn perturb_summer(a: &mut SummerAssignment, rng: &mut SmallRng, n: usize) {
 
 pub fn summer_cost_label(c: &SummerCostBreakdown) -> String {
     format!(
-        "total: {:>4} matchup: {:>3} lane_sw: {:>3} gaps: {:>3} lane: {:>3} comm: {:>3} repeat: {:>3} slot: {:>3}",
-        c.total, c.matchup_balance, c.lane_switches, c.time_gaps,
+        "total: {:>4} matchup: {:>3} lane_sw: {:>3} ln_brk: {:>3} gaps: {:>3} lane: {:>3} comm: {:>3} repeat: {:>3} slot: {:>3}",
+        c.total, c.matchup_balance, c.lane_switches, c.lane_switch_break, c.time_gaps,
         c.lane_balance, c.commissioner_overlap, c.repeat_matchup_same_night,
         c.slot_balance,
     )
@@ -583,8 +578,9 @@ pub fn evaluate_summer_gpu_style(a: &SummerAssignment, w8: &SummerWeights) -> Su
         }
     }
 
-    // --- Pass 2: lane switches + time gaps (per team per week) ---
+    // --- Pass 2: lane switches + lane switch break + time gaps (per team per week) ---
     let mut lane_switches: u32 = 0;
+    let mut lane_switch_break: u32 = 0;
     let mut time_gaps: u32 = 0;
 
     for w in 0..S_WEEKS {
@@ -620,7 +616,7 @@ pub fn evaluate_summer_gpu_style(a: &SummerAssignment, w8: &SummerWeights) -> Su
                 }
             }
 
-            // Lane switches
+            // Lane switches (consecutive) and lane switch break (across gap)
             if gc >= 2 {
                 for g in 0..(gc - 1) as usize {
                     let gap = game_slots[g + 1] - game_slots[g] - 1;
@@ -628,17 +624,9 @@ pub fn evaluate_summer_gpu_style(a: &SummerAssignment, w8: &SummerWeights) -> Su
                         if gap == 0 {
                             lane_switches += w8.lane_switch_consecutive;
                         } else {
-                            lane_switches += w8.lane_switch_post_break;
+                            lane_switch_break += w8.lane_switch_post_break;
                         }
                     }
-                }
-            }
-
-            // One game on different lane from the other two
-            if gc == 3 {
-                let (p0, p1, p2) = (game_pairs[0], game_pairs[1], game_pairs[2]);
-                if (p0 == p1 && p2 != p0) || (p0 == p2 && p1 != p0) || (p1 == p2 && p0 != p1) {
-                    lane_switches += w8.third_game_diff_lane;
                 }
             }
         }
@@ -730,12 +718,13 @@ pub fn evaluate_summer_gpu_style(a: &SummerAssignment, w8: &SummerWeights) -> Su
     }
     let commissioner_overlap = w8.commissioner_overlap * min_co;
 
-    let total = matchup_balance + lane_switches + time_gaps + lane_balance
+    let total = matchup_balance + lane_switches + lane_switch_break + time_gaps + lane_balance
         + commissioner_overlap + repeat_matchup_same_night + slot_balance;
 
     SummerCostBreakdown {
         matchup_balance,
         lane_switches,
+        lane_switch_break,
         time_gaps,
         lane_balance,
         commissioner_overlap,
@@ -755,7 +744,6 @@ mod tests {
             matchup_balance: 80,
             lane_switch_consecutive: 60,
             lane_switch_post_break: 20,
-            third_game_diff_lane: 20,
             time_gap_large: 60,
             time_gap_consecutive: 30,
             lane_balance: 60,
@@ -787,6 +775,8 @@ mod tests {
                 "seed={seed}: matchup_balance CPU={} GPU={}", cpu.matchup_balance, gpu.matchup_balance);
             assert_eq!(cpu.lane_switches, gpu.lane_switches,
                 "seed={seed}: lane_switches CPU={} GPU={}", cpu.lane_switches, gpu.lane_switches);
+            assert_eq!(cpu.lane_switch_break, gpu.lane_switch_break,
+                "seed={seed}: lane_switch_break CPU={} GPU={}", cpu.lane_switch_break, gpu.lane_switch_break);
             assert_eq!(cpu.time_gaps, gpu.time_gaps,
                 "seed={seed}: time_gaps CPU={} GPU={}", cpu.time_gaps, gpu.time_gaps);
             assert_eq!(cpu.lane_balance, gpu.lane_balance,

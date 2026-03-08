@@ -33,9 +33,9 @@ pub fn print_summer_table_banner(
 
 pub fn print_summer_table_header() {
     eprintln!(
-        "{:>4} {:>5}  {:>5} {:>5}  {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9}  {:>6}  {}\x1b[K",
+        "{:>4} {:>5}  {:>5} {:>5}  {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9}  {:>6}  {}\x1b[K",
         "src", "temp", "cur", "best",
-        "match", "lane_sw", "gaps", "lane", "comm", "repeat", "slot",
+        "match", "lane_sw", "ln_brk", "gaps", "lane", "comm", "repeat", "slot",
         "stag", "state",
     );
 }
@@ -55,12 +55,13 @@ pub fn print_summer_cpu_row(
     let bold = if since < 30 { "\x1b[1m" } else { "" };
     let reset = if since < 30 { "\x1b[0m" } else { "" };
     eprintln!(
-        "{}cpu{:<1} {:>5.1}  {:>5} {:>5}  {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4}  {:>6}  {}{}\x1b[K",
+        "{}cpu{:<1} {:>5.1}  {:>5} {:>5}  {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4}  {:>6}  {}{}\x1b[K",
         bold,
         core_id, temp,
         cur_bd.total, best_bd.total,
         cur_bd.matchup_balance, best_bd.matchup_balance,
         cur_bd.lane_switches, best_bd.lane_switches,
+        cur_bd.lane_switch_break, best_bd.lane_switch_break,
         cur_bd.time_gaps, best_bd.time_gaps,
         cur_bd.lane_balance, best_bd.lane_balance,
         cur_bd.commissioner_overlap, best_bd.commissioner_overlap,

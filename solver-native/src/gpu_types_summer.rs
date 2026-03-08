@@ -12,7 +12,6 @@ pub struct GpuSummerWeights {
     pub matchup_balance: u32,
     pub lane_switch_consecutive: u32,
     pub lane_switch_post_break: u32,
-    pub third_game_diff_lane: u32,
     pub time_gap_large: u32,
     pub time_gap_consecutive: u32,
     pub lane_balance: u32,
@@ -21,16 +20,17 @@ pub struct GpuSummerWeights {
     pub slot_balance: u32,
     pub _pad0: u32,
     pub _pad1: u32,
+    pub _pad2: u32,
 }
 
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
 pub struct GpuSummerMoveThresholds {
-    pub t: [u32; 12], // 9 moves + 3 padding (must be 16-byte aligned)
+    pub t: [u32; 16], // 15 moves + 1 padding (must be 16-byte aligned)
 }
 
 pub const SUMMER_THRESH_DEFAULT: GpuSummerMoveThresholds = GpuSummerMoveThresholds {
-    t: [14, 24, 34, 38, 42, 52, 62, 70, 80, 88, 94, 100],
+    t: [12, 20, 28, 32, 36, 44, 52, 58, 66, 72, 77, 82, 90, 96, 100, 100],
 };
 
 pub fn pack_summer_assignment(a: &SummerAssignment) -> [u32; SUMMER_ASSIGN_U32S] {

@@ -1,8 +1,7 @@
 {
     "matchup_balance": 80,
     "lane_switch_consecutive": 60,
-    "lane_switch_post_break": 0,
-    "third_game_diff_lane": 20,
+    "lane_switch_post_break": 20,
     "time_gap_large": 60,
     "time_gap_consecutive": 30,
     "lane_balance": 60,

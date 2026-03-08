@@ -9,15 +9,16 @@ use solver_core::summer::*;
 pub const BATCH_SIZE: u64 = 10_000;
 const STATS_RECOMPUTE: u64 = 10_000;
 
-pub const NUM_MOVES: usize = 12;
+pub const NUM_MOVES: usize = 15;
 const BASE_WEIGHTS: [f64; NUM_MOVES] = [
-    0.14, 0.10, 0.10, 0.04, 0.04, 0.10, 0.10, 0.08, 0.10, 0.08, 0.06, 0.06,
+    0.12, 0.08, 0.08, 0.04, 0.04, 0.08, 0.08, 0.06, 0.08, 0.06, 0.05, 0.05,
+    0.08, 0.06, 0.04,
 ];
 
 pub const MOVE_NAMES: [&str; NUM_MOVES] = [
     "tm_swap", "mtch_sw", "opp_sw", "ln_week",
     "slot_sw", "g_match", "g_lane", "g_slot", "g_lnsw",
-    "pr_swap", "g_ln_xs", "ln_chas",
+    "pr_swap", "g_ln_xs", "ln_chas", "g_brkfx", "g_lnsaf", "g_lnpr",
 ];
 
 pub enum SummerWorkerCommand {
@@ -166,7 +167,10 @@ fn worker_loop(
                     8 => do_guided_lane_switch(&mut a, &mut cost, &mut best_a, &mut best_cost, &active_w8, active_temp, &mut rng),
                     9 => do_pair_swap_in_slot(&mut a, &mut cost, &mut best_a, &mut best_cost, &active_w8, active_temp, &mut rng),
                     10 => do_guided_lane_cross_slot(&mut a, &mut cost, &mut best_a, &mut best_cost, &active_w8, active_temp, &mut rng),
-                    _ => do_lane_chase(&mut a, &mut cost, &mut best_a, &mut best_cost, &active_w8, active_temp, &mut rng),
+                    11 => do_lane_chase(&mut a, &mut cost, &mut best_a, &mut best_cost, &active_w8, active_temp, &mut rng),
+                    12 => do_guided_break_fix(&mut a, &mut cost, &mut best_a, &mut best_cost, &active_w8, active_temp, &mut rng),
+                    13 => do_guided_lane_safe(&mut a, &mut cost, &mut best_a, &mut best_cost, &active_w8, active_temp, &mut rng),
+                    _ => do_guided_lane_pair(&mut a, &mut cost, &mut best_a, &mut best_cost, &active_w8, active_temp, &mut rng),
                 };
 
                 if accepted { stats.accepts[move_id] += 1; }
@@ -784,12 +788,6 @@ fn do_guided_lane_switch(
                 }
             }
         }
-        if positions.len() == 3 {
-            let (p0, p1, p2) = (positions[0].1, positions[1].1, positions[2].1);
-            if (p0 == p1 && p2 != p0) || (p0 == p2 && p1 != p0) || (p1 == p2 && p0 != p1) {
-                pen += w8.third_game_diff_lane;
-            }
-        }
 
         if pen > worst_penalty {
             worst_penalty = pen;
@@ -1103,6 +1101,278 @@ fn do_lane_chase(
         *a = saved;
         false
     }
+}
+
+// ─── Move 12: guided_break_fix — fix post-break lane switches ─────────────
+
+fn do_guided_break_fix(
+    a: &mut SummerAssignment, cost: &mut SummerCostBreakdown,
+    best_a: &mut SummerAssignment, best_cost: &mut u32,
+    w8: &SummerWeights, temp: f64, rng: &mut SmallRng,
+) -> bool {
+    let w = rng.random_range(0..S_WEEKS);
+    let t_start = rng.random_range(0..S_TEAMS);
+
+    // Find a team with a post-break lane change in this week
+    for t_off in 0..S_TEAMS {
+        let t = (t_start + t_off) % S_TEAMS;
+        let positions = find_team_pos(a, w, t as u8);
+        if positions.len() < 2 { continue; }
+
+        // Find a post-break lane change: gap >= 1 between consecutive games, different pairs
+        for i in 0..(positions.len() - 1) {
+            let (s1, p1, _) = positions[i];
+            let (s2, p2, _) = positions[i + 1];
+            let gap = s2 - s1 - 1;
+            if gap == 0 || p1 == p2 { continue; }
+
+            // Found a post-break lane switch. Determine which game is isolated:
+            // If i==0 and i+1 has a consecutive neighbor after it, fix game i (the isolated one)
+            // If i+1==last and i has a consecutive neighbor before it, fix game i+1
+            // Otherwise pick randomly
+            let (fix_idx, target_pair) = if i == 0 && positions.len() > 2 && positions[2].0 == s2 + 1 {
+                // Games i+1 and i+2 are consecutive, game i is isolated → fix game i to match p2
+                (0, p2)
+            } else if i + 1 == positions.len() - 1 && i > 0 && positions[i - 1].0 == s1 - 1 {
+                // Games i-1 and i are consecutive, game i+1 is isolated → fix game i+1 to match p1
+                (i + 1, p1)
+            } else if rng.random_range(0..2usize) == 0 {
+                (i, p2)
+            } else {
+                (i + 1, p1)
+            };
+
+            let (fix_s, fix_p, fix_side) = positions[fix_idx];
+            if fix_p == target_pair { continue; } // already on the right lane
+
+            // Opponent-swap within the slot: find a matchup on target_pair to swap with
+            if !is_valid_position(fix_s, target_pair) || a[w][fix_s][target_pair].0 == EMPTY {
+                continue;
+            }
+
+            let swap_side = rng.random_range(0..2usize);
+            let their_team = if swap_side == 0 { a[w][fix_s][target_pair].0 } else { a[w][fix_s][target_pair].1 };
+            let my_opp = if fix_side == 0 { a[w][fix_s][fix_p].1 } else { a[w][fix_s][fix_p].0 };
+            let their_opp = if swap_side == 0 { a[w][fix_s][target_pair].1 } else { a[w][fix_s][target_pair].0 };
+            if my_opp == their_team || their_opp == t as u8 { continue; }
+
+            let saved = *a;
+            if fix_side == 0 { a[w][fix_s][fix_p].0 = their_team; } else { a[w][fix_s][fix_p].1 = their_team; }
+            if swap_side == 0 { a[w][fix_s][target_pair].0 = t as u8; } else { a[w][fix_s][target_pair].1 = t as u8; }
+
+            let new_cost = evaluate_summer(a, w8);
+            let delta = new_cost.total as i64 - cost.total as i64;
+            if sa_accept(delta, temp, rng) {
+                *cost = new_cost;
+                if cost.total < *best_cost { *best_cost = cost.total; *best_a = *a; }
+                return true;
+            } else {
+                *a = saved;
+                return false;
+            }
+        }
+    }
+    false
+}
+
+// ─── Move 13: guided_lane_safe — lane balance fix that avoids creating lane switches
+
+fn do_guided_lane_safe(
+    a: &mut SummerAssignment, cost: &mut SummerCostBreakdown,
+    best_a: &mut SummerAssignment, best_cost: &mut u32,
+    w8: &SummerWeights, temp: f64, rng: &mut SmallRng,
+) -> bool {
+    // Compute lane counts
+    let mut lane_counts = [0i32; S_TEAMS * S_LANES];
+    for w in 0..S_WEEKS {
+        for s in 0..S_SLOTS {
+            for p in 0..S_PAIRS {
+                let (t1, t2) = a[w][s][p];
+                if t1 == EMPTY { continue; }
+                lane_counts[t1 as usize * S_LANES + p] += 1;
+                lane_counts[t2 as usize * S_LANES + p] += 1;
+            }
+        }
+    }
+
+    let target = (S_WEEKS as f64 * 3.0) / S_LANES as f64;
+    let mut worst_team = 0usize;
+    let mut worst_lane = 0usize;
+    let mut worst_dev = 0.0f64;
+    let mut worst_over = false;
+    for t in 0..S_TEAMS {
+        for l in 0..S_LANES {
+            let dev = lane_counts[t * S_LANES + l] as f64 - target;
+            if dev.abs() > worst_dev {
+                worst_dev = dev.abs();
+                worst_team = t;
+                worst_lane = l;
+                worst_over = dev > 0.0;
+            }
+        }
+    }
+    if worst_dev < 1.0 { return false; }
+
+    let saved = *a;
+    let w_start = rng.random_range(0..S_WEEKS);
+    for off in 0..S_WEEKS {
+        let w = (w_start + off) % S_WEEKS;
+        let positions = find_team_pos(a, w, worst_team as u8);
+        if positions.is_empty() { continue; }
+
+        // Find a position on the source lane (over: on worst_lane, under: not on worst_lane)
+        let source_pos: Vec<_> = if worst_over {
+            positions.iter().filter(|&&(_, p, _)| p == worst_lane).collect()
+        } else {
+            positions.iter().filter(|&&(_, p, _)| p != worst_lane).collect()
+        };
+        if source_pos.is_empty() { continue; }
+        let &(s, p_src, side) = source_pos[rng.random_range(0..source_pos.len())];
+
+        // Find which lane pair an adjacent game uses (so swapping to it won't create a lane switch)
+        let src_idx = positions.iter().position(|&(ps, pp, _)| ps == s && pp == p_src).unwrap();
+        let mut adjacent_lane = None;
+        if src_idx > 0 {
+            let (prev_s, prev_p, _) = positions[src_idx - 1];
+            if s - prev_s <= 1 { adjacent_lane = Some(prev_p); }
+        }
+        if adjacent_lane.is_none() && src_idx + 1 < positions.len() {
+            let (next_s, next_p, _) = positions[src_idx + 1];
+            if next_s - s <= 1 { adjacent_lane = Some(next_p); }
+        }
+
+        let target_p = match adjacent_lane {
+            Some(p) if p != p_src => p,
+            _ => continue, // no adjacent game on a different lane, or already on same lane
+        };
+
+        // Only swap if it helps balance (moving toward target_p should reduce the imbalance)
+        let helps = if worst_over { target_p != worst_lane } else { target_p == worst_lane };
+        if !helps { continue; }
+
+        // Opponent-swap within the slot
+        if !is_valid_position(s, target_p) || a[w][s][target_p].0 == EMPTY { continue; }
+
+        let swap_side = rng.random_range(0..2usize);
+        let their_team = if swap_side == 0 { a[w][s][target_p].0 } else { a[w][s][target_p].1 };
+        let my_opp = if side == 0 { a[w][s][p_src].1 } else { a[w][s][p_src].0 };
+        let their_opp = if swap_side == 0 { a[w][s][target_p].1 } else { a[w][s][target_p].0 };
+        if my_opp == their_team || their_opp == worst_team as u8 { continue; }
+
+        if side == 0 { a[w][s][p_src].0 = their_team; } else { a[w][s][p_src].1 = their_team; }
+        if swap_side == 0 { a[w][s][target_p].0 = worst_team as u8; } else { a[w][s][target_p].1 = worst_team as u8; }
+
+        let new_cost = evaluate_summer(a, w8);
+        let delta = new_cost.total as i64 - cost.total as i64;
+        if sa_accept(delta, temp, rng) {
+            *cost = new_cost;
+            if cost.total < *best_cost { *best_cost = cost.total; *best_a = *a; }
+            return true;
+        } else {
+            *a = saved;
+            return false;
+        }
+    }
+    false
+}
+
+// ─── Move 14: guided_lane_pair — swap two teams with complementary lane imbalances
+
+fn do_guided_lane_pair(
+    a: &mut SummerAssignment, cost: &mut SummerCostBreakdown,
+    best_a: &mut SummerAssignment, best_cost: &mut u32,
+    w8: &SummerWeights, temp: f64, rng: &mut SmallRng,
+) -> bool {
+    // Compute lane counts
+    let mut lane_counts = [0i32; S_TEAMS * S_LANES];
+    for w in 0..S_WEEKS {
+        for s in 0..S_SLOTS {
+            for p in 0..S_PAIRS {
+                let (t1, t2) = a[w][s][p];
+                if t1 == EMPTY { continue; }
+                lane_counts[t1 as usize * S_LANES + p] += 1;
+                lane_counts[t2 as usize * S_LANES + p] += 1;
+            }
+        }
+    }
+
+    let target = (S_WEEKS as f64 * 3.0) / S_LANES as f64;
+
+    // Find two teams with complementary imbalances: team_a over on lane_x, team_b over on lane_y
+    let t_start = rng.random_range(0..S_TEAMS);
+    for t_off in 0..S_TEAMS {
+        let ta = (t_start + t_off) % S_TEAMS;
+        // Find ta's most overrepresented lane
+        let mut best_lane_a = 0usize;
+        let mut best_dev_a = 0.0f64;
+        for l in 0..S_LANES {
+            let dev = lane_counts[ta * S_LANES + l] as f64 - target;
+            if dev > best_dev_a { best_dev_a = dev; best_lane_a = l; }
+        }
+        if best_dev_a < 1.0 { continue; }
+
+        // Find team_b that is overrepresented on a different lane and underrepresented on lane_a's lane
+        for tb in 0..S_TEAMS {
+            if tb == ta { continue; }
+            let mut best_lane_b = 0usize;
+            let mut best_dev_b = 0.0f64;
+            for l in 0..S_LANES {
+                let dev = lane_counts[tb * S_LANES + l] as f64 - target;
+                if dev > best_dev_b { best_dev_b = dev; best_lane_b = l; }
+            }
+            if best_dev_b < 1.0 || best_lane_b == best_lane_a { continue; }
+
+            // Check complementary: ta should be under on lane_b, tb under on lane_a
+            let ta_on_lb = lane_counts[ta * S_LANES + best_lane_b] as f64 - target;
+            let tb_on_la = lane_counts[tb * S_LANES + best_lane_a] as f64 - target;
+            if ta_on_lb >= 0.0 || tb_on_la >= 0.0 { continue; }
+
+            // Find a week where ta is on lane_a and tb is on lane_b in the same slot
+            let saved = *a;
+            let w_start = rng.random_range(0..S_WEEKS);
+            for w_off in 0..S_WEEKS {
+                let w = (w_start + w_off) % S_WEEKS;
+                // Find ta on best_lane_a in some slot
+                let mut ta_pos: Option<(usize, usize)> = None;
+                let mut tb_pos: Option<(usize, usize)> = None;
+                for s in 0..S_SLOTS {
+                    let (t1, t2) = a[w][s][best_lane_a];
+                    if t1 as usize == ta { ta_pos = Some((s, 0)); }
+                    else if t2 as usize == ta { ta_pos = Some((s, 1)); }
+                }
+                if ta_pos.is_none() { continue; }
+                let (sa, side_a) = ta_pos.unwrap();
+
+                // Find tb on best_lane_b in the same slot
+                if !is_valid_position(sa, best_lane_b) { continue; }
+                let (t1, t2) = a[w][sa][best_lane_b];
+                if t1 as usize == tb { tb_pos = Some((sa, 0)); }
+                else if t2 as usize == tb { tb_pos = Some((sa, 1)); }
+                if tb_pos.is_none() { continue; }
+                let (_sb, side_b) = tb_pos.unwrap();
+
+                // Opponent-swap: ta and tb exchange lane pairs within the same slot
+                let opp_a = if side_a == 0 { a[w][sa][best_lane_a].1 } else { a[w][sa][best_lane_a].0 };
+                let opp_b = if side_b == 0 { a[w][sa][best_lane_b].1 } else { a[w][sa][best_lane_b].0 };
+                if opp_a == tb as u8 || opp_b == ta as u8 { continue; }
+
+                if side_a == 0 { a[w][sa][best_lane_a].0 = tb as u8; } else { a[w][sa][best_lane_a].1 = tb as u8; }
+                if side_b == 0 { a[w][sa][best_lane_b].0 = ta as u8; } else { a[w][sa][best_lane_b].1 = ta as u8; }
+
+                let new_cost = evaluate_summer(a, w8);
+                let delta = new_cost.total as i64 - cost.total as i64;
+                if sa_accept(delta, temp, rng) {
+                    *cost = new_cost;
+                    if cost.total < *best_cost { *best_cost = cost.total; *best_a = *a; }
+                    return true;
+                } else {
+                    *a = saved;
+                    return false;
+                }
+            }
+        }
+    }
+    false
 }
 
 // ─── Exhaustive local search ───────────────────────────────────────────────

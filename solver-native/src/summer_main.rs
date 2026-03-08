@@ -16,8 +16,8 @@ const SYNC_INTERVAL: u64 = 10;
 const STAGNATION_DISPATCHES: u64 = 900;
 const ESCALATION_DISPATCHES: u64 = 4500;
 const VERIFY_INTERVAL_SECS: u64 = 30;
-const SUMMER_GPU_TEMP_MIN: f64 = 4.0;
-const SUMMER_GPU_TEMP_MAX: f64 = 12.0;
+const SUMMER_GPU_TEMP_MIN: f64 = 8.0;
+const SUMMER_GPU_TEMP_MAX: f64 = 20.0;
 
 fn summer_temp_for_level(level: usize) -> f64 {
     let t_frac = level as f64 / (POD_SIZE - 1).max(1) as f64;
@@ -182,14 +182,13 @@ pub fn run(shutdown: Arc<AtomicBool>, args: &[String]) {
         matchup_balance: w8.matchup_balance,
         lane_switch_consecutive: w8.lane_switch_consecutive,
         lane_switch_post_break: w8.lane_switch_post_break,
-        third_game_diff_lane: w8.third_game_diff_lane,
         time_gap_large: w8.time_gap_large,
         time_gap_consecutive: w8.time_gap_consecutive,
         lane_balance: w8.lane_balance,
         commissioner_overlap: w8.commissioner_overlap,
         repeat_matchup_same_night: w8.repeat_matchup_same_night,
         slot_balance: w8.slot_balance,
-        _pad0: 0, _pad1: 0,
+        _pad0: 0, _pad1: 0, _pad2: 0,
     };
 
     let gpu_params = GpuParams {
@@ -562,7 +561,7 @@ async fn run_gpu(
                 event!(start_time.elapsed(), &format!(
                     "PARTITION {} NEW BEST {} (was {}) from gpu T={:.1}", pi, gpu_part_cost, prev, temp_val));
 
-                if gpu_part_cost < 1500 {
+                if gpu_part_cost < 1750 {
                     let ts = chrono::Local::now().format("%Y%m%d-%H%M%S%z");
                     let filename = format!("{}/{:04}-gpu-p{}-{}.tsv", results_dir, gpu_part_cost, pi, ts);
                     let mut out = assignment;
@@ -659,7 +658,7 @@ async fn run_gpu(
                     event!(start_time.elapsed(), &format!(
                         "PARTITION {} NEW BEST {} (was {}) from cpu{}", cid, real_best, prev, cid));
 
-                    if real_best < 1500 {
+                    if real_best < 1750 {
                         let ts = chrono::Local::now().format("%Y%m%d-%H%M%S%z");
                         let filename = format!("{}/{:04}-cpu{}-{}.tsv", results_dir, real_best, cid, ts);
                         let mut out = report.best_assignment;
@@ -713,7 +712,8 @@ async fn run_gpu(
             if n > 0 {
                 let nf = n as f64;
                 let base_weights: [f64; NUM_MOVES] = [
-                    0.14, 0.10, 0.10, 0.04, 0.04, 0.10, 0.10, 0.08, 0.10, 0.08, 0.06, 0.06,
+                    0.12, 0.08, 0.08, 0.04, 0.04, 0.08, 0.08, 0.06, 0.08, 0.06, 0.05, 0.05,
+                    0.08, 0.06, 0.04,
                 ];
                 let mut weights = [0.0f64; NUM_MOVES];
                 for m in 0..NUM_MOVES {
@@ -721,7 +721,7 @@ async fn run_gpu(
                     weights[m] = base_weights[m] * (0.1 + rate);
                 }
                 let sum: f64 = weights.iter().sum();
-                let mut thresh = GpuSummerMoveThresholds { t: [0u32; 12] };
+                let mut thresh = GpuSummerMoveThresholds { t: [0u32; 16] };
                 let mut cum = 0.0;
                 for m in 0..NUM_MOVES {
                     cum += weights[m] / sum;

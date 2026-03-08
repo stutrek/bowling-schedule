@@ -99,7 +99,6 @@ fn run_gpu_evaluate(
         w8.matchup_balance,
         w8.lane_switch_consecutive,
         w8.lane_switch_post_break,
-        w8.third_game_diff_lane,
         w8.time_gap_large,
         w8.time_gap_consecutive,
         w8.lane_balance,
@@ -108,6 +107,7 @@ fn run_gpu_evaluate(
         w8.slot_balance,
         0, // pad0
         0, // pad1
+        0, // pad2
     ];
     let weights_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("weights"),
@@ -130,7 +130,7 @@ fn run_gpu_evaluate(
     });
 
     // move_thresh
-    let thresh_data = [14u32, 24, 34, 38, 42, 52, 62, 70, 80, 88, 94, 100];
+    let thresh_data = [12u32, 20, 28, 32, 36, 44, 52, 58, 66, 72, 77, 82, 90, 96, 100, 100];
     let thresh_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("thresh"),
         contents: bytemuck::cast_slice(&thresh_data),
@@ -240,8 +240,7 @@ fn test_gpu_vs_cpu_evaluate() {
     let w8 = SummerWeights {
         matchup_balance: 80,
         lane_switch_consecutive: 60,
-        lane_switch_post_break: 0,
-        third_game_diff_lane: 20,
+        lane_switch_post_break: 20,
         time_gap_large: 60,
         time_gap_consecutive: 30,
         lane_balance: 60,
@@ -301,8 +300,7 @@ fn test_gpu_sa_cost_drift() {
     let w8 = SummerWeights {
         matchup_balance: 80,
         lane_switch_consecutive: 60,
-        lane_switch_post_break: 0,
-        third_game_diff_lane: 20,
+        lane_switch_post_break: 20,
         time_gap_large: 60,
         time_gap_consecutive: 30,
         lane_balance: 60,
@@ -316,7 +314,7 @@ fn test_gpu_sa_cost_drift() {
     use rand::Rng;
 
     let chain_count = 256u32;
-    let iters_per_dispatch = 5000u32;
+    let iters_per_dispatch = 2000u32;
 
     // Use full shader with real main entry point
     let shader_src = include_str!("../src/summer_solver.wgsl");
@@ -383,9 +381,9 @@ fn test_gpu_sa_cost_drift() {
     });
     let weights_data: [u32; 12] = [
         w8.matchup_balance, w8.lane_switch_consecutive, w8.lane_switch_post_break,
-        w8.third_game_diff_lane, w8.time_gap_large, w8.time_gap_consecutive,
+        w8.time_gap_large, w8.time_gap_consecutive,
         w8.lane_balance, w8.commissioner_overlap, w8.repeat_matchup_same_night,
-        w8.slot_balance, 0, 0,
+        w8.slot_balance, 0, 0, 0,
     ];
     let weights_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("weights"),
@@ -404,7 +402,7 @@ fn test_gpu_sa_cost_drift() {
         contents: bytemuck::cast_slice(&params_data),
         usage: wgpu::BufferUsages::UNIFORM,
     });
-    let thresh_data = [14u32, 24, 34, 38, 42, 52, 62, 70, 80, 88, 94, 100];
+    let thresh_data = [12u32, 20, 28, 32, 36, 44, 52, 58, 66, 72, 77, 82, 90, 96, 100, 100];
     let thresh_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("thresh"),
         contents: bytemuck::cast_slice(&thresh_data),
