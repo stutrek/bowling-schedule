@@ -72,4 +72,55 @@ copied=$((copied + 1))
     echo ']'
 ) > "$DEST_DIR/manifest.json"
 
-echo "Copied $copied TSV files to $DEST_DIR ($skipped duplicates skipped)"
+echo "Copied $copied winter TSV files to $DEST_DIR ($skipped duplicates skipped)"
+
+# --- Summer results ---
+SUMMER_SRC="$REPO_ROOT/solver-native/results/gpu-summer"
+SUMMER_DEST="$REPO_ROOT/docs/public/summer-results"
+
+mkdir -p "$SUMMER_DEST"
+rm -f "$SUMMER_DEST"/*.tsv
+
+summer_seen=$(mktemp)
+trap "rm -f '$seen_file' '$summer_seen'" EXIT
+summer_copied=0
+summer_skipped=0
+
+for f in "$SUMMER_SRC"/*.tsv; do
+    [ -f "$f" ] || continue
+    score=$(basename "$f" | cut -c1-4)
+    if [ "$score" -lt 1750 ] 2>/dev/null; then
+        hash=$(shasum "$f" | cut -d' ' -f1)
+        if grep -q "^${hash}$" "$summer_seen" 2>/dev/null; then
+            summer_skipped=$((summer_skipped + 1))
+        else
+            echo "$hash" >> "$summer_seen"
+            cp "$f" "$SUMMER_DEST/"
+            summer_copied=$((summer_copied + 1))
+        fi
+    fi
+done
+
+# Copy real summer schedule
+cp "$REPO_ROOT/real-summer-schedule.tsv" "$SUMMER_DEST/real-summer-schedule.tsv"
+summer_copied=$((summer_copied + 1))
+
+# Generate summer manifest.json
+(
+    echo '['
+    first=true
+    for f in "$SUMMER_DEST"/*.tsv; do
+        [ -f "$f" ] || continue
+        name=$(basename "$f")
+        if [ "$first" = true ]; then
+            first=false
+        else
+            echo ','
+        fi
+        printf '  "%s"' "$name"
+    done
+    echo
+    echo ']'
+) > "$SUMMER_DEST/manifest.json"
+
+echo "Copied $summer_copied summer TSV files to $SUMMER_DEST ($summer_skipped duplicates skipped)"

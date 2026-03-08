@@ -3,7 +3,7 @@
 
 use bytemuck;
 use solver_core::summer::*;
-use solver_native::gpu_types_summer::unpack_summer_assignment;
+use solver_native::gpu_types_summer::{unpack_summer_assignment, pack_summer_assignment, SUMMER_ASSIGN_U32S};
 use wgpu::util::DeviceExt;
 
 /// Test shader with full SA code: keeps ALL functions to match real compilation.
@@ -17,8 +17,8 @@ fn make_test_shader() -> String {
 
 @compute @workgroup_size(1)
 fn test_eval(@builtin(global_invocation_id) gid: vec3<u32>) {
-    var a: array<u32, 200>;
-    for (var i = 0u; i < 200u; i++) {
+    var a: array<u32, 50>;
+    for (var i = 0u; i < 50u; i++) {
         a[i] = assignments[i];
     }
     costs[0] = evaluate(&a);
@@ -50,7 +50,7 @@ fn create_device() -> (wgpu::Device, wgpu::Queue) {
 fn run_gpu_evaluate(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
-    packed: &[u32; 200],
+    packed: &[u32; SUMMER_ASSIGN_U32S],
     w8: &SummerWeights,
 ) -> u32 {
     let shader_src = make_test_shader();
@@ -130,7 +130,7 @@ fn run_gpu_evaluate(
     });
 
     // move_thresh
-    let thresh_data = [12u32, 20, 28, 32, 36, 44, 52, 58, 66, 72, 77, 82, 90, 96, 100, 100];
+    let thresh_data = [14u32, 22, 30, 34, 38, 52, 64, 74, 86, 92, 100, 100, 100, 100, 100, 100];
     let thresh_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("thresh"),
         contents: bytemuck::cast_slice(&thresh_data),
@@ -258,21 +258,7 @@ fn test_gpu_vs_cpu_evaluate() {
         let cpu_bd = evaluate_summer(&assignment, &w8);
         let cpu_cost = cpu_bd.total;
 
-        // Pack for GPU
-        let mut packed = [0u32; 200];
-        for w in 0..S_WEEKS {
-            for s in 0..S_SLOTS {
-                for p in 0..S_PAIRS {
-                    let idx = w * S_SLOTS * S_PAIRS + s * S_PAIRS + p;
-                    let (t1, t2) = assignment[w][s][p];
-                    if t1 == EMPTY {
-                        packed[idx] = 0xFFFF;
-                    } else {
-                        packed[idx] = (t1 as u32) | ((t2 as u32) << 8);
-                    }
-                }
-            }
-        }
+        let packed = pack_summer_assignment(&assignment);
 
         let gpu_cost = run_gpu_evaluate(&device, &queue, &packed, &w8);
 
@@ -324,28 +310,19 @@ fn test_gpu_sa_cost_drift() {
     });
 
     let n = chain_count as usize;
+    let assign_u32s = SUMMER_ASSIGN_U32S;
     let mut rng = SmallRng::seed_from_u64(42);
 
     // Initialize all chains
-    let mut assign_data = vec![0u32; n * 200];
+    let mut assign_data = vec![0u32; n * assign_u32s];
     let mut cost_data = vec![0u32; n];
     let mut rng_data = vec![0u32; n * 4];
 
     for i in 0..n {
         let a = random_summer_assignment(&mut rng);
         let cost = evaluate_summer(&a, &w8).total;
-        let mut packed = [0u32; 200];
-        for w in 0..S_WEEKS {
-            for s in 0..S_SLOTS {
-                for p in 0..S_PAIRS {
-                    let idx = w * S_SLOTS * S_PAIRS + s * S_PAIRS + p;
-                    let (t1, t2) = a[w][s][p];
-                    if t1 == EMPTY { packed[idx] = 0xFFFF; }
-                    else { packed[idx] = (t1 as u32) | ((t2 as u32) << 8); }
-                }
-            }
-        }
-        assign_data[i * 200..(i + 1) * 200].copy_from_slice(&packed);
+        let packed = pack_summer_assignment(&a);
+        assign_data[i * assign_u32s..(i + 1) * assign_u32s].copy_from_slice(&packed);
         cost_data[i] = cost;
         let sv = (i as u64).wrapping_mul(0x9E3779B97F4A7C15) ^ 0xBF58476D1CE4E5B9;
         rng_data[i * 4] = (sv & 0xFFFFFFFF) as u32 | 1;
@@ -402,7 +379,7 @@ fn test_gpu_sa_cost_drift() {
         contents: bytemuck::cast_slice(&params_data),
         usage: wgpu::BufferUsages::UNIFORM,
     });
-    let thresh_data = [12u32, 20, 28, 32, 36, 44, 52, 58, 66, 72, 77, 82, 90, 96, 100, 100];
+    let thresh_data = [14u32, 22, 30, 34, 38, 52, 64, 74, 86, 92, 100, 100, 100, 100, 100, 100];
     let thresh_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("thresh"),
         contents: bytemuck::cast_slice(&thresh_data),
@@ -422,12 +399,12 @@ fn test_gpu_sa_cost_drift() {
         mapped_at_creation: false,
     });
     let assign_readback = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("assign_rb"), size: (n * 200 * 4) as u64,
+        label: Some("assign_rb"), size: (n * assign_u32s * 4) as u64,
         usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
     let best_assign_readback = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("best_assign_rb"), size: (n * 200 * 4) as u64,
+        label: Some("best_assign_rb"), size: (n * assign_u32s * 4) as u64,
         usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
@@ -473,8 +450,8 @@ fn test_gpu_sa_cost_drift() {
     }
     encoder.copy_buffer_to_buffer(&costs_buf, 0, &cost_readback, 0, per_array_size);
     encoder.copy_buffer_to_buffer(&best_costs_buf, 0, &best_cost_readback, 0, per_array_size);
-    encoder.copy_buffer_to_buffer(&assign_buf, 0, &assign_readback, 0, (n * 200 * 4) as u64);
-    encoder.copy_buffer_to_buffer(&best_assign_buf, 0, &best_assign_readback, 0, (n * 200 * 4) as u64);
+    encoder.copy_buffer_to_buffer(&assign_buf, 0, &assign_readback, 0, (n * assign_u32s * 4) as u64);
+    encoder.copy_buffer_to_buffer(&best_assign_buf, 0, &best_assign_readback, 0, (n * assign_u32s * 4) as u64);
     queue.submit(Some(encoder.finish()));
 
     // Read back
@@ -496,14 +473,14 @@ fn test_gpu_sa_cost_drift() {
     let mut mismatches = 0;
     for i in 0..n {
         // Check current
-        let mut cur_packed = [0u32; 200];
-        cur_packed.copy_from_slice(&cur_assign_all[i * 200..(i + 1) * 200]);
+        let mut cur_packed = [0u32; SUMMER_ASSIGN_U32S];
+        cur_packed.copy_from_slice(&cur_assign_all[i * assign_u32s..(i + 1) * assign_u32s]);
         let cur_assignment = unpack_summer_assignment(&cur_packed);
         let cpu_cur = evaluate_summer(&cur_assignment, &w8).total;
 
         // Check best
-        let mut best_packed = [0u32; 200];
-        best_packed.copy_from_slice(&best_assign_all[i * 200..(i + 1) * 200]);
+        let mut best_packed = [0u32; SUMMER_ASSIGN_U32S];
+        best_packed.copy_from_slice(&best_assign_all[i * assign_u32s..(i + 1) * assign_u32s]);
         let best_assignment = unpack_summer_assignment(&best_packed);
         let cpu_best = evaluate_summer(&best_assignment, &w8).total;
 

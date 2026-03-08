@@ -11,6 +11,7 @@ import LaneSwitchesTable from './components/LaneSwitchesTable';
 import SlotCountsTable from './components/SlotCountsTable';
 import EarlyLateTable from './components/EarlyLateTable';
 import ScheduleEditor from './components/ScheduleEditor';
+import TabBar from './components/TabBar';
 
 function PageContent() {
     const { schedule, cost, analysis, violations } = useSchedule();
@@ -21,6 +22,7 @@ function PageContent() {
             <div
                 className={`flex-1 p-4 overflow-y-auto ${hasSchedule ? 'lg:pr-2' : ''}`}
             >
+                <TabBar active="winter" />
                 <div className="prose max-w-none">
                     <h1>Bowling Schedule Generator</h1>
                     <p>

@@ -298,7 +298,10 @@ async fn run_gpu(
                     let mut lines: u32 = 0;
                     if let Some(ref best) = global_best_assignment {
                         let best_bd = evaluate_summer(best, &w8);
-                        print_summer_table_banner(global_best_cost, &best_bd, &global_best_meta, start_time);
+                        let elapsed_s = start_time.elapsed().as_secs_f64().max(0.001);
+                        let gpu_ips = (dispatch_count as f64 * ITERS_PER_DISPATCH as f64 * chain_count as f64 / elapsed_s) as u64;
+                        let cpu_ips: u64 = worker_metas.iter().map(|m| m.iters_per_sec).sum();
+                        print_summer_table_banner(global_best_cost, &best_bd, &global_best_meta, start_time, gpu_ips, cpu_ips);
                         lines += 2;
                     }
                     print_summer_table_header();
@@ -699,7 +702,7 @@ async fn run_gpu(
             }
         }
 
-        // 5. Adaptive move thresholds
+        // 5. Adaptive move thresholds (GPU has 11-move subset of CPU's 15 moves)
         {
             let mut avg_rates = [0.0f64; NUM_MOVES];
             let mut n = 0usize;
@@ -711,23 +714,20 @@ async fn run_gpu(
             }
             if n > 0 {
                 let nf = n as f64;
-                let base_weights: [f64; NUM_MOVES] = [
-                    0.12, 0.08, 0.08, 0.04, 0.04, 0.08, 0.08, 0.06, 0.08, 0.06, 0.05, 0.05,
-                    0.08, 0.06, 0.04,
-                ];
-                let mut weights = [0.0f64; NUM_MOVES];
-                for m in 0..NUM_MOVES {
-                    let rate = avg_rates[m] / nf;
-                    weights[m] = base_weights[m] * (0.1 + rate);
+                let mut weights = [0.0f64; GPU_NUM_MOVES];
+                for m in 0..GPU_NUM_MOVES {
+                    let cpu_move = GPU_TO_CPU_MOVE[m];
+                    let rate = avg_rates[cpu_move] / nf;
+                    weights[m] = GPU_BASE_WEIGHTS[m] * (0.1 + rate);
                 }
                 let sum: f64 = weights.iter().sum();
-                let mut thresh = GpuSummerMoveThresholds { t: [0u32; 16] };
+                let mut thresh = GpuSummerMoveThresholds { t: [100u32; 16] };
                 let mut cum = 0.0;
-                for m in 0..NUM_MOVES {
+                for m in 0..GPU_NUM_MOVES {
                     cum += weights[m] / sum;
                     thresh.t[m] = (cum * 100.0).round() as u32;
                 }
-                thresh.t[NUM_MOVES - 1] = 100;
+                thresh.t[GPU_NUM_MOVES - 1] = 100;
                 if thresh.t != last_thresh.t {
                     gpu.queue.write_buffer(&gpu.move_thresh_buf, 0, bytemuck::bytes_of(&thresh));
                     last_thresh = thresh;

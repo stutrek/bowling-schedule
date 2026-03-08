@@ -1,4 +1,4 @@
-const ASSIGN_SIZE: u32 = 200u;
+const ASSIGN_SIZE: u32 = 50u;
 
 @group(0) @binding(0) var<storage, read_write> assignments: array<u32>;
 @group(0) @binding(1) var<storage, read_write> best_assignments: array<u32>;

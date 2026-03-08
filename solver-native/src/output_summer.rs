@@ -12,11 +12,25 @@ pub struct SummerWorkerMeta {
     pub iters_per_sec: u64,
 }
 
+fn fmt_ips(ips: u64) -> String {
+    if ips >= 1_000_000_000 {
+        format!("{:.2}B", ips as f64 / 1_000_000_000.0)
+    } else if ips >= 1_000_000 {
+        format!("{:.1}M", ips as f64 / 1_000_000.0)
+    } else if ips >= 1_000 {
+        format!("{:.0}K", ips as f64 / 1_000.0)
+    } else {
+        format!("{}", ips)
+    }
+}
+
 pub fn print_summer_table_banner(
     global_best_cost: u32,
     global_best_bd: &SummerCostBreakdown,
     meta: &GlobalBestMeta,
     start_time: Instant,
+    gpu_ips: u64,
+    cpu_ips: u64,
 ) {
     let now = chrono::Local::now().format("%H:%M:%S");
     let age = meta.found_at.elapsed().as_secs();
@@ -24,9 +38,10 @@ pub fn print_summer_table_banner(
                   else if age < 3600 { format!("{}m{}s ago", age / 60, age % 60) }
                   else { format!("{}h{}m ago", age / 3600, (age % 3600) / 60) };
     eprintln!(
-        "── {} {} best={} from {} ({}) ──\x1b[K",
+        "── {} {} best={} from {} ({}) gpu:{} cpu:{} it/s ──\x1b[K",
         now, fmt_elapsed(start_time.elapsed()),
         global_best_cost, meta.source, age_str,
+        fmt_ips(gpu_ips), fmt_ips(cpu_ips),
     );
     eprintln!("   {}\x1b[K", summer_cost_label(global_best_bd));
 }

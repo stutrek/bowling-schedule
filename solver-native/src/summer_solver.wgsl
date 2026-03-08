@@ -1,18 +1,20 @@
 // Summer league SA solver shader
 // 12 teams, 10 weeks, 5 slots, 4 lane pairs
-// Assignment: 200 u32s (10 weeks × 5 slots × 4 pairs)
-// Each u32: left_team | (right_team << 8), or 0xFFFF for empty
+// Assignment: 50 u32s (4 positions per u32, 8 bits each)
+// Each position byte: left_team[3:0] | right_team[7:4], or 0xFF for empty
+// Teams 0-11 valid, 0xF = EMPTY sentinel
 
 const TEAMS: u32 = 12u;
 const WEEKS: u32 = 10u;
 const SLOTS: u32 = 5u;
 const PAIRS: u32 = 4u;
 const LANES: u32 = 4u;
-const ASSIGN_SIZE: u32 = 200u;
-const EMPTY: u32 = 0xFFu;
-const EMPTY_POS: u32 = 0xFFFFu;
-const NUM_PAIRS_C2: u32 = 66u; // C(12,2)
-const MATCHUP_U32S: u32 = 17u; // ceil(66/4)
+const ASSIGN_SIZE: u32 = 50u;
+const ASSIGN_POSITIONS: u32 = 200u;
+const EMPTY: u32 = 0xFu;
+const EMPTY_POS: u32 = 0xFFu;
+const NUM_PAIRS_C2: u32 = 66u;
+const MATCHUP_U32S: u32 = 17u;
 
 struct Weights {
     matchup_balance: u32,
@@ -43,6 +45,11 @@ struct Params {
 @group(0) @binding(6) var<uniform> params: Params;
 @group(0) @binding(7) var<storage, read> move_thresh: array<u32, 16>;
 
+// Undo log: 4 entries (max 2 physical u32s per move, with duplicates)
+var<private> undo_idx: array<u32, 4>;
+var<private> undo_val: array<u32, 4>;
+var<private> undo_n: u32;
+
 // ═══════════════════════════════════════════════════════════════════════
 // RNG: xoshiro128++
 // ═══════════════════════════════════════════════════════════════════════
@@ -72,57 +79,98 @@ fn rng_f32(s: ptr<function, array<u32, 4>>) -> f32 {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// Assignment access helpers
+// Assignment access helpers (4-bit packed: 4 positions per u32)
 // ═══════════════════════════════════════════════════════════════════════
 
 fn pos_idx(w: u32, s: u32, p: u32) -> u32 {
     return w * SLOTS * PAIRS + s * PAIRS + p;
 }
 
-fn get_pos(a: ptr<function, array<u32, 200>>, w: u32, s: u32, p: u32) -> u32 {
-    return (*a)[pos_idx(w, s, p)];
+fn read_pos(a: ptr<function, array<u32, 50>>, li: u32) -> u32 {
+    return ((*a)[li >> 2u] >> ((li & 3u) * 8u)) & 0xFFu;
 }
 
-fn get_left(a: ptr<function, array<u32, 200>>, w: u32, s: u32, p: u32) -> u32 {
-    return (*a)[pos_idx(w, s, p)] & 0xFFu;
+fn write_pos(a: ptr<function, array<u32, 50>>, li: u32, val: u32) {
+    let phys = li >> 2u;
+    let shift = (li & 3u) * 8u;
+    (*a)[phys] = ((*a)[phys] & ~(0xFFu << shift)) | ((val & 0xFFu) << shift);
 }
 
-fn get_right(a: ptr<function, array<u32, 200>>, w: u32, s: u32, p: u32) -> u32 {
-    return ((*a)[pos_idx(w, s, p)] >> 8u) & 0xFFu;
+fn get_left(a: ptr<function, array<u32, 50>>, w: u32, s: u32, p: u32) -> u32 {
+    let li = pos_idx(w, s, p);
+    return ((*a)[li >> 2u] >> ((li & 3u) * 8u)) & 0xFu;
 }
 
-fn is_empty(a: ptr<function, array<u32, 200>>, w: u32, s: u32, p: u32) -> bool {
-    return (*a)[pos_idx(w, s, p)] == EMPTY_POS;
+fn get_right(a: ptr<function, array<u32, 50>>, w: u32, s: u32, p: u32) -> u32 {
+    let li = pos_idx(w, s, p);
+    return ((*a)[li >> 2u] >> ((li & 3u) * 8u + 4u)) & 0xFu;
+}
+
+fn get_side(a: ptr<function, array<u32, 50>>, w: u32, s: u32, p: u32, side: u32) -> u32 {
+    let li = pos_idx(w, s, p);
+    return ((*a)[li >> 2u] >> ((li & 3u) * 8u + side * 4u)) & 0xFu;
+}
+
+fn is_empty(a: ptr<function, array<u32, 50>>, w: u32, s: u32, p: u32) -> bool {
+    return read_pos(a, pos_idx(w, s, p)) == EMPTY_POS;
 }
 
 fn is_valid_pos(s: u32, p: u32) -> bool {
     return s < 4u || p >= 2u;
 }
 
-fn set_pos(a: ptr<function, array<u32, 200>>, w: u32, s: u32, p: u32, left: u32, right: u32) {
-    (*a)[pos_idx(w, s, p)] = (left & 0xFFu) | ((right & 0xFFu) << 8u);
+// set_pos with undo tracking
+fn set_pos(a: ptr<function, array<u32, 50>>, w: u32, s: u32, p: u32, left: u32, right: u32) {
+    let li = pos_idx(w, s, p);
+    let phys = li >> 2u;
+    undo_record(a, phys);
+    let val = (left & 0xFu) | ((right & 0xFu) << 4u);
+    let shift = (li & 3u) * 8u;
+    (*a)[phys] = ((*a)[phys] & ~(0xFFu << shift)) | (val << shift);
 }
 
-fn set_empty(a: ptr<function, array<u32, 200>>, w: u32, s: u32, p: u32) {
-    (*a)[pos_idx(w, s, p)] = EMPTY_POS;
+// set_side with undo tracking
+fn set_side(a: ptr<function, array<u32, 50>>, w: u32, s: u32, p: u32, side: u32, team: u32) {
+    let li = pos_idx(w, s, p);
+    let phys = li >> 2u;
+    undo_record(a, phys);
+    let nibble_shift = (li & 3u) * 8u + side * 4u;
+    (*a)[phys] = ((*a)[phys] & ~(0xFu << nibble_shift)) | ((team & 0xFu) << nibble_shift);
 }
 
-fn set_side(a: ptr<function, array<u32, 200>>, w: u32, s: u32, p: u32, side: u32, team: u32) {
-    let idx = pos_idx(w, s, p);
-    if (side == 0u) {
-        (*a)[idx] = ((*a)[idx] & 0xFF00u) | (team & 0xFFu);
-    } else {
-        (*a)[idx] = ((*a)[idx] & 0x00FFu) | ((team & 0xFFu) << 8u);
-    }
-}
-
-fn get_side(a: ptr<function, array<u32, 200>>, w: u32, s: u32, p: u32, side: u32) -> u32 {
-    if (side == 0u) { return get_left(a, w, s, p); }
-    return get_right(a, w, s, p);
+// swap_positions: NO undo tracking (used by swap-reversible moves)
+fn swap_positions(a: ptr<function, array<u32, 50>>, li1: u32, li2: u32) {
+    let v1 = read_pos(a, li1);
+    let v2 = read_pos(a, li2);
+    write_pos(a, li1, v2);
+    write_pos(a, li2, v1);
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// Matchup pair index (for C(12,2) = 66 pairs)
+// Undo helpers
+// ═══════════════════════════════════════════════════════════════════════
+
+fn undo_reset() {
+    undo_n = 0u;
+}
+
+fn undo_record(a: ptr<function, array<u32, 50>>, phys: u32) {
+    if (undo_n < 4u) {
+        undo_idx[undo_n] = phys;
+        undo_val[undo_n] = (*a)[phys];
+        undo_n += 1u;
+    }
+}
+
+fn undo_apply(a: ptr<function, array<u32, 50>>) {
+    for (var i = undo_n; i > 0u; ) {
+        i -= 1u;
+        (*a)[undo_idx[i]] = undo_val[i];
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Matchup pair index (C(12,2) = 66 pairs)
 // ═══════════════════════════════════════════════════════════════════════
 
 fn pair_idx(lo: u32, hi: u32) -> u32 {
@@ -130,50 +178,43 @@ fn pair_idx(lo: u32, hi: u32) -> u32 {
 }
 
 fn inc_packed(m: ptr<function, array<u32, 17>>, lo: u32, hi: u32) {
-    if (lo >= hi) { return; } // guard against self-matchup corruption
+    if (lo >= hi) { return; }
     let idx = pair_idx(lo, hi);
-    if (idx >= 66u) { return; } // guard against OOB
+    if (idx >= 66u) { return; }
     (*m)[idx / 4u] += (1u << ((idx % 4u) * 8u));
 }
 
 fn get_packed(m: ptr<function, array<u32, 17>>, lo: u32, hi: u32) -> u32 {
-    if (lo >= hi) { return 0u; } // guard against self-matchup corruption
+    if (lo >= hi) { return 0u; }
     let idx = pair_idx(lo, hi);
-    if (idx >= 66u) { return 0u; } // guard against OOB
+    if (idx >= 66u) { return 0u; }
     return ((*m)[idx / 4u] >> ((idx % 4u) * 8u)) & 0xFFu;
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// Check if team is in a slot (excluding one pair)
+// Helpers
 // ═══════════════════════════════════════════════════════════════════════
 
-fn team_in_slot(a: ptr<function, array<u32, 200>>, w: u32, slot: u32, team: u32, exclude_pair: u32) -> bool {
+fn team_in_slot(a: ptr<function, array<u32, 50>>, w: u32, slot: u32, team: u32, exclude_pair: u32) -> bool {
     for (var p = 0u; p < PAIRS; p++) {
         if (p == exclude_pair) { continue; }
-        if (is_empty(a, w, slot, p)) { continue; }
-        if (get_left(a, w, slot, p) == team || get_right(a, w, slot, p) == team) { return true; }
-    }
-    return false;
-}
-
-fn team_in_slot_any(a: ptr<function, array<u32, 200>>, w: u32, slot: u32, team: u32) -> bool {
-    for (var p = 0u; p < PAIRS; p++) {
-        if (is_empty(a, w, slot, p)) { continue; }
-        if (get_left(a, w, slot, p) == team || get_right(a, w, slot, p) == team) { return true; }
+        let v = read_pos(a, pos_idx(w, slot, p));
+        if (v == EMPTY_POS) { continue; }
+        if ((v & 0xFu) == team || ((v >> 4u) & 0xFu) == team) { return true; }
     }
     return false;
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// Evaluation
+// Evaluation — Pass 1: matchup balance + repeat matchup same night
+// Scratch: matchup_total(17) + week_m(17) = 34 u32s
 // ═══════════════════════════════════════════════════════════════════════
 
-fn evaluate(a: ptr<function, array<u32, 200>>) -> u32 {
-    var total = 0u;
-
-    // --- Pass 1: matchup balance + repeat matchup same night ---
+fn eval_matchups(a: ptr<function, array<u32, 50>>) -> u32 {
     var matchup_total: array<u32, 17>;
     for (var i = 0u; i < MATCHUP_U32S; i++) { matchup_total[i] = 0u; }
+
+    var total = 0u;
 
     for (var w = 0u; w < WEEKS; w++) {
         var week_m: array<u32, 17>;
@@ -181,9 +222,10 @@ fn evaluate(a: ptr<function, array<u32, 200>>) -> u32 {
 
         for (var s = 0u; s < SLOTS; s++) {
             for (var p = 0u; p < PAIRS; p++) {
-                if (is_empty(a, w, s, p)) { continue; }
-                let t1 = get_left(a, w, s, p);
-                let t2 = get_right(a, w, s, p);
+                let v = read_pos(a, pos_idx(w, s, p));
+                if (v == EMPTY_POS) { continue; }
+                let t1 = v & 0xFu;
+                let t2 = (v >> 4u) & 0xFu;
                 if (t1 >= TEAMS || t2 >= TEAMS) { continue; }
                 let lo = min(t1, t2);
                 let hi = max(t1, t2);
@@ -192,7 +234,6 @@ fn evaluate(a: ptr<function, array<u32, 200>>) -> u32 {
             }
         }
 
-        // Repeat matchup same night
         for (var i = 0u; i < TEAMS; i++) {
             for (var j = i + 1u; j < TEAMS; j++) {
                 let c = get_packed(&week_m, i, j);
@@ -203,7 +244,6 @@ fn evaluate(a: ptr<function, array<u32, 200>>) -> u32 {
         }
     }
 
-    // Matchup balance: penalize once per pair outside [2, 3]
     for (var i = 0u; i < TEAMS; i++) {
         for (var j = i + 1u; j < TEAMS; j++) {
             let c = get_packed(&matchup_total, i, j);
@@ -213,7 +253,17 @@ fn evaluate(a: ptr<function, array<u32, 200>>) -> u32 {
         }
     }
 
-    // --- Pass 2: lane switches + time gaps (per team per week) ---
+    return total;
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Evaluation — Pass 2: time gaps + lane switches
+// Scratch: game_slots(3) + game_pairs(3) per inner loop = 6 u32s
+// ═══════════════════════════════════════════════════════════════════════
+
+fn eval_gaps_switches(a: ptr<function, array<u32, 50>>) -> u32 {
+    var total = 0u;
+
     for (var w = 0u; w < WEEKS; w++) {
         for (var t = 0u; t < TEAMS; t++) {
             var game_slots: array<u32, 3>;
@@ -222,8 +272,9 @@ fn evaluate(a: ptr<function, array<u32, 200>>) -> u32 {
 
             for (var s = 0u; s < SLOTS; s++) {
                 for (var p = 0u; p < PAIRS; p++) {
-                    if (is_empty(a, w, s, p)) { continue; }
-                    if (get_left(a, w, s, p) == t || get_right(a, w, s, p) == t) {
+                    let v = read_pos(a, pos_idx(w, s, p));
+                    if (v == EMPTY_POS) { continue; }
+                    if ((v & 0xFu) == t || ((v >> 4u) & 0xFu) == t) {
                         if (gc < 3u) {
                             game_slots[gc] = s;
                             game_pairs[gc] = p;
@@ -238,41 +289,48 @@ fn evaluate(a: ptr<function, array<u32, 200>>) -> u32 {
                 total += weights.time_gap_consecutive;
             }
             if (gc >= 2u) {
-            for (var g = 0u; g < gc - 1u; g++) {
-                let gap = game_slots[g + 1u] - game_slots[g] - 1u;
-                if (gap >= 2u) {
-                    total += weights.time_gap_large;
+                for (var g = 0u; g < gc - 1u; g++) {
+                    let gap = game_slots[g + 1u] - game_slots[g] - 1u;
+                    if (gap >= 2u) {
+                        total += weights.time_gap_large;
+                    }
                 }
-            }
 
-            // Lane switches (consecutive) and lane switch break (across gap)
-            for (var g = 0u; g < gc - 1u; g++) {
-                let gap = game_slots[g + 1u] - game_slots[g] - 1u;
-                if (game_pairs[g] != game_pairs[g + 1u]) {
-                    if (gap == 0u) {
-                        total += weights.lane_switch_consecutive;
-                    } else {
-                        total += weights.lane_switch_post_break;
+                // Lane switches
+                for (var g = 0u; g < gc - 1u; g++) {
+                    let gap = game_slots[g + 1u] - game_slots[g] - 1u;
+                    if (game_pairs[g] != game_pairs[g + 1u]) {
+                        if (gap == 0u) {
+                            total += weights.lane_switch_consecutive;
+                        } else {
+                            total += weights.lane_switch_post_break;
+                        }
                     }
                 }
             }
-            } // end if gc >= 2
         }
     }
 
-    // --- Pass 3: lane balance ---
-    // 12 teams × 4 lanes, packed 4 per u32 = 12 u32s
+    return total;
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Evaluation — Pass 3: lane balance
+// Scratch: lane_counts(12) = 12 u32s
+// ═══════════════════════════════════════════════════════════════════════
+
+fn eval_lane_balance(a: ptr<function, array<u32, 50>>) -> u32 {
     var lane_counts: array<u32, 12>;
     for (var i = 0u; i < 12u; i++) { lane_counts[i] = 0u; }
 
     for (var w = 0u; w < WEEKS; w++) {
         for (var s = 0u; s < SLOTS; s++) {
             for (var p = 0u; p < PAIRS; p++) {
-                if (is_empty(a, w, s, p)) { continue; }
-                let t1 = get_left(a, w, s, p);
-                let t2 = get_right(a, w, s, p);
+                let v = read_pos(a, pos_idx(w, s, p));
+                if (v == EMPTY_POS) { continue; }
+                let t1 = v & 0xFu;
+                let t2 = (v >> 4u) & 0xFu;
                 if (t1 >= TEAMS || t2 >= TEAMS) { continue; }
-                // Both teams bowl on the same lane (= pair index)
                 let l1 = t1 * LANES + p;
                 lane_counts[l1 / 4u] += (1u << ((l1 % 4u) * 8u));
                 let l2 = t2 * LANES + p;
@@ -281,7 +339,7 @@ fn evaluate(a: ptr<function, array<u32, 200>>) -> u32 {
         }
     }
 
-    // lane balance: flat penalty for counts outside [7, 8] (target = 30/4 = 7.5)
+    var total = 0u;
     for (var t = 0u; t < TEAMS; t++) {
         for (var l = 0u; l < LANES; l++) {
             let li = t * LANES + l;
@@ -292,16 +350,25 @@ fn evaluate(a: ptr<function, array<u32, 200>>) -> u32 {
         }
     }
 
-    // --- Pass 4: slot balance ---
+    return total;
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Evaluation — Pass 4: slot balance
+// Scratch: slot_counts(15) = 15 u32s
+// ═══════════════════════════════════════════════════════════════════════
+
+fn eval_slot_balance(a: ptr<function, array<u32, 50>>) -> u32 {
     var slot_counts: array<u32, 15>;
     for (var i = 0u; i < 15u; i++) { slot_counts[i] = 0u; }
 
     for (var w = 0u; w < WEEKS; w++) {
         for (var s = 0u; s < SLOTS; s++) {
             for (var p = 0u; p < PAIRS; p++) {
-                if (is_empty(a, w, s, p)) { continue; }
-                let t1 = get_left(a, w, s, p);
-                let t2 = get_right(a, w, s, p);
+                let v = read_pos(a, pos_idx(w, s, p));
+                if (v == EMPTY_POS) { continue; }
+                let t1 = v & 0xFu;
+                let t2 = (v >> 4u) & 0xFu;
                 if (t1 >= TEAMS || t2 >= TEAMS) { continue; }
                 let si1 = t1 * SLOTS + s;
                 slot_counts[si1 / 4u] += (1u << ((si1 % 4u) * 8u));
@@ -311,9 +378,7 @@ fn evaluate(a: ptr<function, array<u32, 200>>) -> u32 {
         }
     }
 
-    // slot balance: flat penalty for counts outside [floor, ceil] of target
-    // slots 0-3: target 20/3 ≈ 6.67 → [6, 7] ok
-    // slot 4:    target 10/3 ≈ 3.33 → [3, 4] ok
+    var total = 0u;
     for (var t = 0u; t < TEAMS; t++) {
         for (var s = 0u; s < SLOTS; s++) {
             let si = t * SLOTS + s;
@@ -326,17 +391,25 @@ fn evaluate(a: ptr<function, array<u32, 200>>) -> u32 {
         }
     }
 
-    // --- Pass 5: commissioner overlap (slot 1/5 co-appearance) ---
-    // 1 u32 per team: bit w*2 = plays in slot 0, bit w*2+1 = plays in slot 4
+    return total;
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Evaluation — Pass 5: commissioner overlap
+// Scratch: team_comm_bits(12) = 12 u32s
+// ═══════════════════════════════════════════════════════════════════════
+
+fn eval_commissioner(a: ptr<function, array<u32, 50>>) -> u32 {
     var team_comm_bits: array<u32, 12>;
     for (var i = 0u; i < 12u; i++) { team_comm_bits[i] = 0u; }
 
     for (var w = 0u; w < WEEKS; w++) {
         // Slot 0: all pairs
         for (var p = 0u; p < PAIRS; p++) {
-            if (!is_empty(a, w, 0u, p)) {
-                let t1 = get_left(a, w, 0u, p);
-                let t2 = get_right(a, w, 0u, p);
+            let v = read_pos(a, pos_idx(w, 0u, p));
+            if (v != EMPTY_POS) {
+                let t1 = v & 0xFu;
+                let t2 = (v >> 4u) & 0xFu;
                 if (t1 < TEAMS && t2 < TEAMS) {
                     let bit = w * 2u;
                     team_comm_bits[t1] |= (1u << bit);
@@ -346,9 +419,10 @@ fn evaluate(a: ptr<function, array<u32, 200>>) -> u32 {
         }
         // Slot 4: pairs 2 and 3 only
         for (var p = 2u; p < PAIRS; p++) {
-            if (!is_empty(a, w, 4u, p)) {
-                let t1 = get_left(a, w, 4u, p);
-                let t2 = get_right(a, w, 4u, p);
+            let v = read_pos(a, pos_idx(w, 4u, p));
+            if (v != EMPTY_POS) {
+                let t1 = v & 0xFu;
+                let t2 = (v >> 4u) & 0xFu;
                 if (t1 < TEAMS && t2 < TEAMS) {
                     let bit = w * 2u + 1u;
                     team_comm_bits[t1] |= (1u << bit);
@@ -365,9 +439,17 @@ fn evaluate(a: ptr<function, array<u32, 200>>) -> u32 {
             min_co = min(min_co, co);
         }
     }
-    total += weights.commissioner_overlap * min_co;
 
-    return total;
+    return weights.commissioner_overlap * min_co;
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Combined evaluate
+// ═══════════════════════════════════════════════════════════════════════
+
+fn evaluate(a: ptr<function, array<u32, 50>>) -> u32 {
+    return eval_matchups(a) + eval_gaps_switches(a) + eval_lane_balance(a)
+         + eval_slot_balance(a) + eval_commissioner(a);
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -380,30 +462,18 @@ fn sa_accept(delta: i32, temp: f32, s: ptr<function, array<u32, 4>>) -> bool {
     return rng_f32(s) < exp(f32(-delta) / temp);
 }
 
-fn write_best(a: ptr<function, array<u32, 200>>, base: u32) {
+fn write_best(a: ptr<function, array<u32, 50>>, base: u32) {
     for (var i = 0u; i < ASSIGN_SIZE; i++) {
         best_assignments[base + i] = (*a)[i];
     }
 }
 
-fn save_all(a: ptr<function, array<u32, 200>>) -> array<u32, 200> {
-    var s: array<u32, 200>;
-    for (var i = 0u; i < ASSIGN_SIZE; i++) { s[i] = (*a)[i]; }
-    return s;
-}
-
-fn restore_all(a: ptr<function, array<u32, 200>>, s: ptr<function, array<u32, 200>>) {
-    for (var i = 0u; i < ASSIGN_SIZE; i++) { (*a)[i] = (*s)[i]; }
-}
-
 // ═══════════════════════════════════════════════════════════════════════
-// Moves
+// Move 0: team_swap — swap one team between two filled positions in different slots
 // ═══════════════════════════════════════════════════════════════════════
 
-// Move 0: team_swap — swap one team from each of two filled positions in different slots
-fn move_team_swap(a: ptr<function, array<u32, 200>>, s: ptr<function, array<u32, 4>>) -> bool {
+fn move_team_swap(a: ptr<function, array<u32, 50>>, s: ptr<function, array<u32, 4>>) -> bool {
     let w = rng_range(s, WEEKS);
-    // Pick two random filled positions
     let s1 = rng_range(s, SLOTS);
     let p1 = rng_range(s, PAIRS);
     if (is_empty(a, w, s1, p1)) { return false; }
@@ -420,7 +490,6 @@ fn move_team_swap(a: ptr<function, array<u32, 200>>, s: ptr<function, array<u32,
     if (team_in_slot(a, w, s2, t1, p2)) { return false; }
     if (team_in_slot(a, w, s1, t2, p1)) { return false; }
 
-    // Check we don't create same-team matchups
     let opp1 = get_side(a, w, s1, p1, 1u - side1);
     let opp2 = get_side(a, w, s2, p2, 1u - side2);
     if (opp1 == t2 || opp2 == t1) { return false; }
@@ -430,10 +499,12 @@ fn move_team_swap(a: ptr<function, array<u32, 200>>, s: ptr<function, array<u32,
     return true;
 }
 
+// ═══════════════════════════════════════════════════════════════════════
 // Move 1: matchup_swap — swap two entire matchups between different slots
-fn move_matchup_swap(a: ptr<function, array<u32, 200>>, s: ptr<function, array<u32, 4>>) -> bool {
+// ═══════════════════════════════════════════════════════════════════════
+
+fn move_matchup_swap(a: ptr<function, array<u32, 50>>, s: ptr<function, array<u32, 4>>) -> bool {
     let w = rng_range(s, WEEKS);
-    // Pick two filled positions in different slots
     let s1 = rng_range(s, SLOTS);
     let p1 = rng_range(s, PAIRS);
     if (!is_valid_pos(s1, p1)) { return false; }
@@ -450,20 +521,21 @@ fn move_matchup_swap(a: ptr<function, array<u32, 200>>, s: ptr<function, array<u
     let a2 = get_left(a, w, s2, p2);
     let b2 = get_right(a, w, s2, p2);
 
-    // Check: no team from matchup 1 already in slot 2 (excluding swap partner)
     if (team_in_slot(a, w, s2, a1, p2)) { return false; }
     if (team_in_slot(a, w, s2, b1, p2)) { return false; }
     if (team_in_slot(a, w, s1, a2, p1)) { return false; }
     if (team_in_slot(a, w, s1, b2, p1)) { return false; }
 
-    // Swap entire matchups
     set_pos(a, w, s1, p1, a2, b2);
     set_pos(a, w, s2, p2, a1, b1);
     return true;
 }
 
-// Move 3: opponent_swap — swap one team between two matchups in the same slot
-fn move_opponent_swap(a: ptr<function, array<u32, 200>>, s: ptr<function, array<u32, 4>>) -> bool {
+// ═══════════════════════════════════════════════════════════════════════
+// Move 2: opponent_swap — swap one team between two matchups in same slot
+// ═══════════════════════════════════════════════════════════════════════
+
+fn move_opponent_swap(a: ptr<function, array<u32, 50>>, s: ptr<function, array<u32, 4>>) -> bool {
     let w = rng_range(s, WEEKS);
     let sl = rng_range(s, SLOTS);
     let p1 = rng_range(s, PAIRS);
@@ -477,7 +549,6 @@ fn move_opponent_swap(a: ptr<function, array<u32, 200>>, s: ptr<function, array<
     let t1 = get_side(a, w, sl, p1, side1);
     let t2 = get_side(a, w, sl, p2, side2);
 
-    // Check we don't create same-team matchups
     let opp1 = get_side(a, w, sl, p1, 1u - side1);
     let opp2 = get_side(a, w, sl, p2, 1u - side2);
     if (opp1 == t2 || opp2 == t1) { return false; }
@@ -487,51 +558,25 @@ fn move_opponent_swap(a: ptr<function, array<u32, 200>>, s: ptr<function, array<
     return true;
 }
 
-// Move 3: lane_swap_week — swap two entire lanes across all slots in a week
-fn move_lane_swap_week(a: ptr<function, array<u32, 200>>, s: ptr<function, array<u32, 4>>) {
-    let w = rng_range(s, WEEKS);
-    let p1 = rng_range(s, PAIRS);
-    var p2 = rng_range(s, PAIRS - 1u);
-    if (p2 >= p1) { p2 += 1u; }
-    for (var sl = 0u; sl < SLOTS; sl++) {
-        if (is_valid_pos(sl, p1) && is_valid_pos(sl, p2)) {
-            let tmp = (*a)[pos_idx(w, sl, p1)];
-            (*a)[pos_idx(w, sl, p1)] = (*a)[pos_idx(w, sl, p2)];
-            (*a)[pos_idx(w, sl, p2)] = tmp;
-        }
-    }
-}
+// ═══════════════════════════════════════════════════════════════════════
+// Move 5: guided_matchup — find under-matched pair, swap to create matchup
+// ═══════════════════════════════════════════════════════════════════════
 
-// Move 5: slot_swap — swap two full slots (0-3 only) within a week
-fn move_slot_swap(a: ptr<function, array<u32, 200>>, s: ptr<function, array<u32, 4>>) {
-    let w = rng_range(s, WEEKS);
-    let s1 = rng_range(s, 4u);
-    var s2 = rng_range(s, 3u);
-    if (s2 >= s1) { s2 += 1u; }
-    for (var p = 0u; p < PAIRS; p++) {
-        let tmp = (*a)[pos_idx(w, s1, p)];
-        (*a)[pos_idx(w, s1, p)] = (*a)[pos_idx(w, s2, p)];
-        (*a)[pos_idx(w, s2, p)] = tmp;
-    }
-}
-
-// Move 6: guided_matchup — find under-matched pair and try to create matchup
-fn move_guided_matchup(a: ptr<function, array<u32, 200>>, s: ptr<function, array<u32, 4>>) -> bool {
-    // Count matchups
+fn move_guided_matchup(a: ptr<function, array<u32, 50>>, s: ptr<function, array<u32, 4>>) -> bool {
     var m: array<u32, 17>;
     for (var i = 0u; i < MATCHUP_U32S; i++) { m[i] = 0u; }
     for (var w = 0u; w < WEEKS; w++) {
         for (var sl = 0u; sl < SLOTS; sl++) {
             for (var p = 0u; p < PAIRS; p++) {
-                if (is_empty(a, w, sl, p)) { continue; }
-                let t1 = get_left(a, w, sl, p);
-                let t2 = get_right(a, w, sl, p);
+                let v = read_pos(a, pos_idx(w, sl, p));
+                if (v == EMPTY_POS) { continue; }
+                let t1 = v & 0xFu;
+                let t2 = (v >> 4u) & 0xFu;
                 inc_packed(&m, min(t1, t2), max(t1, t2));
             }
         }
     }
 
-    // Find pair with count < 2
     let start = rng_range(s, TEAMS);
     var ta = 0u; var tb = 0u; var found = false;
     for (var off = 0u; off < TEAMS; off++) {
@@ -545,29 +590,28 @@ fn move_guided_matchup(a: ptr<function, array<u32, 200>>, s: ptr<function, array
     }
     if (!found) { return false; }
 
-    // Find a week where both play in different slots, swap to create matchup
     let wstart = rng_range(s, WEEKS);
     for (var off = 0u; off < WEEKS; off++) {
         let w = (wstart + off) % WEEKS;
-        // Find ta's position
         var sa = 99u; var pa = 99u; var side_a = 99u;
         var sb = 99u; var pb = 99u; var side_b = 99u;
         for (var sl = 0u; sl < SLOTS; sl++) {
             for (var p = 0u; p < PAIRS; p++) {
-                if (is_empty(a, w, sl, p)) { continue; }
-                if (get_left(a, w, sl, p) == ta && sa == 99u) { sa = sl; pa = p; side_a = 0u; }
-                else if (get_right(a, w, sl, p) == ta && sa == 99u) { sa = sl; pa = p; side_a = 1u; }
-                if (get_left(a, w, sl, p) == tb && sb == 99u) { sb = sl; pb = p; side_b = 0u; }
-                else if (get_right(a, w, sl, p) == tb && sb == 99u) { sb = sl; pb = p; side_b = 1u; }
+                let v = read_pos(a, pos_idx(w, sl, p));
+                if (v == EMPTY_POS) { continue; }
+                let left = v & 0xFu;
+                let right = (v >> 4u) & 0xFu;
+                if (left == ta && sa == 99u) { sa = sl; pa = p; side_a = 0u; }
+                else if (right == ta && sa == 99u) { sa = sl; pa = p; side_a = 1u; }
+                if (left == tb && sb == 99u) { sb = sl; pb = p; side_b = 0u; }
+                else if (right == tb && sb == 99u) { sb = sl; pb = p; side_b = 1u; }
             }
         }
         if (sa == 99u || sb == 99u || sa == sb) { continue; }
 
-        // Swap tb's opponent into ta's matchup, putting tb there
         let opp = get_side(a, w, sa, pa, 1u - side_a);
         if (team_in_slot(a, w, sa, tb, pa)) { continue; }
         if (team_in_slot(a, w, sb, opp, pb)) { continue; }
-        // Check we don't create same-team matchup at (sb, pb)
         let opp_b = get_side(a, w, sb, pb, 1u - side_b);
         if (opp_b == opp) { continue; }
 
@@ -578,17 +622,21 @@ fn move_guided_matchup(a: ptr<function, array<u32, 200>>, s: ptr<function, array
     return false;
 }
 
+// ═══════════════════════════════════════════════════════════════════════
 // Move 6: guided_lane — find worst lane imbalance, opponent-swap to fix
-fn move_guided_lane(a: ptr<function, array<u32, 200>>, s: ptr<function, array<u32, 4>>) -> bool {
+// ═══════════════════════════════════════════════════════════════════════
+
+fn move_guided_lane(a: ptr<function, array<u32, 50>>, s: ptr<function, array<u32, 4>>) -> bool {
     var lc: array<u32, 12>;
     for (var i = 0u; i < 12u; i++) { lc[i] = 0u; }
 
     for (var w = 0u; w < WEEKS; w++) {
         for (var sl = 0u; sl < SLOTS; sl++) {
             for (var p = 0u; p < PAIRS; p++) {
-                if (is_empty(a, w, sl, p)) { continue; }
-                let t1 = get_left(a, w, sl, p);
-                let t2 = get_right(a, w, sl, p);
+                let v = read_pos(a, pos_idx(w, sl, p));
+                if (v == EMPTY_POS) { continue; }
+                let t1 = v & 0xFu;
+                let t2 = (v >> 4u) & 0xFu;
                 let l1 = t1 * LANES + p;
                 lc[l1 / 4u] += (1u << ((l1 % 4u) * 8u));
                 let l2 = t2 * LANES + p;
@@ -609,25 +657,23 @@ fn move_guided_lane(a: ptr<function, array<u32, 200>>, s: ptr<function, array<u3
     }
     if (worst_dev < 1.0) { return false; }
 
-    // Find worst_team on the over-represented lane and opponent-swap to a different lane
     let wstart = rng_range(s, WEEKS);
     for (var off = 0u; off < WEEKS; off++) {
         let w = (wstart + off) % WEEKS;
-        // Find worst_team's position on the source lane
         var found_sl = 99u; var found_p = 99u; var found_side = 99u;
         for (var sl = 0u; sl < SLOTS; sl++) {
             for (var p = 0u; p < PAIRS; p++) {
-                if (is_empty(a, w, sl, p)) { continue; }
+                let v = read_pos(a, pos_idx(w, sl, p));
+                if (v == EMPTY_POS) { continue; }
                 let matches_lane = (worst_over && p == worst_lane) || (!worst_over && p != worst_lane);
                 if (!matches_lane) { continue; }
-                if (get_left(a, w, sl, p) == worst_team) { found_sl = sl; found_p = p; found_side = 0u; break; }
-                if (get_right(a, w, sl, p) == worst_team) { found_sl = sl; found_p = p; found_side = 1u; break; }
+                if ((v & 0xFu) == worst_team) { found_sl = sl; found_p = p; found_side = 0u; break; }
+                if (((v >> 4u) & 0xFu) == worst_team) { found_sl = sl; found_p = p; found_side = 1u; break; }
             }
             if (found_sl != 99u) { break; }
         }
         if (found_sl == 99u) { continue; }
 
-        // Find another matchup in the same slot on a different lane to swap into
         let pstart = rng_range(s, PAIRS);
         for (var poff = 0u; poff < PAIRS; poff++) {
             let tgt_p = (pstart + poff) % PAIRS;
@@ -648,14 +694,98 @@ fn move_guided_lane(a: ptr<function, array<u32, 200>>, s: ptr<function, array<u3
     return false;
 }
 
-// Move 8: guided_lane_switch — find team with worst lane switches, fix via opponent-swap
-fn move_guided_lane_switch(a: ptr<function, array<u32, 200>>, s: ptr<function, array<u32, 4>>) -> bool {
-    let w = rng_range(s, WEEKS);
+// ═══════════════════════════════════════════════════════════════════════
+// Move 7: guided_slot — find worst slot imbalance, team_swap to fix
+// ═══════════════════════════════════════════════════════════════════════
 
-    // Find team with worst lane-switch penalty in this week
+fn move_guided_slot(a: ptr<function, array<u32, 50>>, s: ptr<function, array<u32, 4>>) -> bool {
+    var sc: array<u32, 15>;
+    for (var i = 0u; i < 15u; i++) { sc[i] = 0u; }
+
+    for (var w = 0u; w < WEEKS; w++) {
+        for (var sl = 0u; sl < SLOTS; sl++) {
+            for (var p = 0u; p < PAIRS; p++) {
+                let v = read_pos(a, pos_idx(w, sl, p));
+                if (v == EMPTY_POS) { continue; }
+                let t1 = v & 0xFu;
+                let t2 = (v >> 4u) & 0xFu;
+                if (t1 >= TEAMS || t2 >= TEAMS) { continue; }
+                let si1 = t1 * SLOTS + sl;
+                sc[si1 / 4u] += (1u << ((si1 % 4u) * 8u));
+                let si2 = t2 * SLOTS + sl;
+                sc[si2 / 4u] += (1u << ((si2 % 4u) * 8u));
+            }
+        }
+    }
+
+    let slot4_target = f32(4u * WEEKS) / f32(TEAMS);
+    let slot03_target = (f32(WEEKS * 3u) - slot4_target) / 4.0;
+
+    var worst_team = 0u; var worst_slot = 0u; var worst_dev = 0.0;
+    for (var t = 0u; t < TEAMS; t++) {
+        for (var sl = 0u; sl < SLOTS; sl++) {
+            let si = t * SLOTS + sl;
+            let count = (sc[si / 4u] >> ((si % 4u) * 8u)) & 0xFFu;
+            var tgt = slot03_target;
+            if (sl == 4u) { tgt = slot4_target; }
+            let dev = tgt - f32(count);
+            if (dev > worst_dev) { worst_dev = dev; worst_team = t; worst_slot = sl; }
+        }
+    }
+    if (worst_dev < 1.0) { return false; }
+
+    let wstart = rng_range(s, WEEKS);
+    for (var off = 0u; off < WEEKS; off++) {
+        let w = (wstart + off) % WEEKS;
+
+        var sf = 99u; var pf = 99u; var side_f = 99u;
+        for (var sl = 0u; sl < SLOTS; sl++) {
+            if (sl == worst_slot) { continue; }
+            for (var p = 0u; p < PAIRS; p++) {
+                let v = read_pos(a, pos_idx(w, sl, p));
+                if (v == EMPTY_POS) { continue; }
+                if ((v & 0xFu) == worst_team) {
+                    sf = sl; pf = p; side_f = 0u;
+                } else if (((v >> 4u) & 0xFu) == worst_team) {
+                    sf = sl; pf = p; side_f = 1u;
+                }
+            }
+        }
+        if (sf == 99u) { continue; }
+
+        let pstart = rng_range(s, PAIRS);
+        for (var poff = 0u; poff < PAIRS; poff++) {
+            let pt = (pstart + poff) % PAIRS;
+            if (!is_valid_pos(worst_slot, pt)) { continue; }
+            if (is_empty(a, w, worst_slot, pt)) { continue; }
+
+            let side_t = rng_range(s, 2u);
+            let their_team = get_side(a, w, worst_slot, pt, side_t);
+
+            if (team_in_slot(a, w, worst_slot, worst_team, pt)) { continue; }
+            if (team_in_slot(a, w, sf, their_team, pf)) { continue; }
+            let my_opp = get_side(a, w, sf, pf, 1u - side_f);
+            let their_opp = get_side(a, w, worst_slot, pt, 1u - side_t);
+            if (my_opp == their_team || their_opp == worst_team) { continue; }
+
+            set_side(a, w, sf, pf, side_f, their_team);
+            set_side(a, w, worst_slot, pt, side_t, worst_team);
+            return true;
+        }
+    }
+    return false;
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Move 8: guided_lane_switch — fix worst lane-switch penalty via opponent-swap
+// ═══════════════════════════════════════════════════════════════════════
+
+fn move_guided_lane_switch(a: ptr<function, array<u32, 50>>, s: ptr<function, array<u32, 4>>) -> bool {
+    let w = rng_range(s, WEEKS);
+    let t_start = rng_range(s, TEAMS);
+
     var worst_team = 0u;
     var worst_penalty = 0u;
-    let t_start = rng_range(s, TEAMS);
 
     for (var t_off = 0u; t_off < TEAMS; t_off++) {
         let t = (t_start + t_off) % TEAMS;
@@ -664,8 +794,9 @@ fn move_guided_lane_switch(a: ptr<function, array<u32, 200>>, s: ptr<function, a
         var gc = 0u;
         for (var sl = 0u; sl < SLOTS; sl++) {
             for (var p = 0u; p < PAIRS; p++) {
-                if (is_empty(a, w, sl, p)) { continue; }
-                if (get_left(a, w, sl, p) == t || get_right(a, w, sl, p) == t) {
+                let v = read_pos(a, pos_idx(w, sl, p));
+                if (v == EMPTY_POS) { continue; }
+                if ((v & 0xFu) == t || ((v >> 4u) & 0xFu) == t) {
                     if (gc < 3u) { gs[gc] = sl; gp[gc] = p; gc += 1u; }
                 }
             }
@@ -685,23 +816,22 @@ fn move_guided_lane_switch(a: ptr<function, array<u32, 200>>, s: ptr<function, a
 
     if (worst_penalty == 0u) { return false; }
 
-    // Re-find games for worst_team
     var gs: array<u32, 3>;
     var gp: array<u32, 3>;
     var gside: array<u32, 3>;
     var gc = 0u;
     for (var sl = 0u; sl < SLOTS; sl++) {
         for (var p = 0u; p < PAIRS; p++) {
-            if (is_empty(a, w, sl, p)) { continue; }
-            if (get_left(a, w, sl, p) == worst_team) {
+            let v = read_pos(a, pos_idx(w, sl, p));
+            if (v == EMPTY_POS) { continue; }
+            if ((v & 0xFu) == worst_team) {
                 if (gc < 3u) { gs[gc] = sl; gp[gc] = p; gside[gc] = 0u; gc += 1u; }
-            } else if (get_right(a, w, sl, p) == worst_team) {
+            } else if (((v >> 4u) & 0xFu) == worst_team) {
                 if (gc < 3u) { gs[gc] = sl; gp[gc] = p; gside[gc] = 1u; gc += 1u; }
             }
         }
     }
 
-    // Find worst transition
     var worst_idx = 0u;
     var worst_trans = 0u;
     for (var g = 0u; g < gc - 1u; g++) {
@@ -712,7 +842,6 @@ fn move_guided_lane_switch(a: ptr<function, array<u32, 200>>, s: ptr<function, a
         if (pen > worst_trans) { worst_trans = pen; worst_idx = g; }
     }
 
-    // Try to fix: opponent-swap team from one pair to match the other
     let pick = rng_range(s, 2u);
     var fix_s = gs[worst_idx]; var fix_p = gp[worst_idx]; var fix_side = gside[worst_idx]; var target_p = gp[worst_idx + 1u];
     if (pick == 1u) { fix_s = gs[worst_idx + 1u]; fix_p = gp[worst_idx + 1u]; fix_side = gside[worst_idx + 1u]; target_p = gp[worst_idx]; }
@@ -731,283 +860,11 @@ fn move_guided_lane_switch(a: ptr<function, array<u32, 200>>, s: ptr<function, a
     return false;
 }
 
-// Move 7: guided_slot — find worst slot imbalance, team_swap into target slot
-fn move_guided_slot(a: ptr<function, array<u32, 200>>, s: ptr<function, array<u32, 4>>) -> bool {
-    var sc: array<u32, 15>;
-    for (var i = 0u; i < 15u; i++) { sc[i] = 0u; }
+// ═══════════════════════════════════════════════════════════════════════
+// Move 10: guided_break_fix — fix post-break lane switches
+// ═══════════════════════════════════════════════════════════════════════
 
-    for (var w = 0u; w < WEEKS; w++) {
-        for (var sl = 0u; sl < SLOTS; sl++) {
-            for (var p = 0u; p < PAIRS; p++) {
-                if (is_empty(a, w, sl, p)) { continue; }
-                let t1 = get_left(a, w, sl, p);
-                let t2 = get_right(a, w, sl, p);
-                let si1 = t1 * SLOTS + sl;
-                sc[si1 / 4u] += (1u << ((si1 % 4u) * 8u));
-                let si2 = t2 * SLOTS + sl;
-                sc[si2 / 4u] += (1u << ((si2 % 4u) * 8u));
-            }
-        }
-    }
-
-    let slot4_target = f32(4u * WEEKS) / f32(TEAMS);
-    let slot03_target = (f32(WEEKS * 3u) - slot4_target) / 4.0;
-
-    var worst_team = 0u; var worst_slot = 0u; var worst_dev = 0.0;
-    for (var t = 0u; t < TEAMS; t++) {
-        for (var sl = 0u; sl < SLOTS; sl++) {
-            let si = t * SLOTS + sl;
-            let count = (sc[si / 4u] >> ((si % 4u) * 8u)) & 0xFFu;
-            var tgt = slot03_target;
-            if (sl == 4u) { tgt = slot4_target; }
-            let dev = tgt - f32(count); // positive = underrepresented
-            if (dev > worst_dev) { worst_dev = dev; worst_team = t; worst_slot = sl; }
-        }
-    }
-    if (worst_dev < 1.0) { return false; }
-
-    // Find worst_team NOT in worst_slot, team_swap with someone in worst_slot
-    let wstart = rng_range(s, WEEKS);
-    for (var off = 0u; off < WEEKS; off++) {
-        let w = (wstart + off) % WEEKS;
-
-        // Find worst_team in a different slot (the "from" position)
-        var sf = 99u; var pf = 99u; var side_f = 99u;
-        for (var sl = 0u; sl < SLOTS; sl++) {
-            if (sl == worst_slot) { continue; }
-            for (var p = 0u; p < PAIRS; p++) {
-                if (is_empty(a, w, sl, p)) { continue; }
-                if (get_left(a, w, sl, p) == worst_team) {
-                    sf = sl; pf = p; side_f = 0u;
-                } else if (get_right(a, w, sl, p) == worst_team) {
-                    sf = sl; pf = p; side_f = 1u;
-                }
-            }
-        }
-        if (sf == 99u) { continue; }
-
-        // Find a matchup in worst_slot to swap with
-        let pstart = rng_range(s, PAIRS);
-        for (var poff = 0u; poff < PAIRS; poff++) {
-            let pt = (pstart + poff) % PAIRS;
-            if (!is_valid_pos(worst_slot, pt)) { continue; }
-            if (is_empty(a, w, worst_slot, pt)) { continue; }
-
-            let side_t = rng_range(s, 2u);
-            let their_team = get_side(a, w, worst_slot, pt, side_t);
-
-            // Check constraints
-            if (team_in_slot(a, w, worst_slot, worst_team, pt)) { continue; }
-            if (team_in_slot(a, w, sf, their_team, pf)) { continue; }
-            let my_opp = get_side(a, w, sf, pf, 1u - side_f);
-            let their_opp = get_side(a, w, worst_slot, pt, 1u - side_t);
-            if (my_opp == their_team || their_opp == worst_team) { continue; }
-
-            // Perform team swap
-            set_side(a, w, sf, pf, side_f, their_team);
-            set_side(a, w, worst_slot, pt, side_t, worst_team);
-            return true;
-        }
-    }
-    return false;
-}
-
-// Move 9: pair_swap_in_slot — swap two entire matchups between lane pairs in same slot
-fn move_pair_swap_in_slot(a: ptr<function, array<u32, 200>>, s: ptr<function, array<u32, 4>>) -> bool {
-    let w = rng_range(s, WEEKS);
-    let sl = rng_range(s, SLOTS);
-    let p1 = rng_range(s, PAIRS);
-    if (!is_valid_pos(sl, p1)) { return false; }
-    if (is_empty(a, w, sl, p1)) { return false; }
-    var p2 = rng_range(s, PAIRS - 1u);
-    if (p2 >= p1) { p2 += 1u; }
-    if (!is_valid_pos(sl, p2)) { return false; }
-    if (is_empty(a, w, sl, p2)) { return false; }
-
-    let tmp = (*a)[pos_idx(w, sl, p1)];
-    (*a)[pos_idx(w, sl, p1)] = (*a)[pos_idx(w, sl, p2)];
-    (*a)[pos_idx(w, sl, p2)] = tmp;
-    return true;
-}
-
-// Move 10: guided_lane_cross_slot — fix lane imbalance via team_swap across slots
-fn move_guided_lane_cross_slot(a: ptr<function, array<u32, 200>>, s: ptr<function, array<u32, 4>>) -> bool {
-    var lc: array<u32, 12>;
-    for (var i = 0u; i < 12u; i++) { lc[i] = 0u; }
-
-    for (var w = 0u; w < WEEKS; w++) {
-        for (var sl = 0u; sl < SLOTS; sl++) {
-            for (var p = 0u; p < PAIRS; p++) {
-                if (is_empty(a, w, sl, p)) { continue; }
-                let t1 = get_left(a, w, sl, p);
-                let t2 = get_right(a, w, sl, p);
-                let l1 = t1 * LANES + p;
-                lc[l1 / 4u] += (1u << ((l1 % 4u) * 8u));
-                let l2 = t2 * LANES + p;
-                lc[l2 / 4u] += (1u << ((l2 % 4u) * 8u));
-            }
-        }
-    }
-
-    let tgt = f32(WEEKS * 3u) / f32(LANES);
-    var worst_team = 0u; var worst_lane = 0u; var worst_dev = 0.0; var worst_over = false;
-    for (var t = 0u; t < TEAMS; t++) {
-        for (var l = 0u; l < LANES; l++) {
-            let li = t * LANES + l;
-            let count = (lc[li / 4u] >> ((li % 4u) * 8u)) & 0xFFu;
-            let dev = f32(count) - tgt;
-            if (abs(dev) > worst_dev) { worst_dev = abs(dev); worst_team = t; worst_lane = l; worst_over = dev > 0.0; }
-        }
-    }
-    if (worst_dev < 1.0) { return false; }
-
-    let w = rng_range(s, WEEKS);
-    // Find worst_team on source lane
-    var sf = 99u; var pf = 99u; var side_f = 99u;
-    for (var sl = 0u; sl < SLOTS; sl++) {
-        for (var p = 0u; p < PAIRS; p++) {
-            if (is_empty(a, w, sl, p)) { continue; }
-            let matches = (worst_over && p == worst_lane) || (!worst_over && p != worst_lane);
-            if (!matches) { continue; }
-            if (get_left(a, w, sl, p) == worst_team) { sf = sl; pf = p; side_f = 0u; }
-            else if (get_right(a, w, sl, p) == worst_team) { sf = sl; pf = p; side_f = 1u; }
-        }
-    }
-    if (sf == 99u) { return false; }
-
-    // Find target in different slot on different lane
-    let sl_start = rng_range(s, SLOTS);
-    for (var sl_off = 0u; sl_off < SLOTS; sl_off++) {
-        let st = (sl_start + sl_off) % SLOTS;
-        if (st == sf) { continue; }
-        let p_start = rng_range(s, PAIRS);
-        for (var p_off = 0u; p_off < PAIRS; p_off++) {
-            let pt = (p_start + p_off) % PAIRS;
-            if (!is_valid_pos(st, pt)) { continue; }
-            if (is_empty(a, w, st, pt)) { continue; }
-            let on_target = (worst_over && pt != worst_lane) || (!worst_over && pt == worst_lane);
-            if (!on_target) { continue; }
-
-            let side_t = rng_range(s, 2u);
-            let their_team = get_side(a, w, st, pt, side_t);
-
-            if (team_in_slot(a, w, st, worst_team, pt)) { continue; }
-            if (team_in_slot(a, w, sf, their_team, pf)) { continue; }
-            let my_opp = get_side(a, w, sf, pf, 1u - side_f);
-            let their_opp = get_side(a, w, st, pt, 1u - side_t);
-            if (my_opp == their_team || their_opp == worst_team) { continue; }
-
-            set_side(a, w, sf, pf, side_f, their_team);
-            set_side(a, w, st, pt, side_t, worst_team);
-            return true;
-        }
-    }
-    return false;
-}
-
-// Move 11: lane_chase — multi-week compound move to fix worst lane imbalance
-fn move_lane_chase(a: ptr<function, array<u32, 200>>, s: ptr<function, array<u32, 4>>) -> bool {
-    // Compute lane counts (packed: 12 teams × 4 lanes = 48 bytes = 12 u32s)
-    var lc: array<u32, 12>;
-    for (var i = 0u; i < 12u; i++) { lc[i] = 0u; }
-
-    for (var w = 0u; w < WEEKS; w++) {
-        for (var sl = 0u; sl < SLOTS; sl++) {
-            for (var p = 0u; p < PAIRS; p++) {
-                if (is_empty(a, w, sl, p)) { continue; }
-                let t1 = get_left(a, w, sl, p);
-                let t2 = get_right(a, w, sl, p);
-                let l1 = t1 * LANES + p;
-                lc[l1 / 4u] += (1u << ((l1 % 4u) * 8u));
-                let l2 = t2 * LANES + p;
-                lc[l2 / 4u] += (1u << ((l2 % 4u) * 8u));
-            }
-        }
-    }
-
-    let tgt = f32(WEEKS * 3u) / f32(LANES);
-    var worst_team = 0u; var worst_lane = 0u; var worst_dev = 0.0; var worst_over = false;
-    for (var t = 0u; t < TEAMS; t++) {
-        for (var l = 0u; l < LANES; l++) {
-            let li = t * LANES + l;
-            let count = (lc[li / 4u] >> ((li % 4u) * 8u)) & 0xFFu;
-            let dev = f32(count) - tgt;
-            if (abs(dev) > worst_dev) { worst_dev = abs(dev); worst_team = t; worst_lane = l; worst_over = dev > 0.0; }
-        }
-    }
-    if (worst_dev < 1.0) { return false; }
-
-    var changed = false;
-    let w_start = rng_range(s, WEEKS);
-
-    for (var w_off = 0u; w_off < WEEKS; w_off++) {
-        let w = (w_start + w_off) % WEEKS;
-
-        // Find worst_team on source lane in this week
-        var sf = 99u; var pf = 99u; var side_f = 99u;
-        for (var sl = 0u; sl < SLOTS; sl++) {
-            for (var p = 0u; p < PAIRS; p++) {
-                if (is_empty(a, w, sl, p)) { continue; }
-                let matches = (worst_over && p == worst_lane) || (!worst_over && p != worst_lane);
-                if (!matches) { continue; }
-                if (get_left(a, w, sl, p) == worst_team) { sf = sl; pf = p; side_f = 0u; }
-                else if (get_right(a, w, sl, p) == worst_team) { sf = sl; pf = p; side_f = 1u; }
-            }
-        }
-        if (sf == 99u) { continue; }
-
-        // Strategy 1: pair-swap within same slot
-        var did_pair_swap = false;
-        for (var tp = 0u; tp < PAIRS; tp++) {
-            if (tp == pf) { continue; }
-            if (!is_valid_pos(sf, tp)) { continue; }
-            if (is_empty(a, w, sf, tp)) { continue; }
-            let on_target = (worst_over && tp != worst_lane) || (!worst_over && tp == worst_lane);
-            if (!on_target) { continue; }
-
-            let tmp = (*a)[pos_idx(w, sf, pf)];
-            (*a)[pos_idx(w, sf, pf)] = (*a)[pos_idx(w, sf, tp)];
-            (*a)[pos_idx(w, sf, tp)] = tmp;
-            changed = true;
-            did_pair_swap = true;
-            break;
-        }
-        if (did_pair_swap) { continue; }
-
-        // Strategy 2: team_swap across slots
-        var did_team_swap = false;
-        for (var st = 0u; st < SLOTS; st++) {
-            if (st == sf) { continue; }
-            if (did_team_swap) { break; }
-            for (var pt = 0u; pt < PAIRS; pt++) {
-                if (!is_valid_pos(st, pt)) { continue; }
-                if (is_empty(a, w, st, pt)) { continue; }
-                let on_target = (worst_over && pt != worst_lane) || (!worst_over && pt == worst_lane);
-                if (!on_target) { continue; }
-
-                let side_t = rng_range(s, 2u);
-                let their_team = get_side(a, w, st, pt, side_t);
-
-                if (team_in_slot(a, w, st, worst_team, pt)) { continue; }
-                if (team_in_slot(a, w, sf, their_team, pf)) { continue; }
-                let my_opp = get_side(a, w, sf, pf, 1u - side_f);
-                let their_opp = get_side(a, w, st, pt, 1u - side_t);
-                if (my_opp == their_team || their_opp == worst_team) { continue; }
-
-                set_side(a, w, sf, pf, side_f, their_team);
-                set_side(a, w, st, pt, side_t, worst_team);
-                changed = true;
-                did_team_swap = true;
-                break;
-            }
-        }
-    }
-
-    return changed;
-}
-
-// Move 12: guided_break_fix — fix post-break lane switches by aligning isolated game
-fn move_guided_break_fix(a: ptr<function, array<u32, 200>>, s: ptr<function, array<u32, 4>>) -> bool {
+fn move_guided_break_fix(a: ptr<function, array<u32, 50>>, s: ptr<function, array<u32, 4>>) -> bool {
     let w = rng_range(s, WEEKS);
     let t_start = rng_range(s, TEAMS);
 
@@ -1019,29 +876,26 @@ fn move_guided_break_fix(a: ptr<function, array<u32, 200>>, s: ptr<function, arr
         var gc = 0u;
         for (var sl = 0u; sl < SLOTS; sl++) {
             for (var p = 0u; p < PAIRS; p++) {
-                if (is_empty(a, w, sl, p)) { continue; }
-                if (get_left(a, w, sl, p) == t) {
+                let v = read_pos(a, pos_idx(w, sl, p));
+                if (v == EMPTY_POS) { continue; }
+                if ((v & 0xFu) == t) {
                     if (gc < 3u) { gs[gc] = sl; gp[gc] = p; gside[gc] = 0u; gc += 1u; }
-                } else if (get_right(a, w, sl, p) == t) {
+                } else if (((v >> 4u) & 0xFu) == t) {
                     if (gc < 3u) { gs[gc] = sl; gp[gc] = p; gside[gc] = 1u; gc += 1u; }
                 }
             }
         }
         if (gc < 2u) { continue; }
 
-        // Find a post-break lane change
         for (var i = 0u; i < gc - 1u; i++) {
             let gap = gs[i + 1u] - gs[i] - 1u;
             if (gap == 0u || gp[i] == gp[i + 1u]) { continue; }
 
-            // Determine which game to fix and target pair
             var fix_idx = i;
             var target_pair = gp[i + 1u];
-            // If first game is isolated (next two consecutive), fix first
             if (i == 0u && gc > 2u && gs[2] == gs[1] + 1u) {
                 fix_idx = 0u; target_pair = gp[1];
             } else if (i + 1u == gc - 1u && i > 0u && gs[i] == gs[i - 1u] + 1u) {
-                // Last game is isolated (prev two consecutive), fix last
                 fix_idx = i + 1u; target_pair = gp[i];
             } else {
                 let pick = rng_range(s, 2u);
@@ -1070,189 +924,6 @@ fn move_guided_break_fix(a: ptr<function, array<u32, 200>>, s: ptr<function, arr
     return false;
 }
 
-// Move 13: guided_lane_safe — lane balance fix that avoids creating lane switches
-fn move_guided_lane_safe(a: ptr<function, array<u32, 200>>, s: ptr<function, array<u32, 4>>) -> bool {
-    var lc: array<u32, 12>;
-    for (var i = 0u; i < 12u; i++) { lc[i] = 0u; }
-
-    for (var w = 0u; w < WEEKS; w++) {
-        for (var sl = 0u; sl < SLOTS; sl++) {
-            for (var p = 0u; p < PAIRS; p++) {
-                if (is_empty(a, w, sl, p)) { continue; }
-                let t1 = get_left(a, w, sl, p);
-                let t2 = get_right(a, w, sl, p);
-                let l1 = t1 * LANES + p;
-                lc[l1 / 4u] += (1u << ((l1 % 4u) * 8u));
-                let l2 = t2 * LANES + p;
-                lc[l2 / 4u] += (1u << ((l2 % 4u) * 8u));
-            }
-        }
-    }
-
-    let tgt = f32(WEEKS * 3u) / f32(LANES);
-    var worst_team = 0u; var worst_lane = 0u; var worst_dev = 0.0; var worst_over = false;
-    for (var t = 0u; t < TEAMS; t++) {
-        for (var l = 0u; l < LANES; l++) {
-            let li = t * LANES + l;
-            let count = (lc[li / 4u] >> ((li % 4u) * 8u)) & 0xFFu;
-            let dev = f32(count) - tgt;
-            if (abs(dev) > worst_dev) { worst_dev = abs(dev); worst_team = t; worst_lane = l; worst_over = dev > 0.0; }
-        }
-    }
-    if (worst_dev < 1.0) { return false; }
-
-    let wstart = rng_range(s, WEEKS);
-    for (var off = 0u; off < WEEKS; off++) {
-        let w = (wstart + off) % WEEKS;
-
-        // Find worst_team's games this week
-        var gs: array<u32, 3>;
-        var gp: array<u32, 3>;
-        var gside: array<u32, 3>;
-        var gc = 0u;
-        for (var sl = 0u; sl < SLOTS; sl++) {
-            for (var p = 0u; p < PAIRS; p++) {
-                if (is_empty(a, w, sl, p)) { continue; }
-                if (get_left(a, w, sl, p) == worst_team) {
-                    if (gc < 3u) { gs[gc] = sl; gp[gc] = p; gside[gc] = 0u; gc += 1u; }
-                } else if (get_right(a, w, sl, p) == worst_team) {
-                    if (gc < 3u) { gs[gc] = sl; gp[gc] = p; gside[gc] = 1u; gc += 1u; }
-                }
-            }
-        }
-        if (gc == 0u) { continue; }
-
-        // Find a game on the source lane
-        var src_idx = 99u;
-        for (var g = 0u; g < gc; g++) {
-            let matches = (worst_over && gp[g] == worst_lane) || (!worst_over && gp[g] != worst_lane);
-            if (matches) { src_idx = g; break; }
-        }
-        if (src_idx == 99u) { continue; }
-
-        // Find adjacent game's lane pair
-        var adj_pair = 99u;
-        if (src_idx > 0u && gs[src_idx] - gs[src_idx - 1u] <= 1u) {
-            adj_pair = gp[src_idx - 1u];
-        }
-        if (adj_pair == 99u && src_idx + 1u < gc && gs[src_idx + 1u] - gs[src_idx] <= 1u) {
-            adj_pair = gp[src_idx + 1u];
-        }
-        if (adj_pair == 99u || adj_pair == gp[src_idx]) { continue; }
-
-        // Check swap helps balance
-        let helps = (worst_over && adj_pair != worst_lane) || (!worst_over && adj_pair == worst_lane);
-        if (!helps) { continue; }
-
-        let fix_s = gs[src_idx];
-        let fix_p = gp[src_idx];
-        let fix_side = gside[src_idx];
-
-        if (!is_valid_pos(fix_s, adj_pair)) { continue; }
-        if (is_empty(a, w, fix_s, adj_pair)) { continue; }
-
-        let swap_side = rng_range(s, 2u);
-        let their_team = get_side(a, w, fix_s, adj_pair, swap_side);
-        let my_opp = get_side(a, w, fix_s, fix_p, 1u - fix_side);
-        let their_opp = get_side(a, w, fix_s, adj_pair, 1u - swap_side);
-        if (my_opp == their_team || their_opp == worst_team) { continue; }
-
-        set_side(a, w, fix_s, fix_p, fix_side, their_team);
-        set_side(a, w, fix_s, adj_pair, swap_side, worst_team);
-        return true;
-    }
-    return false;
-}
-
-// Move 14: guided_lane_pair — swap two teams with complementary lane imbalances
-fn move_guided_lane_pair(a: ptr<function, array<u32, 200>>, s: ptr<function, array<u32, 4>>) -> bool {
-    var lc: array<u32, 12>;
-    for (var i = 0u; i < 12u; i++) { lc[i] = 0u; }
-
-    for (var w = 0u; w < WEEKS; w++) {
-        for (var sl = 0u; sl < SLOTS; sl++) {
-            for (var p = 0u; p < PAIRS; p++) {
-                if (is_empty(a, w, sl, p)) { continue; }
-                let t1 = get_left(a, w, sl, p);
-                let t2 = get_right(a, w, sl, p);
-                let l1 = t1 * LANES + p;
-                lc[l1 / 4u] += (1u << ((l1 % 4u) * 8u));
-                let l2 = t2 * LANES + p;
-                lc[l2 / 4u] += (1u << ((l2 % 4u) * 8u));
-            }
-        }
-    }
-
-    let tgt = f32(WEEKS * 3u) / f32(LANES);
-
-    // Find team_a with worst overrepresented lane
-    let ta_start = rng_range(s, TEAMS);
-    for (var ta_off = 0u; ta_off < TEAMS; ta_off++) {
-        let ta = (ta_start + ta_off) % TEAMS;
-        var best_lane_a = 0u; var best_dev_a = 0.0;
-        for (var l = 0u; l < LANES; l++) {
-            let li = ta * LANES + l;
-            let count = (lc[li / 4u] >> ((li % 4u) * 8u)) & 0xFFu;
-            let dev = f32(count) - tgt;
-            if (dev > best_dev_a) { best_dev_a = dev; best_lane_a = l; }
-        }
-        if (best_dev_a < 1.0) { continue; }
-
-        // Find complementary team_b
-        for (var tb = 0u; tb < TEAMS; tb++) {
-            if (tb == ta) { continue; }
-            var best_lane_b = 0u; var best_dev_b = 0.0;
-            for (var l = 0u; l < LANES; l++) {
-                let li = tb * LANES + l;
-                let count = (lc[li / 4u] >> ((li % 4u) * 8u)) & 0xFFu;
-                let dev = f32(count) - tgt;
-                if (dev > best_dev_b) { best_dev_b = dev; best_lane_b = l; }
-            }
-            if (best_dev_b < 1.0 || best_lane_b == best_lane_a) { continue; }
-
-            // Check complementary
-            let li_ta_lb = ta * LANES + best_lane_b;
-            let ta_on_lb = f32((lc[li_ta_lb / 4u] >> ((li_ta_lb % 4u) * 8u)) & 0xFFu) - tgt;
-            let li_tb_la = tb * LANES + best_lane_a;
-            let tb_on_la = f32((lc[li_tb_la / 4u] >> ((li_tb_la % 4u) * 8u)) & 0xFFu) - tgt;
-            if (ta_on_lb >= 0.0 || tb_on_la >= 0.0) { continue; }
-
-            // Find week where ta on lane_a and tb on lane_b in same slot
-            let wstart = rng_range(s, WEEKS);
-            for (var woff = 0u; woff < WEEKS; woff++) {
-                let w = (wstart + woff) % WEEKS;
-
-                // Find ta on best_lane_a
-                var sa = 99u; var side_a = 99u;
-                for (var sl = 0u; sl < SLOTS; sl++) {
-                    if (is_empty(a, w, sl, best_lane_a)) { continue; }
-                    if (get_left(a, w, sl, best_lane_a) == ta) { sa = sl; side_a = 0u; break; }
-                    if (get_right(a, w, sl, best_lane_a) == ta) { sa = sl; side_a = 1u; break; }
-                }
-                if (sa == 99u) { continue; }
-
-                // Find tb on best_lane_b in same slot
-                if (!is_valid_pos(sa, best_lane_b)) { continue; }
-                if (is_empty(a, w, sa, best_lane_b)) { continue; }
-                var side_b = 99u;
-                if (get_left(a, w, sa, best_lane_b) == tb) { side_b = 0u; }
-                else if (get_right(a, w, sa, best_lane_b) == tb) { side_b = 1u; }
-                if (side_b == 99u) { continue; }
-
-                // Check no self-matchup after swap
-                let opp_a = get_side(a, w, sa, best_lane_a, 1u - side_a);
-                let opp_b = get_side(a, w, sa, best_lane_b, 1u - side_b);
-                if (opp_a == tb || opp_b == ta) { continue; }
-
-                set_side(a, w, sa, best_lane_a, side_a, tb);
-                set_side(a, w, sa, best_lane_b, side_b, ta);
-                return true;
-            }
-        }
-    }
-    return false;
-}
-
 // ═══════════════════════════════════════════════════════════════════════
 // Main SA kernel
 // ═══════════════════════════════════════════════════════════════════════
@@ -1265,7 +936,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let base = tid * ASSIGN_SIZE;
     let rng_base = tid * 4u;
 
-    var a: array<u32, 200>;
+    var a: array<u32, 50>;
     for (var i = 0u; i < ASSIGN_SIZE; i++) {
         a[i] = assignments[base + i];
     }
@@ -1288,180 +959,160 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         let move_id = rng_range(&rng, 100u);
 
         if (move_id < move_thresh[0]) {
-            // 0: team_swap
-            var sq = save_all(&a);
+            // 0: team_swap (undo)
+            undo_reset();
             let did = move_team_swap(&a, &rng);
             if (did) {
-                let new_cost = evaluate(&a);
-                let delta = i32(new_cost) - i32(cost);
-                if (sa_accept(delta, temp, &rng)) {
-                    cost = new_cost;
+                let nc = evaluate(&a);
+                let d = i32(nc) - i32(cost);
+                if (sa_accept(d, temp, &rng)) {
+                    cost = nc;
                     if (cost < best_cost) { best_cost = cost; write_best(&a, base); }
-                } else { restore_all(&a, &sq); }
-            } else { restore_all(&a, &sq); }
+                } else { undo_apply(&a); }
+            }
         } else if (move_id < move_thresh[1]) {
-            // 1: matchup_swap
-            var sq = save_all(&a);
+            // 1: matchup_swap (undo)
+            undo_reset();
             let did = move_matchup_swap(&a, &rng);
             if (did) {
-                let new_cost = evaluate(&a);
-                let delta = i32(new_cost) - i32(cost);
-                if (sa_accept(delta, temp, &rng)) {
-                    cost = new_cost;
+                let nc = evaluate(&a);
+                let d = i32(nc) - i32(cost);
+                if (sa_accept(d, temp, &rng)) {
+                    cost = nc;
                     if (cost < best_cost) { best_cost = cost; write_best(&a, base); }
-                } else { restore_all(&a, &sq); }
+                } else { undo_apply(&a); }
             }
         } else if (move_id < move_thresh[2]) {
-            // 2: opponent_swap
-            var sq = save_all(&a);
+            // 2: opponent_swap (undo)
+            undo_reset();
             let did = move_opponent_swap(&a, &rng);
             if (did) {
-                let new_cost = evaluate(&a);
-                let delta = i32(new_cost) - i32(cost);
-                if (sa_accept(delta, temp, &rng)) {
-                    cost = new_cost;
+                let nc = evaluate(&a);
+                let d = i32(nc) - i32(cost);
+                if (sa_accept(d, temp, &rng)) {
+                    cost = nc;
                     if (cost < best_cost) { best_cost = cost; write_best(&a, base); }
-                } else { restore_all(&a, &sq); }
+                } else { undo_apply(&a); }
             }
         } else if (move_id < move_thresh[3]) {
-            // 3: lane_swap_week
-            var sq = save_all(&a);
-            move_lane_swap_week(&a, &rng);
-            let new_cost = evaluate(&a);
-            let delta = i32(new_cost) - i32(cost);
-            if (sa_accept(delta, temp, &rng)) {
-                cost = new_cost;
+            // 3: lane_swap_week (inline, swap reversal)
+            let sw = rng_range(&rng, WEEKS);
+            let sp1 = rng_range(&rng, PAIRS);
+            var sp2 = rng_range(&rng, PAIRS - 1u);
+            if (sp2 >= sp1) { sp2 += 1u; }
+            for (var sl = 0u; sl < SLOTS; sl++) {
+                if (is_valid_pos(sl, sp1) && is_valid_pos(sl, sp2)) {
+                    swap_positions(&a, pos_idx(sw, sl, sp1), pos_idx(sw, sl, sp2));
+                }
+            }
+            let nc = evaluate(&a);
+            let d = i32(nc) - i32(cost);
+            if (sa_accept(d, temp, &rng)) {
+                cost = nc;
                 if (cost < best_cost) { best_cost = cost; write_best(&a, base); }
-            } else { restore_all(&a, &sq); }
+            } else {
+                for (var sl = 0u; sl < SLOTS; sl++) {
+                    if (is_valid_pos(sl, sp1) && is_valid_pos(sl, sp2)) {
+                        swap_positions(&a, pos_idx(sw, sl, sp1), pos_idx(sw, sl, sp2));
+                    }
+                }
+            }
         } else if (move_id < move_thresh[4]) {
-            // 4: slot_swap
-            var sq = save_all(&a);
-            move_slot_swap(&a, &rng);
-            let new_cost = evaluate(&a);
-            let delta = i32(new_cost) - i32(cost);
-            if (sa_accept(delta, temp, &rng)) {
-                cost = new_cost;
+            // 4: slot_swap (inline, swap reversal)
+            let sw = rng_range(&rng, WEEKS);
+            let ss1 = rng_range(&rng, 4u);
+            var ss2 = rng_range(&rng, 3u);
+            if (ss2 >= ss1) { ss2 += 1u; }
+            for (var p = 0u; p < PAIRS; p++) {
+                swap_positions(&a, pos_idx(sw, ss1, p), pos_idx(sw, ss2, p));
+            }
+            let nc = evaluate(&a);
+            let d = i32(nc) - i32(cost);
+            if (sa_accept(d, temp, &rng)) {
+                cost = nc;
                 if (cost < best_cost) { best_cost = cost; write_best(&a, base); }
-            } else { restore_all(&a, &sq); }
+            } else {
+                for (var p = 0u; p < PAIRS; p++) {
+                    swap_positions(&a, pos_idx(sw, ss1, p), pos_idx(sw, ss2, p));
+                }
+            }
         } else if (move_id < move_thresh[5]) {
-            // 5: guided_matchup
-            var sq = save_all(&a);
+            // 5: guided_matchup (undo)
+            undo_reset();
             let did = move_guided_matchup(&a, &rng);
             if (did) {
-                let new_cost = evaluate(&a);
-                let delta = i32(new_cost) - i32(cost);
-                if (sa_accept(delta, temp, &rng)) {
-                    cost = new_cost;
+                let nc = evaluate(&a);
+                let d = i32(nc) - i32(cost);
+                if (sa_accept(d, temp, &rng)) {
+                    cost = nc;
                     if (cost < best_cost) { best_cost = cost; write_best(&a, base); }
-                } else { restore_all(&a, &sq); }
+                } else { undo_apply(&a); }
             }
         } else if (move_id < move_thresh[6]) {
-            // 6: guided_lane
-            var sq = save_all(&a);
+            // 6: guided_lane (undo)
+            undo_reset();
             let did = move_guided_lane(&a, &rng);
             if (did) {
-                let new_cost = evaluate(&a);
-                let delta = i32(new_cost) - i32(cost);
-                if (sa_accept(delta, temp, &rng)) {
-                    cost = new_cost;
+                let nc = evaluate(&a);
+                let d = i32(nc) - i32(cost);
+                if (sa_accept(d, temp, &rng)) {
+                    cost = nc;
                     if (cost < best_cost) { best_cost = cost; write_best(&a, base); }
-                } else { restore_all(&a, &sq); }
+                } else { undo_apply(&a); }
             }
         } else if (move_id < move_thresh[7]) {
-            // 7: guided_slot
-            var sq = save_all(&a);
+            // 7: guided_slot (undo)
+            undo_reset();
             let did = move_guided_slot(&a, &rng);
             if (did) {
-                let new_cost = evaluate(&a);
-                let delta = i32(new_cost) - i32(cost);
-                if (sa_accept(delta, temp, &rng)) {
-                    cost = new_cost;
+                let nc = evaluate(&a);
+                let d = i32(nc) - i32(cost);
+                if (sa_accept(d, temp, &rng)) {
+                    cost = nc;
                     if (cost < best_cost) { best_cost = cost; write_best(&a, base); }
-                } else { restore_all(&a, &sq); }
+                } else { undo_apply(&a); }
             }
         } else if (move_id < move_thresh[8]) {
-            // 8: guided_lane_switch
-            var sq = save_all(&a);
+            // 8: guided_lane_switch (undo)
+            undo_reset();
             let did = move_guided_lane_switch(&a, &rng);
             if (did) {
-                let new_cost = evaluate(&a);
-                let delta = i32(new_cost) - i32(cost);
-                if (sa_accept(delta, temp, &rng)) {
-                    cost = new_cost;
+                let nc = evaluate(&a);
+                let d = i32(nc) - i32(cost);
+                if (sa_accept(d, temp, &rng)) {
+                    cost = nc;
                     if (cost < best_cost) { best_cost = cost; write_best(&a, base); }
-                } else { restore_all(&a, &sq); }
+                } else { undo_apply(&a); }
             }
         } else if (move_id < move_thresh[9]) {
-            // 9: pair_swap_in_slot
-            var sq = save_all(&a);
-            let did = move_pair_swap_in_slot(&a, &rng);
-            if (did) {
-                let new_cost = evaluate(&a);
-                let delta = i32(new_cost) - i32(cost);
-                if (sa_accept(delta, temp, &rng)) {
-                    cost = new_cost;
+            // 9: pair_swap_in_slot (inline, swap reversal)
+            let sw = rng_range(&rng, WEEKS);
+            let ssl = rng_range(&rng, SLOTS);
+            let sp1 = rng_range(&rng, PAIRS);
+            var sp2 = rng_range(&rng, PAIRS - 1u);
+            if (sp2 >= sp1) { sp2 += 1u; }
+            if (is_valid_pos(ssl, sp1) && is_valid_pos(ssl, sp2) && !is_empty(&a, sw, ssl, sp1) && !is_empty(&a, sw, ssl, sp2)) {
+                swap_positions(&a, pos_idx(sw, ssl, sp1), pos_idx(sw, ssl, sp2));
+                let nc = evaluate(&a);
+                let d = i32(nc) - i32(cost);
+                if (sa_accept(d, temp, &rng)) {
+                    cost = nc;
                     if (cost < best_cost) { best_cost = cost; write_best(&a, base); }
-                } else { restore_all(&a, &sq); }
-            }
-        } else if (move_id < move_thresh[10]) {
-            // 10: guided_lane_cross_slot
-            var sq = save_all(&a);
-            let did = move_guided_lane_cross_slot(&a, &rng);
-            if (did) {
-                let new_cost = evaluate(&a);
-                let delta = i32(new_cost) - i32(cost);
-                if (sa_accept(delta, temp, &rng)) {
-                    cost = new_cost;
-                    if (cost < best_cost) { best_cost = cost; write_best(&a, base); }
-                } else { restore_all(&a, &sq); }
-            }
-        } else if (move_id < move_thresh[11]) {
-            // 11: lane_chase
-            var sq = save_all(&a);
-            let did = move_lane_chase(&a, &rng);
-            if (did) {
-                let new_cost = evaluate(&a);
-                let delta = i32(new_cost) - i32(cost);
-                if (sa_accept(delta, temp, &rng)) {
-                    cost = new_cost;
-                    if (cost < best_cost) { best_cost = cost; write_best(&a, base); }
-                } else { restore_all(&a, &sq); }
-            }
-        } else if (move_id < move_thresh[12]) {
-            // 12: guided_break_fix
-            var sq = save_all(&a);
-            let did = move_guided_break_fix(&a, &rng);
-            if (did) {
-                let new_cost = evaluate(&a);
-                let delta = i32(new_cost) - i32(cost);
-                if (sa_accept(delta, temp, &rng)) {
-                    cost = new_cost;
-                    if (cost < best_cost) { best_cost = cost; write_best(&a, base); }
-                } else { restore_all(&a, &sq); }
-            }
-        } else if (move_id < move_thresh[13]) {
-            // 13: guided_lane_safe
-            var sq = save_all(&a);
-            let did = move_guided_lane_safe(&a, &rng);
-            if (did) {
-                let new_cost = evaluate(&a);
-                let delta = i32(new_cost) - i32(cost);
-                if (sa_accept(delta, temp, &rng)) {
-                    cost = new_cost;
-                    if (cost < best_cost) { best_cost = cost; write_best(&a, base); }
-                } else { restore_all(&a, &sq); }
+                } else {
+                    swap_positions(&a, pos_idx(sw, ssl, sp1), pos_idx(sw, ssl, sp2));
+                }
             }
         } else {
-            // 14: guided_lane_pair
-            var sq = save_all(&a);
-            let did = move_guided_lane_pair(&a, &rng);
+            // 10: guided_break_fix (undo)
+            undo_reset();
+            let did = move_guided_break_fix(&a, &rng);
             if (did) {
-                let new_cost = evaluate(&a);
-                let delta = i32(new_cost) - i32(cost);
-                if (sa_accept(delta, temp, &rng)) {
-                    cost = new_cost;
+                let nc = evaluate(&a);
+                let d = i32(nc) - i32(cost);
+                if (sa_accept(d, temp, &rng)) {
+                    cost = nc;
                     if (cost < best_cost) { best_cost = cost; write_best(&a, base); }
-                } else { restore_all(&a, &sq); }
+                } else { undo_apply(&a); }
             }
         }
     }
