@@ -78,6 +78,7 @@ fn reseed_partition_chains(
 pub fn run(shutdown: Arc<AtomicBool>, args: &[String]) {
     let no_seed = args.iter().any(|a| a == "--no-seed");
     let no_cpu = args.iter().any(|a| a == "--no-cpu");
+    let sweep = args.iter().any(|a| a == "--sweep");
 
     let weights_str = fs::read_to_string("summer_fixed_weights.json")
         .or_else(|_| fs::read_to_string("../summer_fixed_weights.json"))
@@ -129,6 +130,7 @@ pub fn run(shutdown: Arc<AtomicBool>, args: &[String]) {
         cpu_temps,
         Arc::clone(&shutdown),
         Arc::clone(&shared_global_best),
+        sweep,
     );
 
     {

@@ -56,6 +56,7 @@ pub fn run_fixed_cpu_workers(
     temps: Vec<f64>,
     shutdown: Arc<AtomicBool>,
     global_best_cost: Arc<AtomicU32>,
+    enable_sweep: bool,
 ) -> FixedCpuWorkers {
     let (report_tx, report_rx) = mpsc::channel();
     let mut cmd_txs = Vec::with_capacity(num_cores);
@@ -75,7 +76,7 @@ pub fn run_fixed_cpu_workers(
         live_bests.push(live_best);
 
         handles.push(thread::spawn(move || {
-            worker_loop(core_id, w8, temp, shutdown, lb, global_best, report_tx, cmd_rx);
+            worker_loop(core_id, w8, temp, shutdown, lb, global_best, enable_sweep, report_tx, cmd_rx);
         }));
     }
     drop(report_tx);
@@ -95,6 +96,7 @@ fn worker_loop(
     shutdown: Arc<AtomicBool>,
     live_best_cost: Arc<AtomicU32>,
     global_best_cost: Arc<AtomicU32>,
+    enable_sweep: bool,
     report_tx: mpsc::Sender<FixedWorkerReport>,
     cmd_rx: mpsc::Receiver<FixedWorkerCommand>,
 ) {
@@ -138,7 +140,7 @@ fn worker_loop(
         }
 
         let is_sweeping = temp <= min_temp + 0.01;
-        if is_sweeping {
+        if is_sweeping && enable_sweep {
             // Run 20 sweep rounds with increasing perturbation, keep overall best
             let mut sweep_best_sched = best_sched;
             let mut sweep_best_cost = best_cost;
@@ -211,6 +213,17 @@ fn worker_loop(
             }
 
             // After sweep, perturb from best and reheat for fresh SA exploration
+            sched = best_sched;
+            bd = evaluate_fixed(&sched, &w8);
+            for _ in 0..5 {
+                let _ = apply_move(&mut sched, 0, &bd, &mut rng);
+            }
+            bd = evaluate_fixed(&sched, &w8);
+            current_cost = bd.total;
+            temp = initial_temp;
+            iterations_since_improve = 0;
+        } else if is_sweeping {
+            // No sweep enabled: perturb from best and reheat
             sched = best_sched;
             bd = evaluate_fixed(&sched, &w8);
             for _ in 0..5 {
