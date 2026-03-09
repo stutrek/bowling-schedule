@@ -319,7 +319,8 @@ export function evaluateSummerCost(
         for (let l = 0; l < S_LANES; l++) {
             const c = laneCnts[t * S_LANES + l];
             const target = l < 2 ? 7 : 8;
-            if (c !== target) laneBalance += w8.lane_balance * Math.abs(c - target);
+            if (c !== target)
+                laneBalance += w8.lane_balance * Math.abs(c - target);
         }
     }
 
