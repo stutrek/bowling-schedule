@@ -32,6 +32,23 @@ struct PartitionState {
     dispatches_since_improvement: u64,
 }
 
+fn maybe_save_result(
+    sched: &FixedSchedule,
+    cost: u32,
+    source_label: &str,
+    results_dir: &str,
+    saved_hashes: &mut HashSet<[u32; FIXED_ASSIGN_U32S]>,
+) {
+    let mut out = *sched;
+    reassign_commissioners(&mut out);
+    let hash = pack_fixed_schedule(&out);
+    if saved_hashes.insert(hash) {
+        let ts = chrono::Local::now().format("%Y%m%d-%H%M%S%z");
+        let filename = format!("{}/{:04}-{}-{}.tsv", results_dir, cost, source_label, ts);
+        let _ = fs::write(&filename, fixed_schedule_to_tsv(&out));
+    }
+}
+
 fn reseed_partition_chains(
     queue: &wgpu::Queue,
     assign_buf: &wgpu::Buffer,
@@ -87,13 +104,11 @@ pub fn run(shutdown: Arc<AtomicBool>, args: &[String]) {
         }
     }
 
-    let mut best_seed: Option<(FixedSchedule, u32)> = None;
-    for s in &seeds {
-        let c = evaluate_fixed(s, &w8).total;
-        if best_seed.as_ref().map_or(true, |(_, bc)| c < *bc) {
-            best_seed = Some((*s, c));
-        }
-    }
+    // Sort seeds by cost (best first)
+    let mut scored_seeds: Vec<(FixedSchedule, u32)> = seeds.iter()
+        .map(|s| (*s, evaluate_fixed(s, &w8).total))
+        .collect();
+    scored_seeds.sort_by_key(|(_, c)| *c);
 
     let available_cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
     let cpu_cores = if no_cpu { 0 } else { available_cores.saturating_sub(2) };
@@ -114,14 +129,18 @@ pub fn run(shutdown: Arc<AtomicBool>, args: &[String]) {
         Arc::clone(&shutdown),
     );
 
-    if let Some((ref seed_s, seed_cost)) = best_seed {
-        let seed_partitions = cpu_cores.min(3);
-        for (i, cmd_tx) in cpu_workers.commands.iter().enumerate().take(seed_partitions) {
+    {
+        let seed_partitions = cpu_cores.min(3).min(scored_seeds.len());
+        for i in 0..seed_partitions {
+            let (ref seed_s, seed_cost) = scored_seeds[i];
             let mut s = *seed_s;
-            perturb_fixed(&mut s, &mut SmallRng::from_os_rng(), 5 + i * 2);
-            let _ = cmd_tx.send(FixedWorkerCommand::SetState(s));
+            perturb_fixed(&mut s, &mut SmallRng::from_os_rng(), 3);
+            let _ = cpu_workers.commands[i].send(FixedWorkerCommand::SetState(s));
+            eprintln!("  CPU {} seeded with cost {}", i, seed_cost);
         }
-        eprintln!("Best seed: cost {} (seeded {} of {} CPU workers)", seed_cost, seed_partitions, cpu_cores);
+        if seed_partitions > 0 {
+            eprintln!("Seeded {} of {} CPU workers", seed_partitions, cpu_cores);
+        }
     }
 
     let chain_count = detect_chain_count(FIXED_ASSIGN_U32S);
@@ -157,7 +176,7 @@ pub fn run(shutdown: Arc<AtomicBool>, args: &[String]) {
     let chains_per_part = if cpu_cores > 0 { chain_count as usize / cpu_cores } else { chain_count as usize };
     let seed_chain_limit = chains_per_part * cpu_cores.min(3);
     for i in 0..chain_count as usize {
-        let s = if i < seeds.len() && i < seed_chain_limit { seeds[i] } else { random_fixed_schedule(&mut rng) };
+        let s = if i < scored_seeds.len() && i < seed_chain_limit { scored_seeds[i].0 } else { random_fixed_schedule(&mut rng) };
         let packed = pack_fixed_schedule(&s);
         let cost = evaluate_fixed(&s, &w8).total;
 
@@ -258,6 +277,20 @@ async fn run_gpu(
     let mut counts_reset_done = false;
     let mut partition_best_cost: Vec<u32> = vec![u32::MAX; cpu_cores];
     let mut saved_hashes: HashSet<[u32; FIXED_ASSIGN_U32S]> = HashSet::new();
+    // Pre-populate from existing result files on disk
+    if let Ok(entries) = fs::read_dir(&results_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().map_or(false, |e| e == "tsv") {
+                if let Ok(contents) = fs::read_to_string(&path) {
+                    if let Some(s) = parse_fixed_tsv(&contents) {
+                        saved_hashes.insert(pack_fixed_schedule(&s));
+                    }
+                }
+            }
+        }
+    }
+    eprintln!("  Loaded {} existing result hashes for dedup", saved_hashes.len());
     let num_workgroups = chain_count as usize / TEMP_LEVELS;
     let chains_per_cpu = if cpu_cores > 0 { chain_count as usize / cpu_cores } else { chain_count as usize };
     let mut partition_medians: Vec<u32> = vec![0; cpu_cores];
@@ -537,14 +570,7 @@ async fn run_gpu(
                     "PARTITION {} NEW BEST {} (was {}) from gpu T={:.1}", pi, gpu_part_cost, prev, temp_val));
 
                 if gpu_part_cost <= SAVE_THRESHOLD {
-                    let mut out = sched;
-                    reassign_commissioners(&mut out);
-                    let hash = pack_fixed_schedule(&out);
-                    if saved_hashes.insert(hash) {
-                        let ts = chrono::Local::now().format("%Y%m%d-%H%M%S%z");
-                        let filename = format!("{}/{:04}-gpu-p{}-{}.tsv", results_dir, gpu_part_cost, pi, ts);
-                        let _ = fs::write(&filename, fixed_schedule_to_tsv(&out));
-                    }
+                    maybe_save_result(&sched, gpu_part_cost, &format!("gpu-p{}", pi), &results_dir, &mut saved_hashes);
                 }
             }
 
@@ -636,14 +662,7 @@ async fn run_gpu(
                         "PARTITION {} NEW BEST {} (was {}) from cpu{}", cid, real_best, prev, cid));
 
                     if real_best <= SAVE_THRESHOLD {
-                        let mut out = report.best_sched;
-                        reassign_commissioners(&mut out);
-                        let hash = pack_fixed_schedule(&out);
-                        if saved_hashes.insert(hash) {
-                            let ts = chrono::Local::now().format("%Y%m%d-%H%M%S%z");
-                            let filename = format!("{}/{:04}-cpu{}-{}.tsv", results_dir, real_best, cid, ts);
-                            let _ = fs::write(&filename, fixed_schedule_to_tsv(&out));
-                        }
+                        maybe_save_result(&report.best_sched, real_best, &format!("cpu{}", cid), &results_dir, &mut saved_hashes);
                     }
                 }
                 if real_best < global_best_cost {
