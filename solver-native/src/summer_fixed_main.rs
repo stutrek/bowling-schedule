@@ -7,6 +7,7 @@ use crate::gpu_types_summer_fixed::*;
 use crate::output::*;
 use crate::output_summer_fixed::*;
 use solver_core::summer_fixed::*;
+use std::collections::HashSet;
 use std::fs;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -16,7 +17,7 @@ const SYNC_INTERVAL: u64 = 10;
 const STAGNATION_DISPATCHES: u64 = 900;
 const ESCALATION_DISPATCHES: u64 = 4500;
 const VERIFY_INTERVAL_SECS: u64 = 30;
-const SAVE_THRESHOLD: u32 = 200;
+const SAVE_THRESHOLD: u32 = 350;
 const FIXED_GPU_TEMP_MIN: f64 = 6.0;
 const FIXED_GPU_TEMP_MAX: f64 = 16.0;
 const FIXED_CPU_TEMP_MIN: f64 = 8.0;
@@ -114,12 +115,13 @@ pub fn run(shutdown: Arc<AtomicBool>, args: &[String]) {
     );
 
     if let Some((ref seed_s, seed_cost)) = best_seed {
-        for (i, cmd_tx) in cpu_workers.commands.iter().enumerate() {
+        let seed_partitions = cpu_cores.min(3);
+        for (i, cmd_tx) in cpu_workers.commands.iter().enumerate().take(seed_partitions) {
             let mut s = *seed_s;
             perturb_fixed(&mut s, &mut SmallRng::from_os_rng(), 5 + i * 2);
             let _ = cmd_tx.send(FixedWorkerCommand::SetState(s));
         }
-        eprintln!("Best seed: cost {}", seed_cost);
+        eprintln!("Best seed: cost {} (seeded {} of {} CPU workers)", seed_cost, seed_partitions, cpu_cores);
     }
 
     let chain_count = detect_chain_count(FIXED_ASSIGN_U32S);
@@ -152,8 +154,10 @@ pub fn run(shutdown: Arc<AtomicBool>, args: &[String]) {
     let mut best_assign_data = vec![0u32; chain_count as usize * FIXED_ASSIGN_U32S];
     let mut best_cost_data = vec![u32::MAX; chain_count as usize];
 
+    let chains_per_part = if cpu_cores > 0 { chain_count as usize / cpu_cores } else { chain_count as usize };
+    let seed_chain_limit = chains_per_part * cpu_cores.min(3);
     for i in 0..chain_count as usize {
-        let s = if i < seeds.len() { seeds[i] } else { random_fixed_schedule(&mut rng) };
+        let s = if i < seeds.len() && i < seed_chain_limit { seeds[i] } else { random_fixed_schedule(&mut rng) };
         let packed = pack_fixed_schedule(&s);
         let cost = evaluate_fixed(&s, &w8).total;
 
@@ -176,7 +180,8 @@ pub fn run(shutdown: Arc<AtomicBool>, args: &[String]) {
         game5_lane_balance: w8.game5_lane_balance,
         same_lane_balance: w8.same_lane_balance,
         commissioner_overlap: w8.commissioner_overlap,
-        _pad0: 0, _pad1: 0,
+        matchup_spacing: w8.matchup_spacing,
+        _pad0: 0,
     };
 
     let gpu_params = GpuParams {
@@ -252,6 +257,7 @@ async fn run_gpu(
     let mut partition_gpu_seeded: Vec<u32> = vec![0; cpu_cores];
     let mut counts_reset_done = false;
     let mut partition_best_cost: Vec<u32> = vec![u32::MAX; cpu_cores];
+    let mut saved_hashes: HashSet<[u32; FIXED_ASSIGN_U32S]> = HashSet::new();
     let num_workgroups = chain_count as usize / TEMP_LEVELS;
     let chains_per_cpu = if cpu_cores > 0 { chain_count as usize / cpu_cores } else { chain_count as usize };
     let mut partition_medians: Vec<u32> = vec![0; cpu_cores];
@@ -531,11 +537,14 @@ async fn run_gpu(
                     "PARTITION {} NEW BEST {} (was {}) from gpu T={:.1}", pi, gpu_part_cost, prev, temp_val));
 
                 if gpu_part_cost <= SAVE_THRESHOLD {
-                    let ts = chrono::Local::now().format("%Y%m%d-%H%M%S%z");
-                    let filename = format!("{}/{:04}-gpu-p{}-{}.tsv", results_dir, gpu_part_cost, pi, ts);
                     let mut out = sched;
                     reassign_commissioners(&mut out);
-                    let _ = fs::write(&filename, fixed_schedule_to_tsv(&out));
+                    let hash = pack_fixed_schedule(&out);
+                    if saved_hashes.insert(hash) {
+                        let ts = chrono::Local::now().format("%Y%m%d-%H%M%S%z");
+                        let filename = format!("{}/{:04}-gpu-p{}-{}.tsv", results_dir, gpu_part_cost, pi, ts);
+                        let _ = fs::write(&filename, fixed_schedule_to_tsv(&out));
+                    }
                 }
             }
 
@@ -627,11 +636,14 @@ async fn run_gpu(
                         "PARTITION {} NEW BEST {} (was {}) from cpu{}", cid, real_best, prev, cid));
 
                     if real_best <= SAVE_THRESHOLD {
-                        let ts = chrono::Local::now().format("%Y%m%d-%H%M%S%z");
-                        let filename = format!("{}/{:04}-cpu{}-{}.tsv", results_dir, real_best, cid, ts);
                         let mut out = report.best_sched;
                         reassign_commissioners(&mut out);
-                        let _ = fs::write(&filename, fixed_schedule_to_tsv(&out));
+                        let hash = pack_fixed_schedule(&out);
+                        if saved_hashes.insert(hash) {
+                            let ts = chrono::Local::now().format("%Y%m%d-%H%M%S%z");
+                            let filename = format!("{}/{:04}-cpu{}-{}.tsv", results_dir, real_best, cid, ts);
+                            let _ = fs::write(&filename, fixed_schedule_to_tsv(&out));
+                        }
                     }
                 }
                 if real_best < global_best_cost {

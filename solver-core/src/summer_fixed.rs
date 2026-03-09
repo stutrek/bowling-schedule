@@ -108,6 +108,7 @@ pub struct FixedWeights {
     pub game5_lane_balance: u32,
     pub same_lane_balance: u32,
     pub commissioner_overlap: u32,
+    pub matchup_spacing: u32,
 }
 
 #[derive(Clone, Debug)]
@@ -118,20 +119,22 @@ pub struct FixedCostBreakdown {
     pub game5_lane_balance: u32,
     pub same_lane_balance: u32,
     pub commissioner_overlap: u32,
+    pub matchup_spacing: u32,
     pub total: u32,
 }
 
 pub fn fixed_cost_label(c: &FixedCostBreakdown) -> String {
     format!(
-        "total: {:>4} matchup: {:>3} slot: {:>3} lane: {:>3} g5lane: {:>3} same: {:>3} comm: {:>3}",
+        "total: {:>4} matchup: {:>3} slot: {:>3} lane: {:>3} g5lane: {:>3} same: {:>3} comm: {:>3} spacing: {:>3}",
         c.total, c.matchup_balance, c.slot_balance,
         c.lane_balance, c.game5_lane_balance, c.same_lane_balance, c.commissioner_overlap,
+        c.matchup_spacing,
     )
 }
 
-pub const NUM_COST_COMPONENTS: usize = 6;
+pub const NUM_COST_COMPONENTS: usize = 7;
 pub const COST_LABELS: [&str; NUM_COST_COMPONENTS] = [
-    "matchup", "slot", "lane", "g5lane", "same", "comm",
+    "matchup", "slot", "lane", "g5lane", "same", "comm", "spacing",
 ];
 
 /// Generate a random schedule (random permutation per week, random lane swaps).
@@ -300,8 +303,45 @@ pub fn evaluate_fixed(sched: &FixedSchedule, w8: &FixedWeights) -> FixedCostBrea
     }
     let commissioner_overlap = w8.commissioner_overlap * min_co;
 
+    // --- Matchup spacing: penalize pairs that play too close together ---
+    // 2 total matchups → need 4+ weeks apart; 3 total → need 2+ weeks apart
+    // Use bitmask per pair (10 weeks = 10 bits) to match GPU approach
+    let mut pair_week_bits = [0u16; SF_PAIRS];
+    for w in 0..SF_WEEKS {
+        for entry in &TEMPLATE {
+            let ta = sched.mapping[w][entry.pos_a as usize] as usize;
+            let tb = sched.mapping[w][entry.pos_b as usize] as usize;
+            let lo = ta.min(tb);
+            let hi = ta.max(tb);
+            let idx = lo * (2 * SF_TEAMS - lo - 1) / 2 + (hi - lo - 1);
+            pair_week_bits[idx] |= 1 << w;
+        }
+    }
+    let mut matchup_spacing: u32 = 0;
+    for p in 0..SF_PAIRS {
+        let c = matchup_counts[p];
+        if c < 2 { continue; }
+        let min_gap: u8 = if c == 2 { 4 } else { 2 };
+        let bits = pair_week_bits[p];
+        let mut prev_week = 0u8;
+        let mut found_first = false;
+        for w in 0..SF_WEEKS as u8 {
+            if bits & (1 << w) != 0 {
+                if found_first {
+                    let gap = w - prev_week;
+                    if gap < min_gap {
+                        matchup_spacing += w8.matchup_spacing;
+                    }
+                }
+                prev_week = w;
+                found_first = true;
+            }
+        }
+    }
+
     let total = matchup_balance + slot_balance
-        + lane_balance + game5_lane_balance + same_lane_balance + commissioner_overlap;
+        + lane_balance + game5_lane_balance + same_lane_balance + commissioner_overlap
+        + matchup_spacing;
 
     FixedCostBreakdown {
         matchup_balance,
@@ -310,6 +350,7 @@ pub fn evaluate_fixed(sched: &FixedSchedule, w8: &FixedWeights) -> FixedCostBrea
         game5_lane_balance,
         same_lane_balance,
         commissioner_overlap,
+        matchup_spacing,
         total,
     }
 }
@@ -323,6 +364,7 @@ pub fn worst_component(bd: &FixedCostBreakdown) -> usize {
         bd.game5_lane_balance,
         bd.same_lane_balance,
         bd.commissioner_overlap,
+        bd.matchup_spacing,
     ];
     let mut worst = 0;
     for i in 1..components.len() {
@@ -353,6 +395,7 @@ pub fn pick_move(rng: &mut SmallRng, bd: &FixedCostBreakdown) -> usize {
             2 | 3 => 6, // lane balance / game5 lane → guided lane
             4 => 0, // same lane → team swap (change position assignments)
             5 => 0, // commissioner → team swap
+            6 => 3, // matchup spacing → week swap (redistribute timing)
             _ => 0,
         }
     } else {
@@ -731,6 +774,7 @@ pub fn perturb_fixed(sched: &mut FixedSchedule, rng: &mut SmallRng, n: usize) {
     let bd = evaluate_fixed(sched, &FixedWeights {
         matchup_balance: 80, slot_balance: 60, lane_balance: 60,
         game5_lane_balance: 40, same_lane_balance: 40, commissioner_overlap: 30,
+        matchup_spacing: 10,
     });
     for _ in 0..n {
         let move_id = rng.random_range(0..4u32) as usize;
@@ -889,6 +933,7 @@ mod tests {
             game5_lane_balance: 40,
             same_lane_balance: 40,
             commissioner_overlap: 30,
+            matchup_spacing: 10,
         }
     }
 

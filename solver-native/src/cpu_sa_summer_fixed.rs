@@ -27,6 +27,7 @@ pub struct FixedWorkerReport {
     pub best_cost: u32,
     pub current_sched: FixedSchedule,
     pub current_cost: u32,
+    pub current_temp: f64,
     pub iterations_total: u64,
     pub iterations_since_improve: u64,
     pub move_rates: [f64; NUM_MOVES],
@@ -97,6 +98,7 @@ fn worker_loop(
     let min_temp: f64 = 0.1;
     let mut iterations_since_improve: u64 = 0;
     let mut iterations_total: u64 = 0;
+    let mut refinement_cycles: u32 = 0;
 
     let mut move_attempts = [0u64; NUM_MOVES];
     let mut move_accepts = [0u64; NUM_MOVES];
@@ -117,6 +119,7 @@ fn worker_loop(
                         live_best_cost.store(best_cost, Ordering::Relaxed);
                     }
                     iterations_since_improve = 0;
+                    refinement_cycles = 0;
                 }
                 FixedWorkerCommand::SetTemp(t) => {
                     temp = t;
@@ -174,6 +177,7 @@ fn worker_loop(
             best_cost,
             current_sched: sched,
             current_cost,
+            current_temp: temp,
             iterations_total,
             iterations_since_improve,
             move_rates: rates,
@@ -188,16 +192,31 @@ fn worker_loop(
             stats_iters = 0;
         }
 
-        // Reheat if stagnant
-        if iterations_since_improve > 500_000 {
-            temp = initial_temp;
+        // Reheat if stagnant — tiered strategy
+        // Refinement phase: short stagnation threshold, low temperature restart from best
+        // Escalation: after several failed refinements, do a full reheat for exploration
+        let stagnation_threshold = if refinement_cycles < 3 { 200_000 } else { 500_000 };
+        if iterations_since_improve > stagnation_threshold {
             sched = best_sched;
-            for _ in 0..5 {
-                let _ = apply_move(&mut sched, 0, &bd, &mut rng);
+            if refinement_cycles < 3 {
+                // Refinement: low temperature to polish near the best
+                temp = initial_temp * 0.25;
+                let perturbations = 2 + refinement_cycles as usize;
+                for _ in 0..perturbations {
+                    let _ = apply_move(&mut sched, 0, &bd, &mut rng);
+                }
+            } else {
+                // Escalation: full reheat for broader exploration
+                temp = initial_temp;
+                for _ in 0..5 {
+                    let _ = apply_move(&mut sched, 0, &bd, &mut rng);
+                }
+                refinement_cycles = 0;
             }
             bd = evaluate_fixed(&sched, &w8);
             current_cost = bd.total;
             iterations_since_improve = 0;
+            refinement_cycles += 1;
         }
     }
 }

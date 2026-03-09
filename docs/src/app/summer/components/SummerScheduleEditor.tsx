@@ -12,8 +12,14 @@ import {
 } from '../lib/summer-schedule-utils';
 
 export default function SummerScheduleEditor() {
-    const { schedule, cost, highlightInput, setHighlightInput, importTSV } =
-        useSummerSchedule();
+    const {
+        schedule,
+        cost,
+        violations,
+        highlightInput,
+        setHighlightInput,
+        importTSV,
+    } = useSummerSchedule();
 
     const [copied, setCopied] = useState(false);
     const copiedTimer = useRef<ReturnType<typeof setTimeout>>();
@@ -33,6 +39,17 @@ export default function SummerScheduleEditor() {
             return `${base} ring-2 ring-amber-400 bg-amber-50`;
         }
         return base;
+    }
+
+    function hasSpacingViolation(
+        week: number,
+        teamA: number,
+        teamB: number,
+    ): boolean {
+        if (!violations) return false;
+        const lo = Math.min(teamA, teamB);
+        const hi = Math.max(teamA, teamB);
+        return violations.spacingPairs.has(`${week}-${lo}-${hi}`);
     }
 
     function copyTSV() {
@@ -119,11 +136,18 @@ export default function SummerScheduleEditor() {
                                         (_, pair) => {
                                             const m =
                                                 schedule[week][slot][pair];
+                                            const violated = m
+                                                ? hasSpacingViolation(
+                                                      week,
+                                                      m.teamA,
+                                                      m.teamB,
+                                                  )
+                                                : false;
                                             return (
                                                 <td
                                                     // biome-ignore lint/suspicious/noArrayIndexKey: stable grid
                                                     key={pair}
-                                                    className="text-center whitespace-nowrap px-0.5"
+                                                    className={`text-center whitespace-nowrap px-0.5 ${violated ? 'bg-red-100 border-l-2 border-red-500' : ''}`}
                                                 >
                                                     {m ? (
                                                         <>

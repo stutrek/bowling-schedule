@@ -15,8 +15,8 @@ pub struct GpuFixedWeights {
     pub game5_lane_balance: u32,
     pub same_lane_balance: u32,
     pub commissioner_overlap: u32,
+    pub matchup_spacing: u32,
     pub _pad0: u32,
-    pub _pad1: u32,
 }
 
 #[repr(C)]
@@ -87,6 +87,7 @@ mod tests {
         let w8 = FixedWeights {
             matchup_balance: 80, slot_balance: 60, lane_balance: 60,
             game5_lane_balance: 40, same_lane_balance: 40, commissioner_overlap: 30,
+            matchup_spacing: 10,
         };
         for _ in 0..20 {
             let sched = random_fixed_schedule(&mut rng);

@@ -41,6 +41,8 @@ struct Weights {
     game5_lane_balance: u32,
     same_lane_balance: u32,
     commissioner_overlap: u32,
+    matchup_spacing: u32,
+    _pad0: u32,
 }
 
 struct Params {
@@ -310,6 +312,50 @@ fn evaluate(base: u32) -> u32 {
         }
     }
     cost += weights.commissioner_overlap * min_co;
+
+    // 7. Matchup spacing: penalize pairs whose matchups are too close together
+    // 2 total matchups → need 4+ weeks apart; 3 total → need 2+ weeks apart
+    // Per-pair week bitmask: 10 weeks fit in 10 bits per pair
+    // Pack pair week-bits: 3 pairs per u32 (10 bits each), need ceil(66/3) = 22 u32s
+    var pw: array<u32, 22>;
+    for (var i = 0u; i < 22u; i++) { pw[i] = 0u; }
+
+    for (var w = 0u; w < WEEKS; w++) {
+        for (var e = 0u; e < TEMPLATE_SIZE; e++) {
+            let ta = get_team(base, w, T_POS_A[e]);
+            let tb = get_team(base, w, T_POS_B[e]);
+            let pi = pair_idx(ta, tb);
+            let word = pi / 3u;
+            let slot_shift = (pi % 3u) * 10u;
+            pw[word] |= (1u << w) << slot_shift;
+        }
+    }
+
+    // Check spacing for each pair using matchup counts from section 1
+    for (var i = 0u; i < NUM_PAIRS; i++) {
+        let c = (mc[i / 8u] >> ((i % 8u) * 4u)) & 0xFu;
+        if (c < 2u) { continue; }
+        let min_gap = select(2u, 4u, c == 2u);
+        let word = i / 3u;
+        let slot_shift = (i % 3u) * 10u;
+        let bits = (pw[word] >> slot_shift) & 0x3FFu; // 10 bits of week presence
+
+        // Extract ordered week indices and check gaps
+        var prev_week: u32 = 0u;
+        var found_first: bool = false;
+        for (var w = 0u; w < WEEKS; w++) {
+            if ((bits & (1u << w)) != 0u) {
+                if (found_first) {
+                    let gap = w - prev_week;
+                    if (gap < min_gap) {
+                        cost += weights.matchup_spacing;
+                    }
+                }
+                prev_week = w;
+                found_first = true;
+            }
+        }
+    }
 
     return cost;
 }

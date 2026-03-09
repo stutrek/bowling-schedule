@@ -50,9 +50,9 @@ pub fn print_fixed_table_banner(
 
 pub fn print_fixed_table_header() {
     eprintln!(
-        "{:>4} {:>5}  {:>5} {:>5}  {:>9} {:>9} {:>9} {:>9} {:>9} {:>9}  {:>6}  {}\x1b[K",
+        "{:>4} {:>9}  {:>5} {:>5}  {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9}  {:>6}  {}\x1b[K",
         "src", "temp", "cur", "best",
-        "matchup", "slot", "lane", "g5lane", "same", "comm",
+        "matchup", "slot", "lane", "g5lane", "same", "comm", "spacing",
         "stag", "state",
     );
 }
@@ -62,7 +62,7 @@ pub fn print_fixed_cpu_row(
     report: &FixedWorkerReport,
     w8: &FixedWeights,
     meta: &FixedWorkerMeta,
-    temp: f64,
+    initial_temp: f64,
     _stagnation: u64,
 ) {
     let cur_bd = evaluate_fixed(&report.current_sched, w8);
@@ -72,10 +72,11 @@ pub fn print_fixed_cpu_row(
     let bold = if since < 30 { "\x1b[1m" } else { "" };
     let reset = if since < 30 { "\x1b[0m" } else { "" };
     let stag_k = report.iterations_since_improve / 1000;
+    let temp_str = format!("{:.0}/{:.1}", initial_temp, report.current_temp);
     eprintln!(
-        "{}cpu{:<1} {:>5.1}  {:>5} {:>5}  {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4}  {:>5}k  {}{}\x1b[K",
+        "{}cpu{:<1} {:>9}  {:>5} {:>5}  {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4}  {:>5}k  {}{}\x1b[K",
         bold,
-        core_id, temp,
+        core_id, temp_str,
         cur_bd.total, best_bd.total,
         cur_bd.matchup_balance, best_bd.matchup_balance,
         cur_bd.slot_balance, best_bd.slot_balance,
@@ -83,6 +84,7 @@ pub fn print_fixed_cpu_row(
         cur_bd.game5_lane_balance, best_bd.game5_lane_balance,
         cur_bd.same_lane_balance, best_bd.same_lane_balance,
         cur_bd.commissioner_overlap, best_bd.commissioner_overlap,
+        cur_bd.matchup_spacing, best_bd.matchup_spacing,
         stag_k,
         state, reset,
     );

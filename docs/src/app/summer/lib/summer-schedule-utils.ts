@@ -23,7 +23,12 @@ export interface SummerCostBreakdown {
     game5LaneBalance: number;
     sameLaneBalance: number;
     commissionerOverlap: number;
+    matchupSpacing: number;
     total: number;
+}
+
+export interface SummerViolations {
+    spacingPairs: Set<string>; // "week-lo-hi" for matchups too close together
 }
 
 export interface SummerAnalysis {
@@ -355,13 +360,46 @@ export function evaluateSummerCost(
     }
     const commissionerOverlap = w8.commissioner_overlap * minCo;
 
+    // 7. Matchup spacing: penalize pairs playing too close together
+    // 2 total matchups → need 4+ weeks apart; 3 total → need 2+ weeks apart
+    const pairWeeks: number[][] = Array.from(
+        { length: S_TEAMS * S_TEAMS },
+        () => [],
+    );
+    for (let w = 0; w < S_WEEKS; w++) {
+        for (let s = 0; s < S_SLOTS; s++) {
+            for (let p = 0; p < S_PAIRS; p++) {
+                const m = schedule[w][s][p];
+                if (!m) continue;
+                const lo = Math.min(m.teamA, m.teamB);
+                const hi = Math.max(m.teamA, m.teamB);
+                pairWeeks[lo * S_TEAMS + hi].push(w);
+            }
+        }
+    }
+    let matchupSpacing = 0;
+    for (let i = 0; i < S_TEAMS; i++) {
+        for (let j = i + 1; j < S_TEAMS; j++) {
+            const weeks = pairWeeks[i * S_TEAMS + j];
+            if (weeks.length < 2) continue;
+            weeks.sort((a, b) => a - b);
+            const minGap = weeks.length === 2 ? 4 : 2;
+            for (let k = 1; k < weeks.length; k++) {
+                if (weeks[k] - weeks[k - 1] < minGap) {
+                    matchupSpacing += w8.matchup_spacing;
+                }
+            }
+        }
+    }
+
     const total =
         matchupBalance +
         slotBalance +
         laneBalance +
         game5LaneBalance +
         sameLaneBalance +
-        commissionerOverlap;
+        commissionerOverlap +
+        matchupSpacing;
 
     return {
         matchupBalance,
@@ -370,6 +408,46 @@ export function evaluateSummerCost(
         game5LaneBalance,
         sameLaneBalance,
         commissionerOverlap,
+        matchupSpacing,
         total,
     };
+}
+
+export function computeSummerViolations(
+    schedule: SummerSchedule,
+): SummerViolations {
+    // Build per-pair week lists
+    const pairWeeks: number[][] = Array.from(
+        { length: S_TEAMS * S_TEAMS },
+        () => [],
+    );
+    for (let w = 0; w < S_WEEKS; w++) {
+        for (let s = 0; s < S_SLOTS; s++) {
+            for (let p = 0; p < S_PAIRS; p++) {
+                const m = schedule[w][s][p];
+                if (!m) continue;
+                const lo = Math.min(m.teamA, m.teamB);
+                const hi = Math.max(m.teamA, m.teamB);
+                pairWeeks[lo * S_TEAMS + hi].push(w);
+            }
+        }
+    }
+
+    const spacingPairs = new Set<string>();
+    for (let i = 0; i < S_TEAMS; i++) {
+        for (let j = i + 1; j < S_TEAMS; j++) {
+            const weeks = pairWeeks[i * S_TEAMS + j];
+            if (weeks.length < 2) continue;
+            weeks.sort((a, b) => a - b);
+            const minGap = weeks.length === 2 ? 4 : 2;
+            for (let k = 1; k < weeks.length; k++) {
+                if (weeks[k] - weeks[k - 1] < minGap) {
+                    spacingPairs.add(`${weeks[k - 1]}-${i}-${j}`);
+                    spacingPairs.add(`${weeks[k]}-${i}-${j}`);
+                }
+            }
+        }
+    }
+
+    return { spacingPairs };
 }

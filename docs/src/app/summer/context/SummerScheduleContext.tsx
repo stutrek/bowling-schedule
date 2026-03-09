@@ -11,17 +11,20 @@ import type {
     SummerSchedule,
     SummerCostBreakdown,
     SummerAnalysis,
+    SummerViolations,
 } from '../lib/summer-schedule-utils';
 import {
     parseSummerTSV,
     analyzeSummerSchedule,
     evaluateSummerCost,
+    computeSummerViolations,
 } from '../lib/summer-schedule-utils';
 
 interface SummerScheduleContextValue {
     schedule: SummerSchedule | null;
     cost: SummerCostBreakdown | null;
     analysis: SummerAnalysis | null;
+    violations: SummerViolations | null;
     highlightInput: string;
     resultFiles: string[];
     importTSV: (text: string) => boolean;
@@ -46,6 +49,7 @@ export function SummerScheduleProvider({ children }: { children: ReactNode }) {
     const [schedule, setSchedule] = useState<SummerSchedule | null>(null);
     const [cost, setCost] = useState<SummerCostBreakdown | null>(null);
     const [analysis, setAnalysis] = useState<SummerAnalysis | null>(null);
+    const [violations, setViolations] = useState<SummerViolations | null>(null);
     const [highlightInput, setHighlightInput] = useState('');
     const [resultFiles, setResultFiles] = useState<string[]>([]);
 
@@ -53,6 +57,7 @@ export function SummerScheduleProvider({ children }: { children: ReactNode }) {
         setSchedule(s);
         setCost(evaluateSummerCost(s));
         setAnalysis(analyzeSummerSchedule(s));
+        setViolations(computeSummerViolations(s));
     }
 
     function importTSV(text: string): boolean {
@@ -106,6 +111,7 @@ export function SummerScheduleProvider({ children }: { children: ReactNode }) {
                 schedule,
                 cost,
                 analysis,
+                violations,
                 highlightInput,
                 resultFiles,
                 importTSV,

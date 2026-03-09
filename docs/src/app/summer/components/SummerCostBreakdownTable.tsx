@@ -37,6 +37,11 @@ export default function SummerCostBreakdownTable() {
             value: cost.commissionerOverlap,
             desc: 'Min pair co-appearance in games 1 and 5',
         },
+        {
+            label: 'Matchup spacing',
+            value: cost.matchupSpacing,
+            desc: '2 matchups: 4+ weeks apart; 3 matchups: 2+ weeks apart',
+        },
     ];
 
     return (
