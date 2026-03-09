@@ -227,7 +227,7 @@ pub fn evaluate_fixed(sched: &FixedSchedule, w8: &FixedWeights) -> FixedCostBrea
     for t in 0..SF_TEAMS {
         for l in 0..SF_LANES {
             let c = lane_counts[t * SF_LANES + l];
-            let (lo, hi) = if l < 2 { (6, 7) } else { (8, 9) };
+            let (lo, hi) = if l < 2 { (7, 7) } else { (8, 8) };
             if c < lo || c > hi {
                 let dist = if c < lo { lo - c } else { c - hi };
                 lane_balance += w8.lane_balance * dist;
@@ -1111,7 +1111,7 @@ fn move_guided_lane(
     for t in 0..SF_TEAMS {
         for l in 0..SF_LANES {
             let c = lane_counts[t * SF_LANES + l];
-            let (lo, hi) = if l < 2 { (6, 7) } else { (8, 9) };
+            let (lo, hi) = if l < 2 { (7, 7) } else { (8, 8) };
             let excess = if c > hi { c - hi } else if c < lo { lo - c } else { 0 };
             if excess > worst_excess {
                 worst_excess = excess;

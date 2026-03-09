@@ -20,7 +20,7 @@ export default function SummerCostBreakdownTable() {
         {
             label: 'Lane balance',
             value: cost.laneBalance,
-            desc: 'Lanes 1-2: 6-7 times; Lanes 3-4: 8-9 times',
+            desc: 'Lanes 1-2: 7 times; Lanes 3-4: 8 times',
         },
         {
             label: 'Game 5 lane balance',

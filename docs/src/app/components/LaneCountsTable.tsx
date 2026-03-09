@@ -28,7 +28,7 @@ export default function LaneCountsTable() {
 
     return (
         <>
-            <h2>Lane Counts</h2>
+            <h2>Lane Balance</h2>
             <div className="overflow-x-auto">
                 <table className="text-sm">
                     <thead>

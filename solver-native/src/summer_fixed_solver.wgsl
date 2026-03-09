@@ -233,11 +233,11 @@ fn evaluate(base: u32) -> u32 {
             let idx = t * 4u + l;
             let c = (lc[idx / 4u] >> ((idx % 4u) * 8u)) & 0xFFu;
             if (l < 2u) {
-                if (c < 6u) { cost += weights.lane_balance * (6u - c); }
+                if (c < 7u) { cost += weights.lane_balance * (7u - c); }
                 else if (c > 7u) { cost += weights.lane_balance * (c - 7u); }
             } else {
                 if (c < 8u) { cost += weights.lane_balance * (8u - c); }
-                else if (c > 9u) { cost += weights.lane_balance * (c - 9u); }
+                else if (c > 8u) { cost += weights.lane_balance * (c - 8u); }
             }
         }
     }
@@ -560,9 +560,9 @@ fn move_guided_lane(base: u32) {
             let c = (lc[idx / 4u] >> ((idx % 4u) * 8u)) & 0xFFu;
             var excess: u32 = 0u;
             if (l < 2u) {
-                if (c < 6u) { excess = 6u - c; } else if (c > 7u) { excess = c - 7u; }
+                if (c < 7u) { excess = 7u - c; } else if (c > 7u) { excess = c - 7u; }
             } else {
-                if (c < 8u) { excess = 8u - c; } else if (c > 9u) { excess = c - 9u; }
+                if (c < 8u) { excess = 8u - c; } else if (c > 8u) { excess = c - 8u; }
             }
             if (excess > worst_excess) {
                 worst_excess = excess;

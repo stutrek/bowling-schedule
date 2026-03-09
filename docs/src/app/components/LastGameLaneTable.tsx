@@ -19,7 +19,7 @@ export default function LastGameLaneTable() {
 
     return (
         <>
-            <h2>Last Game Lane Counts</h2>
+            <h2>Last Game Lane Balance</h2>
             <div className="overflow-x-auto">
                 <table className="text-sm">
                     <thead>

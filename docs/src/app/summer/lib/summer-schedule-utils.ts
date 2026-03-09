@@ -37,6 +37,7 @@ export interface SummerAnalysis {
     slotCounts: number[][]; // [slot][team] count
     teamWeekSlots: number[][][]; // [team][week] -> sorted slot indices
     laneSwitchCounts: { consecutive: number; postBreak: number }[]; // per team
+    sameLaneCounts: number[]; // per team: weeks where all slot 0-3 games are on the same lane
 }
 
 export function isValidPosition(slot: number, pair: number): boolean {
@@ -190,12 +191,37 @@ export function analyzeSummerSchedule(
         }
     }
 
+    // Same lane counts: weeks where team's slot 0-3 games are all on the same lane
+    const sameLaneCounts = new Array(S_TEAMS).fill(0);
+    for (let w = 0; w < S_WEEKS; w++) {
+        for (let t = 0; t < S_TEAMS; t++) {
+            const lanes: number[] = [];
+            for (let s = 0; s < 4; s++) {
+                for (let p = 0; p < S_PAIRS; p++) {
+                    const m = schedule[w][s][p];
+                    if (!m) continue;
+                    if (m.teamA === t || m.teamB === t) {
+                        lanes.push(p);
+                    }
+                }
+            }
+            if (
+                lanes.length === 3 &&
+                lanes[0] === lanes[1] &&
+                lanes[1] === lanes[2]
+            ) {
+                sameLaneCounts[t]++;
+            }
+        }
+    }
+
     return {
         matchups,
         laneCounts,
         slotCounts,
         teamWeekSlots,
         laneSwitchCounts,
+        sameLaneCounts,
     };
 }
 
@@ -287,14 +313,13 @@ export function evaluateSummerCost(
         }
     }
 
-    // 3. Lane balance: lanes 0-1 target [6,7], lanes 2-3 target [8,9], scaled by distance
+    // 3. Lane balance: lanes 0-1 target 7, lanes 2-3 target 8, scaled by distance
     let laneBalance = 0;
     for (let t = 0; t < S_TEAMS; t++) {
         for (let l = 0; l < S_LANES; l++) {
             const c = laneCnts[t * S_LANES + l];
-            const [lo, hi] = l < 2 ? [6, 7] : [8, 9];
-            if (c < lo) laneBalance += w8.lane_balance * (lo - c);
-            else if (c > hi) laneBalance += w8.lane_balance * (c - hi);
+            const target = l < 2 ? 7 : 8;
+            if (c !== target) laneBalance += w8.lane_balance * Math.abs(c - target);
         }
     }
 
