@@ -159,7 +159,7 @@ All four basic moves are self-inverse (applying the same move again undoes it). 
 
 ### Summer results
 
-Best known result: **cost 140**. Results are saved to `solver-native/results/summer-fixed/`.
+Best known result: **cost 120**. Results are saved to `solver-native/results/summer-fixed/`.
 
 ### Running the summer solver
 
