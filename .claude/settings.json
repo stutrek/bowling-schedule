@@ -2,7 +2,9 @@
     "permissions": {
         "allow": [
             "Bash(cargo build --release -p solver-native --bin summer_fixed_solver)",
-            "Bash(cargo check -p solver-native)"
+            "Bash(cargo check -p solver-native)",
+            "Bash(cargo check -p solver-core)",
+            "Bash(cargo test -p solver-core test_sweep_undoes_perturbation -- --nocapture)"
         ]
     }
 }

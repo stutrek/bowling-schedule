@@ -10,6 +10,7 @@ pub struct FixedWorkerMeta {
     pub prev_iterations: u64,
     pub prev_iter_time: Instant,
     pub iters_per_sec: u64,
+    pub best_found_at: Instant,
 }
 
 fn fmt_ips(ips: u64) -> String {
@@ -68,9 +69,13 @@ pub fn print_fixed_cpu_row(
     let cur_bd = evaluate_fixed(&report.current_sched, w8);
     let best_bd = evaluate_fixed(&report.best_sched, w8);
     let since = meta.reseeded_at.elapsed().as_secs();
-    let state = if since < 30 { format!("shook+{}s", since) } else { "normal".to_string() };
-    let bold = if since < 30 { "\x1b[1m" } else { "" };
-    let reset = if since < 30 { "\x1b[0m" } else { "" };
+    let state = if let Some((cur, total)) = report.sweep_round {
+            format!("SWEEP {}/{}", cur, total)
+        } else if since < 30 { format!("shook+{}s", since) }
+        else { "normal".to_string() };
+    let best_age = meta.best_found_at.elapsed().as_secs();
+    let bold = if best_age < 10 { "\x1b[1m" } else { "" };
+    let reset = if best_age < 10 { "\x1b[0m" } else { "" };
     let stag_k = report.iterations_since_improve / 1000;
     let temp_str = format!("{:.0}/{:.1}", initial_temp, report.current_temp);
     eprintln!(
@@ -89,3 +94,5 @@ pub fn print_fixed_cpu_row(
         state, reset,
     );
 }
+
+

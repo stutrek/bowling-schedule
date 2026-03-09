@@ -9,7 +9,7 @@ use crate::output_summer_fixed::*;
 use solver_core::summer_fixed::*;
 use std::collections::HashSet;
 use std::fs;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -122,11 +122,13 @@ pub fn run(shutdown: Arc<AtomicBool>, args: &[String]) {
     };
     let cpu_temps_display = cpu_temps.clone();
 
+    let shared_global_best = Arc::new(AtomicU32::new(u32::MAX));
     let cpu_workers = cpu_sa::run_fixed_cpu_workers(
         cpu_cores,
         w8.clone(),
         cpu_temps,
         Arc::clone(&shutdown),
+        Arc::clone(&shared_global_best),
     );
 
     {
@@ -215,7 +217,7 @@ pub fn run(shutdown: Arc<AtomicBool>, args: &[String]) {
     pollster::block_on(run_gpu(
         assign_data, best_assign_data, cost_data, best_cost_data, rng_data,
         gpu_weights, gpu_params, w8, results_dir.to_string(), shutdown, rng,
-        cpu_workers, cpu_cores, cpu_temps_display,
+        cpu_workers, cpu_cores, cpu_temps_display, shared_global_best,
     ));
 }
 
@@ -235,6 +237,7 @@ async fn run_gpu(
     cpu_workers: FixedCpuWorkers,
     cpu_cores: usize,
     cpu_temps_display: Vec<f64>,
+    shared_global_best: Arc<AtomicU32>,
 ) {
     let chain_count = gpu_params.chain_count;
     let mut chain_source: Vec<String> = vec!["random".to_string(); chain_count as usize];
@@ -265,6 +268,7 @@ async fn run_gpu(
         prev_iterations: 0,
         prev_iter_time: Instant::now(),
         iters_per_sec: 0,
+        best_found_at: Instant::now(),
     }).collect();
 
     let mut global_best_meta = GlobalBestMeta {
@@ -274,6 +278,8 @@ async fn run_gpu(
     let mut partition_cpu_bests: Vec<u32> = vec![0; cpu_cores];
     let mut partition_gpu_bests: Vec<u32> = vec![0; cpu_cores];
     let mut partition_gpu_seeded: Vec<u32> = vec![0; cpu_cores];
+    let mut partition_sweep_bests: Vec<u32> = vec![0; cpu_cores];
+    let mut sweep_start_cost: Vec<u32> = vec![u32::MAX; cpu_cores];
     let mut counts_reset_done = false;
     let mut partition_best_cost: Vec<u32> = vec![u32::MAX; cpu_cores];
     let mut saved_hashes: HashSet<[u32; FIXED_ASSIGN_U32S]> = HashSet::new();
@@ -366,14 +372,14 @@ async fn run_gpu(
                     {
                         let part_hdr: Vec<String> = (0..cpu_cores).map(|i| format!("{:>11}", i)).collect();
                         let part_vals: Vec<String> = (0..cpu_cores).map(|i| {
-                            let v = format!("{}/{}({})", partition_cpu_bests[i], partition_gpu_bests[i], partition_gpu_seeded[i]);
+                            let v = format!("{}/{}/{}", partition_cpu_bests[i], partition_gpu_bests[i], partition_sweep_bests[i]);
                             format!("{:>11}", v)
                         }).collect();
                         let gpu_meds: Vec<String> = (0..cpu_cores).map(|pi| {
                             format!("{:>11}", partition_medians[pi])
                         }).collect();
                         eprintln!("  partition:{}\x1b[K", part_hdr.join(""));
-                        eprintln!("  cpu/gpu:  {}\x1b[K", part_vals.join(""));
+                        eprintln!("  cpu/gpu/swp:{}\x1b[K", part_vals.join(""));
                         eprintln!("  gpu med:  {}\x1b[K", gpu_meds.join(""));
                         lines += 3;
                         if exchange_reset_time.elapsed().as_secs() >= 300 {
@@ -495,6 +501,7 @@ async fn run_gpu(
                 partition_cpu_bests[i] = 0;
                 partition_gpu_bests[i] = 0;
                 partition_gpu_seeded[i] = 0;
+                partition_sweep_bests[i] = 0;
             }
             event!(start_time.elapsed(), "RESET partition counters");
         }
@@ -566,6 +573,7 @@ async fn run_gpu(
                 partition_best_cost[pi] = gpu_part_cost;
                 partitions[pi].dispatches_since_improvement = 0;
                 partition_gpu_bests[pi] += 1;
+                worker_metas[pi].best_found_at = Instant::now();
                 event!(start_time.elapsed(), &format!(
                     "PARTITION {} NEW BEST {} (was {}) from gpu T={:.1}", pi, gpu_part_cost, prev, temp_val));
 
@@ -576,10 +584,11 @@ async fn run_gpu(
 
             if gpu_part_cost < global_best_cost {
                 global_best_cost = gpu_part_cost;
+                shared_global_best.store(global_best_cost, Ordering::Relaxed);
                 global_best_sched = Some(sched);
                 partitions[pi].dispatches_since_improvement = 0;
                 global_best_meta = GlobalBestMeta {
-                    source: format!("gpu-T{:.1}", temp_val),
+                    source: format!("gpu-p{}-T{:.1}", pi, temp_val),
                     found_at: Instant::now(),
                 };
 
@@ -590,6 +599,10 @@ async fn run_gpu(
                     &mut chain_source, &w8,
                     &sched, &format!("gpu-p{}", pi), p_start, p_end,
                 );
+
+                // Push new global best to the owning CPU worker only
+                let _ = cpu_workers.commands[pi].send(FixedWorkerCommand::SetState(sched));
+                worker_metas[pi].reseeded_at = Instant::now();
             }
         }
 
@@ -649,13 +662,40 @@ async fn run_gpu(
         // 4. Drain CPU reports
         while let Ok(report) = cpu_workers.reports.try_recv() {
             let cid = report.core_id;
+            // Track sweep start/end for logging
+            let was_sweeping = worker_metas.get(cid).and_then(|m| m.last_report.as_ref())
+                .and_then(|r| r.sweep_round).is_some();
+            let is_sweeping = report.sweep_round.is_some();
+            if is_sweeping && !was_sweeping {
+                if cid < sweep_start_cost.len() {
+                    sweep_start_cost[cid] = partition_best_cost[cid];
+                }
+                event!(start_time.elapsed(), &format!(
+                    "cpu{} SWEEP started (best={})", cid, partition_best_cost.get(cid).copied().unwrap_or(0)));
+            }
+            if !is_sweeping && was_sweeping {
+                let start = sweep_start_cost.get(cid).copied().unwrap_or(u32::MAX);
+                let now = partition_best_cost.get(cid).copied().unwrap_or(u32::MAX);
+                if now < start {
+                    event!(start_time.elapsed(), &format!(
+                        "cpu{} SWEEP done: improved {} → {}", cid, start, now));
+                } else {
+                    event!(start_time.elapsed(), &format!(
+                        "cpu{} SWEEP done: no improvement (best={})", cid, now));
+                }
+            }
             if cid < worker_metas.len() {
                 let real_best = evaluate_fixed(&report.best_sched, &w8).total;
                 if real_best < partition_best_cost[cid] {
                     let prev = partition_best_cost[cid];
                     partition_best_cost[cid] = real_best;
                     partitions[cid].dispatches_since_improvement = 0;
-                    partition_cpu_bests[cid] += 1;
+                    worker_metas[cid].best_found_at = Instant::now();
+                    if report.sweep_round.is_some() {
+                        partition_sweep_bests[cid] += 1;
+                    } else {
+                        partition_cpu_bests[cid] += 1;
+                    }
                     let since_reseed = worker_metas[cid].reseeded_at.elapsed().as_secs();
                     if since_reseed < 30 { partition_gpu_seeded[cid] += 1; }
                     event!(start_time.elapsed(), &format!(
@@ -667,6 +707,7 @@ async fn run_gpu(
                 }
                 if real_best < global_best_cost {
                     global_best_cost = real_best;
+                    shared_global_best.store(global_best_cost, Ordering::Relaxed);
                     global_best_sched = Some(report.best_sched);
                     partitions[cid].dispatches_since_improvement = 0;
                     global_best_meta = GlobalBestMeta {
@@ -682,6 +723,7 @@ async fn run_gpu(
                         &mut chain_source, &w8,
                         &report.best_sched, &format!("cpu{}", cid), p_start, p_end,
                     );
+
                 }
                 let dt = worker_metas[cid].prev_iter_time.elapsed().as_secs_f64();
                 if dt >= 1.0 {
@@ -800,9 +842,6 @@ async fn run_gpu(
                         &mut chain_source, &w8,
                         &seed_sched, &source_label, p_start, p_end,
                     );
-                    let _ = cpu_workers.commands[pi].send(FixedWorkerCommand::SetState(seed_sched));
-                    worker_metas[pi].reseeded_at = Instant::now();
-                    worker_metas[pi].cost_at_reseed = evaluate_fixed(&seed_sched, &w8).total;
                 }
                 maybe_print_table!();
             }

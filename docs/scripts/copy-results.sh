@@ -89,7 +89,7 @@ summer_skipped=0
 for f in "$SUMMER_SRC"/*.tsv; do
     [ -f "$f" ] || continue
     score=$(basename "$f" | cut -c1-4)
-    if [ "$score" -lt 1750 ] 2>/dev/null; then
+    if [ "$score" -lt 500 ] 2>/dev/null; then
         hash=$(shasum "$f" | cut -d' ' -f1)
         if grep -q "^${hash}$" "$summer_seen" 2>/dev/null; then
             summer_skipped=$((summer_skipped + 1))

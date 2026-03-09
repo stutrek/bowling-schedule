@@ -456,6 +456,443 @@ pub fn undo_move(sched: &mut FixedSchedule, undo: &UndoInfo) {
     }
 }
 
+/// Systematic sweep: exhaustively try all mutations up to 4 positions.
+/// Restarts from phase 1 on every improvement found.
+/// Returns the number of improvements found. If 0, we're at a true local minimum.
+pub fn systematic_sweep(
+    sched: &mut FixedSchedule,
+    w8: &FixedWeights,
+    stop: &std::sync::atomic::AtomicBool,
+) -> u32 {
+    use std::sync::atomic::Ordering;
+    let mut improvements = 0u32;
+    let mut current_cost = evaluate_fixed(sched, w8).total;
+
+    'restart: loop {
+
+    if stop.load(Ordering::Relaxed) { break; }
+
+    // === Phase 1: Single moves (725 total) ===
+
+    // 2-swaps: 10 × C(12,2) = 660
+    for w in 0..SF_WEEKS {
+        for a in 0..SF_TEAMS {
+            for b in (a + 1)..SF_TEAMS {
+                sched.mapping[w].swap(a, b);
+                let c = evaluate_fixed(sched, w8).total;
+                if c < current_cost { current_cost = c; improvements += 1; continue 'restart; }
+                else { sched.mapping[w].swap(a, b); }
+            }
+        }
+    }
+
+    // Toggle swap_01: 10
+    for w in 0..SF_WEEKS {
+        sched.swap_01[w] = !sched.swap_01[w];
+        let c = evaluate_fixed(sched, w8).total;
+        if c < current_cost { current_cost = c; improvements += 1; continue 'restart; }
+        else { sched.swap_01[w] = !sched.swap_01[w]; }
+    }
+
+    // Toggle swap_23: 10
+    for w in 0..SF_WEEKS {
+        sched.swap_23[w] = !sched.swap_23[w];
+        let c = evaluate_fixed(sched, w8).total;
+        if c < current_cost { current_cost = c; improvements += 1; continue 'restart; }
+        else { sched.swap_23[w] = !sched.swap_23[w]; }
+    }
+
+    // Week swaps: C(10,2) = 45
+    for a in 0..SF_WEEKS {
+        for b in (a + 1)..SF_WEEKS {
+            sched.mapping.swap(a, b);
+            sched.swap_01.swap(a, b);
+            sched.swap_23.swap(a, b);
+            let c = evaluate_fixed(sched, w8).total;
+            if c < current_cost { current_cost = c; improvements += 1; continue 'restart; }
+            else {
+                sched.mapping.swap(a, b);
+                sched.swap_01.swap(a, b);
+                sched.swap_23.swap(a, b);
+            }
+        }
+    }
+
+    // === Phase 2: 3-cycles (4,400 total) ===
+    // C(12,3) × 2 directions × 10 weeks
+    for w in 0..SF_WEEKS {
+        for a in 0..SF_TEAMS {
+            for b in (a + 1)..SF_TEAMS {
+                for c in (b + 1)..SF_TEAMS {
+                    let va = sched.mapping[w][a];
+                    let vb = sched.mapping[w][b];
+                    let vc = sched.mapping[w][c];
+                    // Direction 1: a→b→c→a
+                    sched.mapping[w][a] = vc;
+                    sched.mapping[w][b] = va;
+                    sched.mapping[w][c] = vb;
+                    let c1 = evaluate_fixed(sched, w8).total;
+                    if c1 < current_cost {
+                        current_cost = c1; improvements += 1; continue 'restart;
+                    } else {
+                        // Direction 2: a→c→b→a
+                        sched.mapping[w][a] = vb;
+                        sched.mapping[w][b] = vc;
+                        sched.mapping[w][c] = va;
+                        let c2 = evaluate_fixed(sched, w8).total;
+                        if c2 < current_cost {
+                            current_cost = c2; improvements += 1; continue 'restart;
+                        } else {
+                            sched.mapping[w][a] = va;
+                            sched.mapping[w][b] = vb;
+                            sched.mapping[w][c] = vc;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // === Phase 3: Double transpositions (14,850 total) ===
+    // Two independent 2-swaps in same week: C(12,4) × 3 pairings × 10 weeks
+    for w in 0..SF_WEEKS {
+        for a in 0..SF_TEAMS {
+            for b in (a + 1)..SF_TEAMS {
+                for c in (b + 1)..SF_TEAMS {
+                    for d in (c + 1)..SF_TEAMS {
+                        // 3 ways to partition {a,b,c,d} into 2 pairs:
+                        // (ab)(cd), (ac)(bd), (ad)(bc)
+                        for &(p, q, r, s) in &[(a,b,c,d), (a,c,b,d), (a,d,b,c)] {
+                            sched.mapping[w].swap(p, q);
+                            sched.mapping[w].swap(r, s);
+                            let cost = evaluate_fixed(sched, w8).total;
+                            if cost < current_cost {
+                                current_cost = cost; improvements += 1; continue 'restart;
+                            } else {
+                                sched.mapping[w].swap(r, s);
+                                sched.mapping[w].swap(p, q);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // === Phase 4: 4-cycles (29,700 total) ===
+    // C(12,4) = 495 choices × 3 distinct 4-cycles per set × 2 directions × 10 weeks
+    for w in 0..SF_WEEKS {
+        for a in 0..SF_TEAMS {
+            for b in (a + 1)..SF_TEAMS {
+                for c in (b + 1)..SF_TEAMS {
+                    for d in (c + 1)..SF_TEAMS {
+                        // 3 distinct cycle orderings × 2 directions = 6
+                        // (abcd): a→b→c→d→a and reverse a→d→c→b→a
+                        // (abdc): a→b→d→c→a and reverse
+                        // (acbd): a→c→b→d→a and reverse
+                        let cycles: [(usize,usize,usize,usize); 6] = [
+                            (a,b,c,d), (a,d,c,b),
+                            (a,b,d,c), (a,c,d,b),
+                            (a,c,b,d), (a,d,b,c),
+                        ];
+                        for &(i,j,k,l) in &cycles {
+                            let vi = sched.mapping[w][i];
+                            let vj = sched.mapping[w][j];
+                            let vk = sched.mapping[w][k];
+                            let vl = sched.mapping[w][l];
+                            sched.mapping[w][i] = vl;
+                            sched.mapping[w][j] = vi;
+                            sched.mapping[w][k] = vj;
+                            sched.mapping[w][l] = vk;
+                            let cost = evaluate_fixed(sched, w8).total;
+                            if cost < current_cost {
+                                current_cost = cost; improvements += 1;
+                                continue 'restart;
+                            }
+                            sched.mapping[w][i] = vi;
+                            sched.mapping[w][j] = vj;
+                            sched.mapping[w][k] = vk;
+                            sched.mapping[w][l] = vl;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // === Phase 5: Toggle combos (1,330 total) ===
+
+    // Both toggles in same week: 10
+    for w in 0..SF_WEEKS {
+        sched.swap_01[w] = !sched.swap_01[w];
+        sched.swap_23[w] = !sched.swap_23[w];
+        let c = evaluate_fixed(sched, w8).total;
+        if c < current_cost { current_cost = c; improvements += 1; continue 'restart; }
+        else {
+            sched.swap_23[w] = !sched.swap_23[w];
+            sched.swap_01[w] = !sched.swap_01[w];
+        }
+    }
+
+    // 2-swap + toggle_01 same week: 660
+    for w in 0..SF_WEEKS {
+        for a in 0..SF_TEAMS {
+            for b in (a + 1)..SF_TEAMS {
+                sched.mapping[w].swap(a, b);
+                sched.swap_01[w] = !sched.swap_01[w];
+                let c = evaluate_fixed(sched, w8).total;
+                if c < current_cost { current_cost = c; improvements += 1; continue 'restart; }
+                else {
+                    sched.swap_01[w] = !sched.swap_01[w];
+                    sched.mapping[w].swap(a, b);
+                }
+            }
+        }
+    }
+
+    // 2-swap + toggle_23 same week: 660
+    for w in 0..SF_WEEKS {
+        for a in 0..SF_TEAMS {
+            for b in (a + 1)..SF_TEAMS {
+                sched.mapping[w].swap(a, b);
+                sched.swap_23[w] = !sched.swap_23[w];
+                let c = evaluate_fixed(sched, w8).total;
+                if c < current_cost { current_cost = c; improvements += 1; continue 'restart; }
+                else {
+                    sched.swap_23[w] = !sched.swap_23[w];
+                    sched.mapping[w].swap(a, b);
+                }
+            }
+        }
+    }
+
+    // === Phase 6: 3-cycle + toggle same week (8,800 total) ===
+    // C(12,3) × 2 directions × 2 toggles × 10 weeks
+    for w in 0..SF_WEEKS {
+        for a in 0..SF_TEAMS {
+            for b in (a + 1)..SF_TEAMS {
+                for c in (b + 1)..SF_TEAMS {
+                    for toggle in 0..2u8 {
+                        let va = sched.mapping[w][a];
+                        let vb = sched.mapping[w][b];
+                        let vc = sched.mapping[w][c];
+                        let tog = if toggle == 0 { &mut sched.swap_01 } else { &mut sched.swap_23 };
+                        tog[w] = !tog[w];
+                        // Direction 1: a→b→c→a
+                        sched.mapping[w][a] = vc;
+                        sched.mapping[w][b] = va;
+                        sched.mapping[w][c] = vb;
+                        let c1 = evaluate_fixed(sched, w8).total;
+                        if c1 < current_cost {
+                            current_cost = c1; improvements += 1;
+                            continue 'restart;
+                        }
+                        // Direction 2: a→c→b→a
+                        sched.mapping[w][a] = vb;
+                        sched.mapping[w][b] = vc;
+                        sched.mapping[w][c] = va;
+                        let c2 = evaluate_fixed(sched, w8).total;
+                        if c2 < current_cost {
+                            current_cost = c2; improvements += 1;
+                            continue 'restart;
+                        }
+                        // Restore
+                        sched.mapping[w][a] = va;
+                        sched.mapping[w][b] = vb;
+                        sched.mapping[w][c] = vc;
+                        let tog = if toggle == 0 { &mut sched.swap_01 } else { &mut sched.swap_23 };
+                        tog[w] = !tog[w];
+                    }
+                }
+            }
+        }
+    }
+
+    // === Phase 7: Double transposition + toggle (29,700 total) ===
+    // 14,850 double transpositions × 2 toggles
+    for w in 0..SF_WEEKS {
+        for a in 0..SF_TEAMS {
+            for b in (a + 1)..SF_TEAMS {
+                for c in (b + 1)..SF_TEAMS {
+                    for d in (c + 1)..SF_TEAMS {
+                        for &(p, q, r, s) in &[(a,b,c,d), (a,c,b,d), (a,d,b,c)] {
+                            for toggle in 0..2u8 {
+                                sched.mapping[w].swap(p, q);
+                                sched.mapping[w].swap(r, s);
+                                let tog = if toggle == 0 { &mut sched.swap_01 } else { &mut sched.swap_23 };
+                                tog[w] = !tog[w];
+                                let cost = evaluate_fixed(sched, w8).total;
+                                if cost < current_cost {
+                                    current_cost = cost; improvements += 1;
+                                    continue 'restart;
+                                }
+                                let tog = if toggle == 0 { &mut sched.swap_01 } else { &mut sched.swap_23 };
+                                tog[w] = !tog[w];
+                                sched.mapping[w].swap(r, s);
+                                sched.mapping[w].swap(p, q);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // === Phase 8: 4-cycle + toggle (59,400 total) ===
+    for w in 0..SF_WEEKS {
+        for a in 0..SF_TEAMS {
+            for b in (a + 1)..SF_TEAMS {
+                for c in (b + 1)..SF_TEAMS {
+                    for d in (c + 1)..SF_TEAMS {
+                        let cycles: [(usize,usize,usize,usize); 6] = [
+                            (a,b,c,d), (a,d,c,b),
+                            (a,b,d,c), (a,c,d,b),
+                            (a,c,b,d), (a,d,b,c),
+                        ];
+                        for toggle in 0..2u8 {
+                            let tog = if toggle == 0 { &mut sched.swap_01 } else { &mut sched.swap_23 };
+                            tog[w] = !tog[w];
+                            for &(i,j,k,l) in &cycles {
+                                let vi = sched.mapping[w][i];
+                                let vj = sched.mapping[w][j];
+                                let vk = sched.mapping[w][k];
+                                let vl = sched.mapping[w][l];
+                                sched.mapping[w][i] = vl;
+                                sched.mapping[w][j] = vi;
+                                sched.mapping[w][k] = vj;
+                                sched.mapping[w][l] = vk;
+                                let cost = evaluate_fixed(sched, w8).total;
+                                if cost < current_cost {
+                                    current_cost = cost; improvements += 1;
+                                    continue 'restart;
+                                }
+                                sched.mapping[w][i] = vi;
+                                sched.mapping[w][j] = vj;
+                                sched.mapping[w][k] = vk;
+                                sched.mapping[w][l] = vl;
+                            }
+                            let tog = if toggle == 0 { &mut sched.swap_01 } else { &mut sched.swap_23 };
+                            tog[w] = !tog[w];
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // === Phase 9: Cross-week 2-swaps, same pair (2,970 total) ===
+    // C(10,2) × C(12,2) = 45 × 66
+    for w1 in 0..SF_WEEKS {
+        for w2 in (w1 + 1)..SF_WEEKS {
+            for a in 0..SF_TEAMS {
+                for b in (a + 1)..SF_TEAMS {
+                    sched.mapping[w1].swap(a, b);
+                    sched.mapping[w2].swap(a, b);
+                    let c = evaluate_fixed(sched, w8).total;
+                    if c < current_cost { current_cost = c; improvements += 1; continue 'restart; }
+                    else {
+                        sched.mapping[w2].swap(a, b);
+                        sched.mapping[w1].swap(a, b);
+                    }
+                }
+            }
+        }
+    }
+
+    // === Phase 10: Cross-week 2-swaps, different pairs (196,020 total) ===
+    // C(10,2) × C(12,2) × C(12,2) = 45 × 66 × 66
+    for w1 in 0..SF_WEEKS {
+        for w2 in (w1 + 1)..SF_WEEKS {
+            for a in 0..SF_TEAMS {
+                for b in (a + 1)..SF_TEAMS {
+                    for c in 0..SF_TEAMS {
+                        for d in (c + 1)..SF_TEAMS {
+                            if a == c && b == d { continue; }
+                            sched.mapping[w1].swap(a, b);
+                            sched.mapping[w2].swap(c, d);
+                            let cost = evaluate_fixed(sched, w8).total;
+                            if cost < current_cost {
+                                current_cost = cost; improvements += 1; continue 'restart;
+                            } else {
+                                sched.mapping[w2].swap(c, d);
+                                sched.mapping[w1].swap(a, b);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // === Phase 11: 2-swap + toggle different week (11,880 total) ===
+    // 10 weeks × C(12,2) × 9 other weeks × 2 toggles
+    for w1 in 0..SF_WEEKS {
+        for a in 0..SF_TEAMS {
+            for b in (a + 1)..SF_TEAMS {
+                for w2 in 0..SF_WEEKS {
+                    if w2 == w1 { continue; }
+                    for toggle in 0..2u8 {
+                        sched.mapping[w1].swap(a, b);
+                        let tog = if toggle == 0 { &mut sched.swap_01 } else { &mut sched.swap_23 };
+                        tog[w2] = !tog[w2];
+                        let cost = evaluate_fixed(sched, w8).total;
+                        if cost < current_cost {
+                            current_cost = cost; improvements += 1; continue 'restart;
+                        } else {
+                            let tog = if toggle == 0 { &mut sched.swap_01 } else { &mut sched.swap_23 };
+                            tog[w2] = !tog[w2];
+                            sched.mapping[w1].swap(a, b);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // === Phase 12: Week 3-cycles (240 total) ===
+    // C(10,3) × 2 directions
+    for a in 0..SF_WEEKS {
+        for b in (a + 1)..SF_WEEKS {
+            for c in (b + 1)..SF_WEEKS {
+                let ma = sched.mapping[a];
+                let mb = sched.mapping[b];
+                let mc = sched.mapping[c];
+                let sa = (sched.swap_01[a], sched.swap_23[a]);
+                let sb = (sched.swap_01[b], sched.swap_23[b]);
+                let sc = (sched.swap_01[c], sched.swap_23[c]);
+                // Direction 1: a→b→c→a
+                sched.mapping[a] = mc; sched.mapping[b] = ma; sched.mapping[c] = mb;
+                sched.swap_01[a] = sc.0; sched.swap_01[b] = sa.0; sched.swap_01[c] = sb.0;
+                sched.swap_23[a] = sc.1; sched.swap_23[b] = sa.1; sched.swap_23[c] = sb.1;
+                let c1 = evaluate_fixed(sched, w8).total;
+                if c1 < current_cost {
+                    current_cost = c1; improvements += 1; continue 'restart;
+                } else {
+                    // Direction 2: a→c→b→a
+                    sched.mapping[a] = mb; sched.mapping[b] = mc; sched.mapping[c] = ma;
+                    sched.swap_01[a] = sb.0; sched.swap_01[b] = sc.0; sched.swap_01[c] = sa.0;
+                    sched.swap_23[a] = sb.1; sched.swap_23[b] = sc.1; sched.swap_23[c] = sa.1;
+                    let c2 = evaluate_fixed(sched, w8).total;
+                    if c2 < current_cost {
+                        current_cost = c2; improvements += 1; continue 'restart;
+                    } else {
+                        sched.mapping[a] = ma; sched.mapping[b] = mb; sched.mapping[c] = mc;
+                        sched.swap_01[a] = sa.0; sched.swap_01[b] = sb.0; sched.swap_01[c] = sc.0;
+                        sched.swap_23[a] = sa.1; sched.swap_23[b] = sb.1; sched.swap_23[c] = sc.1;
+                    }
+                }
+            }
+        }
+    }
+
+    // Completed full pass with no improvements — true local minimum
+    break;
+
+    } // end 'restart loop
+
+    improvements
+}
+
 fn move_team_swap(sched: &mut FixedSchedule, rng: &mut SmallRng) -> UndoInfo {
     let w = rng.random_range(0..SF_WEEKS);
     let a = rng.random_range(0..SF_TEAMS);
@@ -1041,6 +1478,34 @@ mod tests {
                 let (dec_lo, dec_hi) = decode_pair_idx(idx);
                 assert_eq!((lo, hi), (dec_lo, dec_hi), "Pair index {} decoded wrong", idx);
             }
+        }
+    }
+
+    #[test]
+    fn test_sweep_recovery_by_perturbation_count() {
+        use rand::SeedableRng;
+        let w8 = test_weights();
+        let mut rng = SmallRng::seed_from_u64(42);
+        let mut sched = random_fixed_schedule(&mut rng);
+
+        // Run sweep to get to a local minimum first
+        let no_stop = std::sync::atomic::AtomicBool::new(false);
+        systematic_sweep(&mut sched, &w8, &no_stop);
+        let baseline = sched;
+        let baseline_cost = evaluate_fixed(&baseline, &w8).total;
+        eprintln!("baseline cost: {}", baseline_cost);
+
+        for n_perturb in [1, 2, 3, 5, 10] {
+            let mut s = baseline;
+            let bd = evaluate_fixed(&s, &w8);
+            for _ in 0..n_perturb {
+                let _ = apply_move(&mut s, 0, &bd, &mut rng);
+            }
+            let perturbed_cost = evaluate_fixed(&s, &w8).total;
+            let improved = systematic_sweep(&mut s, &w8, &no_stop);
+            let final_cost = evaluate_fixed(&s, &w8).total;
+            eprintln!("perturb={}: {}→{} (improved={}, vs baseline={})",
+                n_perturb, perturbed_cost, final_cost, improved, baseline_cost);
         }
     }
 
