@@ -1,6 +1,20 @@
 use rand::rngs::SmallRng;
 use rand::Rng;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use std::sync::OnceLock;
+
+static TEMPLATE_CONFIG: OnceLock<TemplateConfig> = OnceLock::new();
+
+/// Initialize the global template config. Call once at startup.
+/// If not called, defaults to the built-in TEMPLATE.
+pub fn init_template(tc: TemplateConfig) {
+    TEMPLATE_CONFIG.set(tc).ok();
+}
+
+/// Get the active template config.
+pub fn tc() -> &'static TemplateConfig {
+    TEMPLATE_CONFIG.get_or_init(TemplateConfig::default_template)
+}
 
 pub const SF_TEAMS: usize = 12;
 pub const SF_WEEKS: usize = 10;
@@ -24,12 +38,115 @@ pub const SF_PAIRS: usize = SF_TEAMS * (SF_TEAMS - 1) / 2;
 ///   Slot 2: Lane 0: 7v4   Lane 1: 9v11   Lane 2: 2v3   Lane 3: 8v6
 ///   Slot 3: Lane 0: 4v10  Lane 1: 11v12  Lane 2: 3v5   Lane 3: 8v1
 ///   Slot 4: Lane 0: -     Lane 1: -      Lane 2: 7v2   Lane 3: 6v9
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Serialize, Deserialize, Debug)]
 pub struct TemplateEntry {
     pub slot: u8,
     pub lane: u8,
     pub pos_a: u8,
     pub pos_b: u8,
+}
+
+/// Runtime template configuration: the 18 entries plus derived metadata.
+#[derive(Clone)]
+pub struct TemplateConfig {
+    pub entries: [TemplateEntry; SF_MATCHUPS_PER_WEEK],
+    pub slot0_positions: Vec<u8>,
+    pub slot4_positions: Vec<u8>,
+    pub same_lane_positions: Vec<u8>,
+}
+
+impl TemplateConfig {
+    /// Build a TemplateConfig from a slice of entries, computing derived metadata.
+    pub fn from_entries(entries: &[TemplateEntry]) -> Self {
+        assert_eq!(entries.len(), SF_MATCHUPS_PER_WEEK);
+        let entries: [TemplateEntry; SF_MATCHUPS_PER_WEEK] = entries.try_into().unwrap();
+
+        // slot0_positions: positions that play in slot 0
+        let mut slot0_set = std::collections::BTreeSet::new();
+        let mut slot4_set = std::collections::BTreeSet::new();
+        for e in &entries {
+            if e.slot == 0 {
+                slot0_set.insert(e.pos_a);
+                slot0_set.insert(e.pos_b);
+            }
+            if e.slot == 4 {
+                slot4_set.insert(e.pos_a);
+                slot4_set.insert(e.pos_b);
+            }
+        }
+
+        // same_lane_positions: positions on the same lane for all games in slots 0-3
+        let mut same_lane_positions = Vec::new();
+        for pos in 0..SF_TEAMS as u8 {
+            let games: Vec<&TemplateEntry> = entries.iter()
+                .filter(|e| e.slot < 4 && (e.pos_a == pos || e.pos_b == pos))
+                .collect();
+            if games.len() == 3 {
+                let lanes: Vec<u8> = games.iter().map(|e| e.lane).collect();
+                if lanes.iter().all(|&l| l == lanes[0]) {
+                    same_lane_positions.push(pos);
+                }
+            }
+        }
+
+        TemplateConfig {
+            entries,
+            slot0_positions: slot0_set.into_iter().collect(),
+            slot4_positions: slot4_set.into_iter().collect(),
+            same_lane_positions,
+        }
+    }
+
+    /// Load a template from a JSON file.
+    pub fn load(path: &str) -> Result<Self, String> {
+        let s = std::fs::read_to_string(path).map_err(|e| format!("read {}: {}", path, e))?;
+        let entries: Vec<TemplateEntry> = serde_json::from_str(&s)
+            .map_err(|e| format!("parse {}: {}", path, e))?;
+        if entries.len() != SF_MATCHUPS_PER_WEEK {
+            return Err(format!("expected {} entries, got {}", SF_MATCHUPS_PER_WEEK, entries.len()));
+        }
+        Ok(Self::from_entries(&entries))
+    }
+
+    /// The built-in default template.
+    pub fn default_template() -> Self {
+        Self::from_entries(&TEMPLATE)
+    }
+
+    /// Generate WGSL const declarations for the template arrays.
+    /// Returns a string that can be substituted into the shader source.
+    pub fn wgsl_consts(&self) -> String {
+        let fmt_arr = |name: &str, vals: &[u32]| -> String {
+            let n = vals.len();
+            let items: String = vals.iter()
+                .map(|v| format!("{}u", v))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("const {}: array<u32, {}> = array<u32, {}>({});", name, n, n, items)
+        };
+
+        let t_slot: Vec<u32> = self.entries.iter().map(|e| e.slot as u32).collect();
+        let t_lane: Vec<u32> = self.entries.iter().map(|e| e.lane as u32).collect();
+        let t_pos_a: Vec<u32> = self.entries.iter().map(|e| e.pos_a as u32).collect();
+        let t_pos_b: Vec<u32> = self.entries.iter().map(|e| e.pos_b as u32).collect();
+        let slot0: Vec<u32> = self.slot0_positions.iter().map(|&p| p as u32).collect();
+        let slot4: Vec<u32> = self.slot4_positions.iter().map(|&p| p as u32).collect();
+        let same_lane: Vec<u32> = self.same_lane_positions.iter().map(|&p| p as u32).collect();
+
+        let lines = vec![
+            fmt_arr("T_SLOT", &t_slot),
+            fmt_arr("T_LANE", &t_lane),
+            fmt_arr("T_POS_A", &t_pos_a),
+            fmt_arr("T_POS_B", &t_pos_b),
+            fmt_arr("SLOT0_POS", &slot0),
+            fmt_arr("SLOT4_POS", &slot4),
+            fmt_arr("SAME_LANE_POS", &same_lane),
+            format!("const SLOT0_COUNT: u32 = {}u;", slot0.len()),
+            format!("const SLOT4_COUNT: u32 = {}u;", slot4.len()),
+            format!("const SAME_LANE_COUNT: u32 = {}u;", same_lane.len()),
+        ];
+        lines.join("\n")
+    }
 }
 
 /// The fixed day template: 18 matchup entries.
@@ -60,15 +177,6 @@ pub const TEMPLATE: [TemplateEntry; SF_MATCHUPS_PER_WEEK] = [
     TemplateEntry { slot: 4, lane: 3, pos_a: 5,  pos_b: 8  },
 ];
 
-/// Precomputed: which positions play in slot 0 (first game) — 8 positions
-const SLOT0_POSITIONS: [u8; 8] = [3, 11, 9, 10, 4, 7, 2, 0];
-
-/// Precomputed: which positions play in slot 4 (last game) — 4 positions
-const SLOT4_POSITIONS: [u8; 4] = [6, 1, 5, 8];
-
-/// Precomputed: which positions stay on the same lane for all 3 games in slots 0-3
-/// pos 0 (all lane 3), pos 3 (all lane 0), pos 4 (all lane 2), pos 10 (all lane 1)
-const SAME_LANE_POSITIONS: [u8; 4] = [0, 3, 4, 10];
 
 /// The schedule state: per-week team permutation + lane swap flags.
 #[derive(Clone, Copy)]
@@ -159,10 +267,11 @@ pub fn random_fixed_schedule(rng: &mut SmallRng) -> FixedSchedule {
 
 /// Evaluate the full cost of a schedule.
 pub fn evaluate_fixed(sched: &FixedSchedule, w8: &FixedWeights) -> FixedCostBreakdown {
+    let tc = tc();
     // --- Matchup balance: count how many times each pair plays ---
     let mut matchup_counts = [0u8; SF_PAIRS];
     for w in 0..SF_WEEKS {
-        for entry in &TEMPLATE {
+        for entry in &tc.entries {
             let ta = sched.mapping[w][entry.pos_a as usize] as usize;
             let tb = sched.mapping[w][entry.pos_b as usize] as usize;
             let lo = ta.min(tb);
@@ -185,7 +294,7 @@ pub fn evaluate_fixed(sched: &FixedSchedule, w8: &FixedWeights) -> FixedCostBrea
     // Slot 4: 4 teams per week, 10 weeks = 40. 40/12 ≈ 3.33 → [3,4]
     let mut slot_counts = [0u32; SF_TEAMS * SF_SLOTS];
     for w in 0..SF_WEEKS {
-        for entry in &TEMPLATE {
+        for entry in &tc.entries {
             let s = entry.slot as usize;
             let ta = sched.mapping[w][entry.pos_a as usize] as usize;
             let tb = sched.mapping[w][entry.pos_b as usize] as usize;
@@ -215,7 +324,7 @@ pub fn evaluate_fixed(sched: &FixedSchedule, w8: &FixedWeights) -> FixedCostBrea
     // Lanes 2-3 receive traffic from all 5 slots: ~8.33/team/lane → [8,9]
     let mut lane_counts = [0u32; SF_TEAMS * SF_LANES];
     for w in 0..SF_WEEKS {
-        for entry in &TEMPLATE {
+        for entry in &tc.entries {
             let actual_lane = apply_lane_swap(entry.lane, sched.swap_01[w], sched.swap_23[w]) as usize;
             let ta = sched.mapping[w][entry.pos_a as usize] as usize;
             let tb = sched.mapping[w][entry.pos_b as usize] as usize;
@@ -241,7 +350,7 @@ pub fn evaluate_fixed(sched: &FixedSchedule, w8: &FixedWeights) -> FixedCostBrea
     let mut game5_lane2 = [0u32; SF_TEAMS];
     let mut game5_lane3 = [0u32; SF_TEAMS];
     for w in 0..SF_WEEKS {
-        for entry in &TEMPLATE {
+        for entry in &tc.entries {
             if entry.slot != 4 { continue; }
             let actual_lane = apply_lane_swap(entry.lane, sched.swap_01[w], sched.swap_23[w]) as usize;
             let ta = sched.mapping[w][entry.pos_a as usize] as usize;
@@ -268,7 +377,7 @@ pub fn evaluate_fixed(sched: &FixedSchedule, w8: &FixedWeights) -> FixedCostBrea
     // Target per team: 40/12 ≈ 3.33, so [3,4] is ideal
     let mut same_lane_counts = [0u32; SF_TEAMS];
     for w in 0..SF_WEEKS {
-        for &pos in &SAME_LANE_POSITIONS {
+        for &pos in &tc.same_lane_positions {
             let team = sched.mapping[w][pos as usize] as usize;
             same_lane_counts[team] += 1;
         }
@@ -285,11 +394,11 @@ pub fn evaluate_fixed(sched: &FixedSchedule, w8: &FixedWeights) -> FixedCostBrea
     // For each team, track which weeks they play in slot 0 and slot 4 (as bits)
     let mut comm_bits = [0u32; SF_TEAMS];
     for w in 0..SF_WEEKS {
-        for &pos in &SLOT0_POSITIONS {
+        for &pos in &tc.slot0_positions {
             let team = sched.mapping[w][pos as usize] as usize;
             comm_bits[team] |= 1 << (w * 2);
         }
-        for &pos in &SLOT4_POSITIONS {
+        for &pos in &tc.slot4_positions {
             let team = sched.mapping[w][pos as usize] as usize;
             comm_bits[team] |= 1 << (w * 2 + 1);
         }
@@ -308,7 +417,7 @@ pub fn evaluate_fixed(sched: &FixedSchedule, w8: &FixedWeights) -> FixedCostBrea
     // Use bitmask per pair (10 weeks = 10 bits) to match GPU approach
     let mut pair_week_bits = [0u16; SF_PAIRS];
     for w in 0..SF_WEEKS {
-        for entry in &TEMPLATE {
+        for entry in &tc.entries {
             let ta = sched.mapping[w][entry.pos_a as usize] as usize;
             let tb = sched.mapping[w][entry.pos_b as usize] as usize;
             let lo = ta.min(tb);
@@ -930,10 +1039,11 @@ fn move_guided_matchup(
     _bd: &FixedCostBreakdown,
     rng: &mut SmallRng,
 ) -> UndoInfo {
+    let tc = tc();
     // Count matchups
     let mut matchup_counts = [0u8; SF_PAIRS];
     for w in 0..SF_WEEKS {
-        for entry in &TEMPLATE {
+        for entry in &tc.entries {
             let ta = sched.mapping[w][entry.pos_a as usize] as usize;
             let tb = sched.mapping[w][entry.pos_b as usize] as usize;
             let lo = ta.min(tb);
@@ -967,7 +1077,7 @@ fn move_guided_matchup(
         // Over-matched: find a week where they play, swap one of them with another team
         let mut weeks_where_matched: Vec<usize> = Vec::new();
         for w in 0..SF_WEEKS {
-            for entry in &TEMPLATE {
+            for entry in &tc.entries {
                 let ta = sched.mapping[w][entry.pos_a as usize] as usize;
                 let tb = sched.mapping[w][entry.pos_b as usize] as usize;
                 if (ta == team_lo && tb == team_hi) || (ta == team_hi && tb == team_lo) {
@@ -996,7 +1106,7 @@ fn move_guided_matchup(
         let pos_hi = sched.mapping[w].iter().position(|&t| t as usize == team_hi).unwrap();
         // Check if they already play this week — if not, try swapping
         // Find a position that would make them opponents
-        for entry in &TEMPLATE {
+        for entry in &tc.entries {
             let pa = entry.pos_a as usize;
             let pb = entry.pos_b as usize;
             // If team_lo is at pos pa, we want team_hi at pos pb (or vice versa)
@@ -1021,10 +1131,11 @@ fn move_guided_slot(
     _bd: &FixedCostBreakdown,
     rng: &mut SmallRng,
 ) -> UndoInfo {
+    let tc = tc();
     // Count per-team per-slot
     let mut slot_counts = [0u32; SF_TEAMS * SF_SLOTS];
     for w in 0..SF_WEEKS {
-        for entry in &TEMPLATE {
+        for entry in &tc.entries {
             let s = entry.slot as usize;
             let ta = sched.mapping[w][entry.pos_a as usize] as usize;
             let tb = sched.mapping[w][entry.pos_b as usize] as usize;
@@ -1092,10 +1203,11 @@ fn move_guided_lane(
     _bd: &FixedCostBreakdown,
     rng: &mut SmallRng,
 ) -> UndoInfo {
+    let tc = tc();
     // Count lane usage per team across ALL slots
     let mut lane_counts = [0u32; SF_TEAMS * SF_LANES];
     for w in 0..SF_WEEKS {
-        for entry in &TEMPLATE {
+        for entry in &tc.entries {
             let actual_lane = apply_lane_swap(entry.lane, sched.swap_01[w], sched.swap_23[w]) as usize;
             let ta = sched.mapping[w][entry.pos_a as usize] as usize;
             let tb = sched.mapping[w][entry.pos_b as usize] as usize;
@@ -1182,13 +1294,14 @@ fn decode_pair_idx(idx: usize) -> (usize, usize) {
 
 /// Convert a fixed schedule to the legacy SummerAssignment-style TSV format.
 pub fn fixed_schedule_to_tsv(sched: &FixedSchedule) -> String {
+    let tc = tc();
     let mut lines = vec![String::from("Week\tSlot\tLane 1\tLane 2\tLane 3\tLane 4")];
 
     for w in 0..SF_WEEKS {
         for s in 0..SF_SLOTS {
             let mut cells: [String; SF_LANES] = std::array::from_fn(|_| String::from("-"));
 
-            for entry in &TEMPLATE {
+            for entry in &tc.entries {
                 if entry.slot as usize != s { continue; }
                 let actual_lane = apply_lane_swap(entry.lane, sched.swap_01[w], sched.swap_23[w]) as usize;
                 let ta = sched.mapping[w][entry.pos_a as usize];
@@ -1222,6 +1335,7 @@ pub fn perturb_fixed(sched: &mut FixedSchedule, rng: &mut SmallRng, n: usize) {
 /// Parse a TSV (as produced by `fixed_schedule_to_tsv`) back into a FixedSchedule.
 /// Returns None if parsing fails.
 pub fn parse_fixed_tsv(tsv: &str) -> Option<FixedSchedule> {
+    let tc = tc();
     let lines: Vec<&str> = tsv.lines().collect();
     if lines.len() < 1 + SF_WEEKS * SF_SLOTS { return None; }
 
@@ -1260,7 +1374,7 @@ pub fn parse_fixed_tsv(tsv: &str) -> Option<FixedSchedule> {
             // Try to construct a consistent mapping for this swap combination
             let mut mapping = [255u8; SF_TEAMS];
             let mut ok = true;
-            for entry in &TEMPLATE {
+            for entry in &tc.entries {
                 let actual_lane = apply_lane_swap(entry.lane, s01, s23) as usize;
                 let s = entry.slot as usize;
                 if let Some((ta, tb)) = matchups[w][s][actual_lane] {
@@ -1305,13 +1419,14 @@ pub fn parse_fixed_tsv(tsv: &str) -> Option<FixedSchedule> {
 
 /// Commissioner reassignment: find the pair with minimum slot overlap, relabel as teams 1 and 2.
 pub fn reassign_commissioners(sched: &mut FixedSchedule) {
+    let tc = tc();
     let mut comm_bits = [0u32; SF_TEAMS];
     for w in 0..SF_WEEKS {
-        for &pos in &SLOT0_POSITIONS {
+        for &pos in &tc.slot0_positions {
             let team = sched.mapping[w][pos as usize] as usize;
             comm_bits[team] |= 1 << (w * 2);
         }
-        for &pos in &SLOT4_POSITIONS {
+        for &pos in &tc.slot4_positions {
             let team = sched.mapping[w][pos as usize] as usize;
             comm_bits[team] |= 1 << (w * 2 + 1);
         }
@@ -1377,7 +1492,7 @@ mod tests {
     #[test]
     fn test_template_positions_appear_3_times() {
         let mut counts = [0u8; SF_TEAMS];
-        for entry in &TEMPLATE {
+        for entry in &tc().entries {
             counts[entry.pos_a as usize] += 1;
             counts[entry.pos_b as usize] += 1;
         }
@@ -1388,18 +1503,17 @@ mod tests {
 
     #[test]
     fn test_template_slot_structure() {
-        // Slots 0-3: 4 entries each, slot 4: 2 entries
         for s in 0..4 {
-            let count = TEMPLATE.iter().filter(|e| e.slot == s as u8).count();
+            let count = tc().entries.iter().filter(|e| e.slot == s as u8).count();
             assert_eq!(count, 4, "Slot {} has {} entries, expected 4", s, count);
         }
-        let count = TEMPLATE.iter().filter(|e| e.slot == 4).count();
+        let count = tc().entries.iter().filter(|e| e.slot == 4).count();
         assert_eq!(count, 2, "Slot 4 has {} entries, expected 2", count);
     }
 
     #[test]
     fn test_template_slot4_lanes() {
-        for entry in &TEMPLATE {
+        for entry in &tc().entries {
             if entry.slot == 4 {
                 assert!(entry.lane >= 2, "Slot 4 entry on lane {}, expected 2 or 3", entry.lane);
             }
@@ -1438,9 +1552,8 @@ mod tests {
         let mut rng = SmallRng::seed_from_u64(42);
         let sched = random_fixed_schedule(&mut rng);
         let tsv = fixed_schedule_to_tsv(&sched);
-        // Just verify it has the right structure
         let lines: Vec<&str> = tsv.lines().collect();
-        assert_eq!(lines.len(), 1 + SF_WEEKS * SF_SLOTS); // header + 50 data lines
+        assert_eq!(lines.len(), 1 + SF_WEEKS * SF_SLOTS);
     }
 
     #[test]
@@ -1466,7 +1579,6 @@ mod tests {
         let mut perturbed = sched;
         perturb_fixed(&mut perturbed, &mut rng, 10);
         let new_cost = evaluate_fixed(&perturbed, &w8).total;
-        // Just verify it's still a valid schedule (different cost is expected)
         assert!(new_cost > 0 || orig_cost > 0);
     }
 
@@ -1488,7 +1600,6 @@ mod tests {
         let mut rng = SmallRng::seed_from_u64(42);
         let mut sched = random_fixed_schedule(&mut rng);
 
-        // Run sweep to get to a local minimum first
         let no_stop = std::sync::atomic::AtomicBool::new(false);
         systematic_sweep(&mut sched, &w8, &no_stop);
         let baseline = sched;
@@ -1511,9 +1622,8 @@ mod tests {
 
     #[test]
     fn test_same_lane_positions() {
-        // Verify that the SAME_LANE_POSITIONS are correct by checking template
-        for &pos in &SAME_LANE_POSITIONS {
-            let entries: Vec<&TemplateEntry> = TEMPLATE.iter()
+        for &pos in &tc().same_lane_positions {
+            let entries: Vec<&TemplateEntry> = tc().entries.iter()
                 .filter(|e| e.slot < 4 && (e.pos_a == pos || e.pos_b == pos))
                 .collect();
             assert_eq!(entries.len(), 3, "Position {} doesn't have 3 games in slots 0-3", pos);

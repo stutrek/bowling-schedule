@@ -19,6 +19,10 @@ export default function SummerScheduleEditor() {
         highlightInput,
         setHighlightInput,
         importTSV,
+        selectedTeam,
+        editHistory,
+        handleTeamClick,
+        undo,
     } = useSummerSchedule();
 
     const [copied, setCopied] = useState(false);
@@ -33,12 +37,23 @@ export default function SummerScheduleEditor() {
             .filter((n) => !Number.isNaN(n) && n >= 0 && n < S_TEAMS),
     );
 
-    function teamClass(team: number): string {
-        const base = 'px-1 py-0.5 rounded text-xs font-mono';
-        if (highlightedTeams.has(team)) {
-            return `${base} ring-2 ring-amber-400 bg-amber-50`;
+    function teamButtonClass(team: number, week: number): string {
+        const base =
+            'px-1 py-0.5 rounded text-xs font-mono cursor-pointer transition-colors';
+        const hl = highlightedTeams.has(team)
+            ? ' ring-2 ring-amber-400 bg-amber-50'
+            : '';
+        if (
+            selectedTeam &&
+            selectedTeam.team === team &&
+            selectedTeam.week === week
+        ) {
+            return `${base} bg-blue-600 text-white ring-2 ring-blue-400`;
         }
-        return base;
+        if (selectedTeam && selectedTeam.week === week) {
+            return `${base} hover:bg-blue-100 text-blue-700 underline decoration-dotted${hl}`;
+        }
+        return `${base} hover:bg-gray-200${hl}`;
     }
 
     function hasSpacingViolation(
@@ -74,6 +89,15 @@ export default function SummerScheduleEditor() {
     return (
         <aside className="w-full border-t border-gray-200 p-3 flex flex-col gap-3 bg-gray-50 lg:sticky lg:top-0 lg:h-screen lg:overflow-y-auto lg:border-t-0 lg:border-l lg:w-[480px] lg:flex-shrink-0">
             <div className="flex items-center gap-2 flex-wrap">
+                <button
+                    type="button"
+                    onClick={undo}
+                    disabled={editHistory.length === 0}
+                    className="px-3 py-1.5 rounded font-medium border border-gray-300 hover:bg-gray-100 disabled:opacity-40 disabled:cursor-default disabled:hover:bg-white transition-colors text-sm bg-white"
+                >
+                    Undo
+                    {editHistory.length > 0 ? ` (${editHistory.length})` : ''}
+                </button>
                 <span className="text-xs text-gray-500 font-bold">
                     Total: {cost.total}
                 </span>
@@ -95,6 +119,17 @@ export default function SummerScheduleEditor() {
                     className="w-full px-2 py-1.5 rounded border border-gray-300 text-sm bg-white"
                 />
             </div>
+
+            <p className="text-xs m-0">
+                {selectedTeam ? (
+                    <span className="text-blue-600">
+                        Team {selectedTeam.team + 1} selected (wk{' '}
+                        {selectedTeam.week + 1}). Click to swap, Esc to cancel.
+                    </span>
+                ) : (
+                    <span className="text-gray-400">No selection</span>
+                )}
+            </p>
 
             <div className="overflow-y-auto max-h-[60vh] lg:max-h-none lg:flex-1 -mx-1 px-1">
                 <table className="text-xs w-full border-collapse">
@@ -151,24 +186,46 @@ export default function SummerScheduleEditor() {
                                                 >
                                                     {m ? (
                                                         <>
-                                                            <span
-                                                                className={teamClass(
+                                                            <button
+                                                                type="button"
+                                                                onClick={() =>
+                                                                    handleTeamClick(
+                                                                        m.teamA,
+                                                                        week,
+                                                                        slot,
+                                                                        pair,
+                                                                        'A',
+                                                                    )
+                                                                }
+                                                                className={teamButtonClass(
                                                                     m.teamA,
+                                                                    week,
                                                                 )}
                                                             >
                                                                 {m.teamA + 1}
-                                                            </span>
+                                                            </button>
                                                             <span className="text-gray-400">
                                                                 {' '}
                                                                 v{' '}
                                                             </span>
-                                                            <span
-                                                                className={teamClass(
+                                                            <button
+                                                                type="button"
+                                                                onClick={() =>
+                                                                    handleTeamClick(
+                                                                        m.teamB,
+                                                                        week,
+                                                                        slot,
+                                                                        pair,
+                                                                        'B',
+                                                                    )
+                                                                }
+                                                                className={teamButtonClass(
                                                                     m.teamB,
+                                                                    week,
                                                                 )}
                                                             >
                                                                 {m.teamB + 1}
-                                                            </span>
+                                                            </button>
                                                         </>
                                                     ) : (
                                                         <span className="text-gray-300">

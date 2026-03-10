@@ -13,26 +13,8 @@ const TEMPLATE_SIZE: u32 = 18u;
 const NUM_PAIRS: u32 = 66u;
 const MATCHUP_U32S: u32 = 9u; // ceil(66/8) = 9, packing 8 nibbles per u32
 
-// Template: 18 entries, each (slot, lane, pos_a, pos_b)
-const T_SLOT: array<u32, 18> = array<u32, 18>(
-    0u, 0u, 0u, 0u,  1u, 1u, 1u, 1u,  2u, 2u, 2u, 2u,  3u, 3u, 3u, 3u,  4u, 4u
-);
-const T_LANE: array<u32, 18> = array<u32, 18>(
-    0u, 1u, 2u, 3u,  0u, 1u, 2u, 3u,  0u, 1u, 2u, 3u,  0u, 1u, 2u, 3u,  2u, 3u
-);
-const T_POS_A: array<u32, 18> = array<u32, 18>(
-    3u, 9u, 4u, 2u,  11u, 9u, 1u, 5u,  6u, 8u, 1u, 7u,  3u, 10u, 2u, 7u,  6u, 5u
-);
-const T_POS_B: array<u32, 18> = array<u32, 18>(
-    11u, 10u, 7u, 0u,  6u, 8u, 4u, 0u,  3u, 10u, 2u, 5u,  9u, 11u, 4u, 0u,  1u, 8u
-);
-
-// Positions that play in slot 0 (for commissioner tracking)
-const SLOT0_POS: array<u32, 8> = array<u32, 8>(3u, 11u, 9u, 10u, 4u, 7u, 2u, 0u);
-// Positions that play in slot 4
-const SLOT4_POS: array<u32, 4> = array<u32, 4>(6u, 1u, 5u, 8u);
-// Positions on same lane for all slots 0-3
-const SAME_LANE_POS: array<u32, 4> = array<u32, 4>(0u, 3u, 4u, 10u);
+// Template arrays (injected at runtime)
+// TEMPLATE_CONSTS_PLACEHOLDER
 
 struct Weights {
     matchup_balance: u32,
@@ -279,7 +261,7 @@ fn evaluate(base: u32) -> u32 {
     for (var i = 0u; i < 3u; i++) { slc[i] = 0u; }
 
     for (var w = 0u; w < WEEKS; w++) {
-        for (var i = 0u; i < 4u; i++) {
+        for (var i = 0u; i < SAME_LANE_COUNT; i++) {
             let team = get_team(base, w, SAME_LANE_POS[i]);
             slc[team / 4u] += 1u << ((team % 4u) * 8u);
         }
@@ -295,11 +277,11 @@ fn evaluate(base: u32) -> u32 {
     for (var i = 0u; i < 12u; i++) { cb[i] = 0u; }
 
     for (var w = 0u; w < WEEKS; w++) {
-        for (var i = 0u; i < 8u; i++) {
+        for (var i = 0u; i < SLOT0_COUNT; i++) {
             let team = get_team(base, w, SLOT0_POS[i]);
             cb[team] |= 1u << (w * 2u);
         }
-        for (var i = 0u; i < 4u; i++) {
+        for (var i = 0u; i < SLOT4_COUNT; i++) {
             let team = get_team(base, w, SLOT4_POS[i]);
             cb[team] |= 1u << (w * 2u + 1u);
         }

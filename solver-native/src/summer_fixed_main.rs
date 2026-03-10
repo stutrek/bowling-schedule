@@ -80,6 +80,15 @@ pub fn run(shutdown: Arc<AtomicBool>, args: &[String]) {
     let no_cpu = args.iter().any(|a| a == "--no-cpu");
     let sweep = args.iter().any(|a| a == "--sweep");
 
+    // Load template from --template <path>, or use built-in default
+    if let Some(path) = args.windows(2).find(|w| w[0] == "--template").map(|w| w[1].clone()) {
+        let loaded = TemplateConfig::load(&path)
+            .or_else(|_| TemplateConfig::load(&format!("../{}", path)))
+            .unwrap_or_else(|e| panic!("{}", e));
+        init_template(loaded);
+        eprintln!("Loaded template from {}", path);
+    }
+
     let weights_str = fs::read_to_string("summer_fixed_weights.json")
         .or_else(|_| fs::read_to_string("../summer_fixed_weights.json"))
         .expect("Failed to read summer_fixed_weights.json");
@@ -216,10 +225,15 @@ pub fn run(shutdown: Arc<AtomicBool>, args: &[String]) {
         _pad0: 0, _pad1: 0, _pad2: 0,
     };
 
+    // Inject template consts into the GPU shader
+    let solver_wgsl = include_str!("summer_fixed_solver.wgsl")
+        .replace("// TEMPLATE_CONSTS_PLACEHOLDER", &tc().wgsl_consts());
+
     pollster::block_on(run_gpu(
         assign_data, best_assign_data, cost_data, best_cost_data, rng_data,
         gpu_weights, gpu_params, w8, results_dir.to_string(), shutdown, rng,
         cpu_workers, cpu_cores, cpu_temps_display, shared_global_best,
+        solver_wgsl,
     ));
 }
 
@@ -240,6 +254,7 @@ async fn run_gpu(
     cpu_cores: usize,
     cpu_temps_display: Vec<f64>,
     shared_global_best: Arc<AtomicU32>,
+    solver_wgsl: String,
 ) {
     let chain_count = gpu_params.chain_count;
     let mut chain_source: Vec<String> = vec!["random".to_string(); chain_count as usize];
@@ -249,7 +264,7 @@ async fn run_gpu(
         bytemuck::bytes_of(&gpu_weights), &gpu_params,
         bytemuck::bytes_of(&FIXED_THRESH_DEFAULT),
         FIXED_ASSIGN_U32S,
-        include_str!("summer_fixed_solver.wgsl"),
+        &solver_wgsl,
         include_str!("summer_fixed_exchange.wgsl"),
     ).await;
 

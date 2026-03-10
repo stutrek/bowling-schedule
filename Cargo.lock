@@ -920,6 +920,7 @@ dependencies = [
  "ctrlc",
  "pollster",
  "rand",
+ "serde",
  "serde_json",
  "solver-core",
  "wgpu",
