@@ -2,6 +2,8 @@
     "not_consecutive": 60,
     "lane_switch_consecutive": 80,
     "lane_switch_same_pair": 60,
+    "lane_switch_early": 30,
+    "lane_switch_early_same_pair": 15,
     "lane_pair_break": 15,
     "time_gap_large": 60,
     "repeat_matchup": 200

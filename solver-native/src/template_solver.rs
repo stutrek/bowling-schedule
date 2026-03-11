@@ -41,6 +41,8 @@ struct TemplateWeights {
     not_consecutive: u32,
     lane_switch_consecutive: u32,
     lane_switch_same_pair: u32,
+    lane_switch_early: u32,
+    lane_switch_early_same_pair: u32,
     lane_pair_break: u32,
     time_gap_large: u32,
     repeat_matchup: u32,
@@ -52,6 +54,8 @@ impl Default for TemplateWeights {
             not_consecutive: 50,
             lane_switch_consecutive: 40,
             lane_switch_same_pair: 20,
+            lane_switch_early: 20,
+            lane_switch_early_same_pair: 10,
             lane_pair_break: 15,
             time_gap_large: 60,
             repeat_matchup: 200,
@@ -151,16 +155,27 @@ fn evaluate_breakdown(t: &Template, w8: &TemplateWeights) -> CostBreakdown {
         }
 
         if !forced_lane_switch {
+            // Lane switch penalty between two consecutive slots.
+            // Slot 0→1 (games 1→2) uses the early discount.
+            let lane_sw_penalty = |from_slot: u8, la: u8, lb: u8| -> u32 {
+                if la == lb { return 0; }
+                if from_slot == 0 {
+                    if la / 2 == lb / 2 { w8.lane_switch_early_same_pair }
+                    else { w8.lane_switch_early }
+                } else if la / 2 == lb / 2 {
+                    w8.lane_switch_same_pair
+                } else {
+                    w8.lane_switch_consecutive
+                }
+            };
+
             if is_consecutive {
                 let mut lane_pen = false;
                 for i in 0..2 {
-                    if lanes[i] != lanes[i + 1] {
+                    let p = lane_sw_penalty(slots[i], lanes[i], lanes[i + 1]);
+                    if p > 0 {
                         lane_pen = true;
-                        if lanes[i] / 2 == lanes[i + 1] / 2 {
-                            bd.lane_switch += w8.lane_switch_same_pair;
-                        } else {
-                            bd.lane_switch += w8.lane_switch_consecutive;
-                        }
+                        bd.lane_switch += p;
                     }
                 }
                 if lane_pen {
@@ -170,26 +185,20 @@ fn evaluate_breakdown(t: &Template, w8: &TemplateWeights) -> CostBreakdown {
                 // Two consecutive + one break game
                 let mut pen = false;
                 if slots[1] == slots[0] + 1 {
-                    if lanes[0] != lanes[1] {
+                    let p = lane_sw_penalty(slots[0], lanes[0], lanes[1]);
+                    if p > 0 {
                         pen = true;
-                        if lanes[0] / 2 == lanes[1] / 2 {
-                            bd.lane_switch += w8.lane_switch_same_pair;
-                        } else {
-                            bd.lane_switch += w8.lane_switch_consecutive;
-                        }
+                        bd.lane_switch += p;
                     }
                     if lanes[0] / 2 != lanes[2] / 2 {
                         pen = true;
                         bd.lane_pair_break += w8.lane_pair_break;
                     }
                 } else if slots[2] == slots[1] + 1 {
-                    if lanes[1] != lanes[2] {
+                    let p = lane_sw_penalty(slots[1], lanes[1], lanes[2]);
+                    if p > 0 {
                         pen = true;
-                        if lanes[1] / 2 == lanes[2] / 2 {
-                            bd.lane_switch += w8.lane_switch_same_pair;
-                        } else {
-                            bd.lane_switch += w8.lane_switch_consecutive;
-                        }
+                        bd.lane_switch += p;
                     }
                     if lanes[1] / 2 != lanes[0] / 2 {
                         pen = true;
