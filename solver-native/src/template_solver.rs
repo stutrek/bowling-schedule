@@ -617,6 +617,59 @@ fn print_template_layout(t: &Template) {
         non_consec, non_consec_diff_lane);
 }
 
+// ─── Lane balance feasibility check ─────────────────────────────────────────
+
+/// Check whether the schedule solver's lane balance targets are structurally
+/// achievable given this template's slot/lane layout.
+///
+/// Per week, lanes 0-1 get 8 team-appearances each (4 slots × 2 teams) and
+/// lanes 2-3 get 10 each (4 slots + slot 4). Over 10 weeks with 12 teams,
+/// the per-team averages are 6.67 and 8.33 respectively. The schedule solver
+/// targets must accommodate this.
+fn check_lane_feasibility() {
+    const WEEKS: u32 = 10;
+    const TEAMS: u32 = 12;
+    // Schedule solver targets (must match summer_fixed.rs evaluate_fixed)
+    const TARGETS: [(u32, u32); LANES] = [(6, 7), (6, 7), (8, 9), (8, 9)];
+
+    let mut lane_totals = [0u32; LANES];
+    for &(_, lane) in &ENTRY_SLOTS_LANES {
+        lane_totals[lane as usize] += 2;
+    }
+
+    let mut min_penalty = 0u32;
+    let mut ok = true;
+    for l in 0..LANES {
+        let total = lane_totals[l] * WEEKS; // total team-appearances over season
+        let (lo, hi) = TARGETS[l];
+        let target_lo = TEAMS * lo;
+        let target_hi = TEAMS * hi;
+        if total < target_lo {
+            min_penalty += target_lo - total;
+            ok = false;
+        } else if total > target_hi {
+            min_penalty += total - target_hi;
+            ok = false;
+        }
+    }
+
+    let avgs: Vec<String> = lane_totals.iter()
+        .map(|&t| format!("{:.2}", (t * WEEKS) as f64 / TEAMS as f64))
+        .collect();
+    let target_strs: Vec<String> = TARGETS.iter()
+        .map(|&(lo, hi)| format!("[{},{}]", lo, hi))
+        .collect();
+
+    if ok {
+        eprintln!("Lane feasibility: OK (per-team avgs: {}, targets: {})",
+            avgs.join(", "), target_strs.join(", "));
+    } else {
+        eprintln!("WARNING: Lane balance targets NOT achievable! min penalty = {}", min_penalty);
+        eprintln!("  Per-team avgs: {}  targets: {}",
+            avgs.join(", "), target_strs.join(", "));
+    }
+}
+
 // ─── Main ───────────────────────────────────────────────────────────────────
 
 fn main() {
@@ -642,6 +695,8 @@ fn main() {
     eprintln!("Weights: not_consec={} lane_sw={} pair={} gap={} repeat={}",
         w8.not_consecutive, w8.lane_switch_consecutive, w8.lane_pair_break,
         w8.time_gap_large, w8.repeat_matchup);
+
+    check_lane_feasibility();
 
     eprintln!("Template SA solver — {} threads", num_threads);
     eprintln!("Searching for template maximizing 3-in-a-row...");

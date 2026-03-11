@@ -14,10 +14,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 const SYNC_INTERVAL: u64 = 10;
-const STAGNATION_DISPATCHES: u64 = 900;
-const ESCALATION_DISPATCHES: u64 = 4500;
 const VERIFY_INTERVAL_SECS: u64 = 30;
-const SAVE_THRESHOLD: u32 = 1300;
+const SAVE_THRESHOLD: u32 = 600;
 const FIXED_GPU_TEMP_MIN: f64 = 6.0;
 const FIXED_GPU_TEMP_MAX: f64 = 16.0;
 const FIXED_CPU_TEMP_MIN: f64 = 8.0;
@@ -26,10 +24,6 @@ const FIXED_CPU_TEMP_MAX: f64 = 14.0;
 fn fixed_temp_for_level(level: usize) -> f64 {
     let t_frac = level as f64 / (POD_SIZE - 1).max(1) as f64;
     FIXED_GPU_TEMP_MIN * (FIXED_GPU_TEMP_MAX / FIXED_GPU_TEMP_MIN).powf(t_frac)
-}
-
-struct PartitionState {
-    dispatches_since_improvement: u64,
 }
 
 fn maybe_save_result(
@@ -210,9 +204,9 @@ pub fn run(shutdown: Arc<AtomicBool>, args: &[String]) {
         slot_balance: w8.slot_balance,
         lane_balance: w8.lane_balance,
         game5_lane_balance: w8.game5_lane_balance,
-        same_lane_balance: w8.same_lane_balance,
         commissioner_overlap: w8.commissioner_overlap,
         matchup_spacing: w8.matchup_spacing,
+        break_balance: w8.break_balance,
         _pad0: 0,
     };
 
@@ -274,13 +268,7 @@ async fn run_gpu(
     let start_time = Instant::now();
     let mut last_verify = Instant::now();
     let mut last_thresh = FIXED_THRESH_DEFAULT;
-    let mut partitions: Vec<PartitionState> = (0..cpu_cores)
-        .map(|_| PartitionState { dispatches_since_improvement: 0 })
-        .collect();
-
     let mut worker_metas: Vec<FixedWorkerMeta> = (0..cpu_cores).map(|_| FixedWorkerMeta {
-        reseeded_at: Instant::now(),
-        cost_at_reseed: u32::MAX,
         last_report: None,
         prev_iterations: 0,
         prev_iter_time: Instant::now(),
@@ -294,7 +282,6 @@ async fn run_gpu(
     };
     let mut partition_cpu_bests: Vec<u32> = vec![0; cpu_cores];
     let mut partition_gpu_bests: Vec<u32> = vec![0; cpu_cores];
-    let mut partition_gpu_seeded: Vec<u32> = vec![0; cpu_cores];
     let mut partition_sweep_bests: Vec<u32> = vec![0; cpu_cores];
     let mut sweep_start_cost: Vec<u32> = vec![u32::MAX; cpu_cores];
     let mut counts_reset_done = false;
@@ -354,7 +341,7 @@ async fn run_gpu(
                     for (i, meta) in worker_metas.iter().enumerate() {
                         if let Some(ref report) = meta.last_report {
                             let temp = if i < cpu_temps_display.len() { cpu_temps_display[i] } else { 0.0 };
-                            print_fixed_cpu_row(i, report, &w8, meta, temp, partitions[i].dispatches_since_improvement);
+                            print_fixed_cpu_row(i, report, &w8, meta, temp);
                             lines += 1;
                         }
                     }
@@ -510,14 +497,12 @@ async fn run_gpu(
         gpu.costs_readback_buf.unmap();
 
         dispatch_count += 1;
-        for p in partitions.iter_mut() { p.dispatches_since_improvement += 1; }
 
         if !counts_reset_done && start_time.elapsed().as_secs() >= 180 {
             counts_reset_done = true;
             for i in 0..cpu_cores {
                 partition_cpu_bests[i] = 0;
                 partition_gpu_bests[i] = 0;
-                partition_gpu_seeded[i] = 0;
                 partition_sweep_bests[i] = 0;
             }
             event!(start_time.elapsed(), "RESET partition counters");
@@ -588,7 +573,6 @@ async fn run_gpu(
             if gpu_part_cost < partition_best_cost[pi] {
                 let prev = partition_best_cost[pi];
                 partition_best_cost[pi] = gpu_part_cost;
-                partitions[pi].dispatches_since_improvement = 0;
                 partition_gpu_bests[pi] += 1;
                 worker_metas[pi].best_found_at = Instant::now();
                 event!(start_time.elapsed(), &format!(
@@ -603,7 +587,6 @@ async fn run_gpu(
                 global_best_cost = gpu_part_cost;
                 shared_global_best.store(global_best_cost, Ordering::Relaxed);
                 global_best_sched = Some(sched);
-                partitions[pi].dispatches_since_improvement = 0;
                 global_best_meta = GlobalBestMeta {
                     source: format!("gpu-p{}-T{:.1}", pi, temp_val),
                     found_at: Instant::now(),
@@ -619,7 +602,6 @@ async fn run_gpu(
 
                 // Push new global best to the owning CPU worker only
                 let _ = cpu_workers.commands[pi].send(FixedWorkerCommand::SetState(sched));
-                worker_metas[pi].reseeded_at = Instant::now();
             }
         }
 
@@ -706,15 +688,12 @@ async fn run_gpu(
                 if real_best < partition_best_cost[cid] {
                     let prev = partition_best_cost[cid];
                     partition_best_cost[cid] = real_best;
-                    partitions[cid].dispatches_since_improvement = 0;
                     worker_metas[cid].best_found_at = Instant::now();
                     if report.sweep_round.is_some() {
                         partition_sweep_bests[cid] += 1;
                     } else {
                         partition_cpu_bests[cid] += 1;
                     }
-                    let since_reseed = worker_metas[cid].reseeded_at.elapsed().as_secs();
-                    if since_reseed < 30 { partition_gpu_seeded[cid] += 1; }
                     event!(start_time.elapsed(), &format!(
                         "PARTITION {} NEW BEST {} (was {}) from cpu{}", cid, real_best, prev, cid));
 
@@ -726,7 +705,6 @@ async fn run_gpu(
                     global_best_cost = real_best;
                     shared_global_best.store(global_best_cost, Ordering::Relaxed);
                     global_best_sched = Some(report.best_sched);
-                    partitions[cid].dispatches_since_improvement = 0;
                     global_best_meta = GlobalBestMeta {
                         source: format!("cpu{}", cid),
                         found_at: Instant::now(),
@@ -800,13 +778,8 @@ async fn run_gpu(
                 let p_start = pi * chains_per_cpu;
                 let p_end = ((pi + 1) * chains_per_cpu).min(chain_count as usize);
                 let p_len = p_end - p_start;
-                let stag = partitions[pi].dispatches_since_improvement;
 
-                let base_reseed = p_len / 50;
-                let reseed_count = if stag < 5 { base_reseed / 2 }
-                    else if stag > STAGNATION_DISPATCHES { base_reseed * 2 }
-                    else { base_reseed };
-
+                let reseed_count = p_len / 50;
                 for _ in 0..reseed_count {
                     let idx = p_start + rng.random_range(0..p_len);
                     let level_in_pod = (idx % TEMP_LEVELS) % POD_SIZE;
@@ -823,42 +796,6 @@ async fn run_gpu(
                     gpu.queue.write_buffer(&gpu.cost_buf, offset_cost, bytemuck::bytes_of(&cost));
                     gpu.queue.write_buffer(&gpu.best_cost_buf, offset_cost, bytemuck::bytes_of(&cost));
                     chain_source[idx] = source_label.clone();
-                }
-
-                if stag >= STAGNATION_DISPATCHES {
-                    if stag % STAGNATION_DISPATCHES < SYNC_INTERVAL {
-                        event!(start_time.elapsed(), &format!(
-                            "SHAKEUP: partition {} (stagnant {} dispatches)", pi, stag));
-                    }
-                    let inject_count = p_len / 20;
-                    for _ in 0..inject_count {
-                        let idx = p_start + rng.random_range(0..p_len);
-                        let level_in_pod = (idx % TEMP_LEVELS) % POD_SIZE;
-                        let t_frac = level_in_pod as f64 / (POD_SIZE - 1).max(1) as f64;
-                        let pert = 3 + (t_frac * t_frac * 7.0) as usize;
-                        let mut s = seed_sched;
-                        perturb_fixed(&mut s, &mut rng, pert);
-                        let packed = pack_fixed_schedule(&s);
-                        let cost = evaluate_fixed(&s, &w8).total;
-                        let offset_assign = (idx * FIXED_ASSIGN_U32S * 4) as u64;
-                        let offset_cost = (idx * 4) as u64;
-                        gpu.queue.write_buffer(&gpu.assign_buf, offset_assign, bytemuck::cast_slice(&packed));
-                        gpu.queue.write_buffer(&gpu.best_assign_buf, offset_assign, bytemuck::cast_slice(&packed));
-                        gpu.queue.write_buffer(&gpu.cost_buf, offset_cost, bytemuck::bytes_of(&cost));
-                        gpu.queue.write_buffer(&gpu.best_cost_buf, offset_cost, bytemuck::bytes_of(&cost));
-                        chain_source[idx] = source_label.clone();
-                    }
-                }
-
-                if stag >= ESCALATION_DISPATCHES && stag % ESCALATION_DISPATCHES < SYNC_INTERVAL {
-                    event!(start_time.elapsed(), &format!(
-                        "ESCALATED SHAKEUP: partition {}", pi));
-                    reseed_partition_chains(
-                        &gpu.queue, &gpu.assign_buf, &gpu.best_assign_buf,
-                        &gpu.cost_buf, &gpu.best_cost_buf,
-                        &mut chain_source, &w8,
-                        &seed_sched, &source_label, p_start, p_end,
-                    );
                 }
                 maybe_print_table!();
             }

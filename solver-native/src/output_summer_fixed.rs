@@ -4,8 +4,6 @@ use solver_core::summer_fixed::{evaluate_fixed, fixed_cost_label, FixedWeights};
 use std::time::Instant;
 
 pub struct FixedWorkerMeta {
-    pub reseeded_at: Instant,
-    pub cost_at_reseed: u32,
     pub last_report: Option<FixedWorkerReport>,
     pub prev_iterations: u64,
     pub prev_iter_time: Instant,
@@ -51,10 +49,10 @@ pub fn print_fixed_table_banner(
 
 pub fn print_fixed_table_header() {
     eprintln!(
-        "{:>4} {:>9}  {:>5} {:>5}  {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9}  {:>6}  {}\x1b[K",
+        "{:>4} {:>9}  {:>5} {:>5}  {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9}  {}\x1b[K",
         "src", "temp", "cur", "best",
-        "matchup", "slot", "lane", "g5lane", "same", "comm", "spacing",
-        "stag", "state",
+        "matchup", "slot", "lane", "g5lane", "comm", "spacing", "break",
+        "state",
     );
 }
 
@@ -64,22 +62,18 @@ pub fn print_fixed_cpu_row(
     w8: &FixedWeights,
     meta: &FixedWorkerMeta,
     initial_temp: f64,
-    _stagnation: u64,
 ) {
     let cur_bd = evaluate_fixed(&report.current_sched, w8);
     let best_bd = evaluate_fixed(&report.best_sched, w8);
-    let since = meta.reseeded_at.elapsed().as_secs();
     let state = if let Some((cur, total)) = report.sweep_round {
             format!("SWEEP {}/{}", cur, total)
-        } else if since < 30 { format!("shook+{}s", since) }
-        else { "normal".to_string() };
+        } else { "normal".to_string() };
     let best_age = meta.best_found_at.elapsed().as_secs();
     let bold = if best_age < 10 { "\x1b[1m" } else { "" };
     let reset = if best_age < 10 { "\x1b[0m" } else { "" };
-    let stag_k = report.iterations_since_improve / 1000;
     let temp_str = format!("{:.0}/{:.1}", initial_temp, report.current_temp);
     eprintln!(
-        "{}cpu{:<1} {:>9}  {:>5} {:>5}  {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4}  {:>5}k  {}{}\x1b[K",
+        "{}cpu{:<1} {:>9}  {:>5} {:>5}  {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4}  {}{}\x1b[K",
         bold,
         core_id, temp_str,
         cur_bd.total, best_bd.total,
@@ -87,10 +81,9 @@ pub fn print_fixed_cpu_row(
         cur_bd.slot_balance, best_bd.slot_balance,
         cur_bd.lane_balance, best_bd.lane_balance,
         cur_bd.game5_lane_balance, best_bd.game5_lane_balance,
-        cur_bd.same_lane_balance, best_bd.same_lane_balance,
         cur_bd.commissioner_overlap, best_bd.commissioner_overlap,
         cur_bd.matchup_spacing, best_bd.matchup_spacing,
-        stag_k,
+        cur_bd.break_balance, best_bd.break_balance,
         state, reset,
     );
 }

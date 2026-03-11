@@ -21,9 +21,9 @@ export interface SummerCostBreakdown {
     slotBalance: number;
     laneBalance: number;
     game5LaneBalance: number;
-    sameLaneBalance: number;
     commissionerOverlap: number;
     matchupSpacing: number;
+    breakBalance: number;
     total: number;
 }
 
@@ -37,7 +37,7 @@ export interface SummerAnalysis {
     slotCounts: number[][]; // [slot][team] count
     teamWeekSlots: number[][][]; // [team][week] -> sorted slot indices
     laneSwitchCounts: { consecutive: number; postBreak: number }[]; // per team
-    sameLaneCounts: number[]; // per team: weeks where all slot 0-3 games are on the same lane
+    breakCounts: number[]; // per team: weeks where team has a break (non-consecutive slots)
 }
 
 export function isValidPosition(slot: number, pair: number): boolean {
@@ -191,26 +191,16 @@ export function analyzeSummerSchedule(
         }
     }
 
-    // Same lane counts: weeks where team's slot 0-3 games are all on the same lane
-    const sameLaneCounts = new Array(S_TEAMS).fill(0);
-    for (let w = 0; w < S_WEEKS; w++) {
-        for (let t = 0; t < S_TEAMS; t++) {
-            const lanes: number[] = [];
-            for (let s = 0; s < 4; s++) {
-                for (let p = 0; p < S_PAIRS; p++) {
-                    const m = schedule[w][s][p];
-                    if (!m) continue;
-                    if (m.teamA === t || m.teamB === t) {
-                        lanes.push(p);
-                    }
-                }
-            }
-            if (
-                lanes.length === 3 &&
-                lanes[0] === lanes[1] &&
-                lanes[1] === lanes[2]
-            ) {
-                sameLaneCounts[t]++;
+    // Break counts: weeks where team has non-consecutive slots (a break game)
+    const breakCounts = new Array(S_TEAMS).fill(0);
+    for (let t = 0; t < S_TEAMS; t++) {
+        for (let w = 0; w < S_WEEKS; w++) {
+            const slots = teamWeekSlots[t][w];
+            if (slots.length !== 3) continue;
+            const isConsecutive =
+                slots[1] === slots[0] + 1 && slots[2] === slots[1] + 1;
+            if (!isConsecutive) {
+                breakCounts[t]++;
             }
         }
     }
@@ -221,7 +211,7 @@ export function analyzeSummerSchedule(
         slotCounts,
         teamWeekSlots,
         laneSwitchCounts,
-        sameLaneCounts,
+        breakCounts,
     };
 }
 
@@ -236,12 +226,8 @@ export function evaluateSummerCost(
     // game 5 (slot 4) lane counts per team
     const game5Lane2 = new Array(S_TEAMS).fill(0);
     const game5Lane3 = new Array(S_TEAMS).fill(0);
-    // Track which slots each team plays in per week (for commissioner + same lane)
+    // Track which slots each team plays in per week (for commissioner + break balance)
     const teamWeekSlots: number[][][] = Array.from({ length: S_WEEKS }, () =>
-        Array.from({ length: S_TEAMS }, () => []),
-    );
-    // Track which lanes each team plays on in slots 0-3 per week
-    const teamWeekLanes: number[][][] = Array.from({ length: S_WEEKS }, () =>
         Array.from({ length: S_TEAMS }, () => []),
     );
 
@@ -276,10 +262,6 @@ export function evaluateSummerCost(
                         game5Lane3[t1]++;
                         game5Lane3[t2]++;
                     }
-                } else {
-                    // Track lanes for slots 0-3 (for same lane detection)
-                    teamWeekLanes[w][t1].push(p);
-                    teamWeekLanes[w][t2].push(p);
                 }
             }
         }
@@ -313,14 +295,14 @@ export function evaluateSummerCost(
         }
     }
 
-    // 3. Lane balance: lanes 0-1 target 7, lanes 2-3 target 8, scaled by distance
+    // 3. Lane balance: lanes 0-1 target [6,7], lanes 2-3 target [8,9]
     let laneBalance = 0;
     for (let t = 0; t < S_TEAMS; t++) {
         for (let l = 0; l < S_LANES; l++) {
             const c = laneCnts[t * S_LANES + l];
-            const target = l < 2 ? 7 : 8;
-            if (c !== target)
-                laneBalance += w8.lane_balance * Math.abs(c - target);
+            const [lo, hi] = l < 2 ? [6, 7] : [8, 9];
+            if (c < lo) laneBalance += w8.lane_balance * (lo - c);
+            else if (c > hi) laneBalance += w8.lane_balance * (c - hi);
         }
     }
 
@@ -333,31 +315,7 @@ export function evaluateSummerCost(
         }
     }
 
-    // 5. Same lane balance: count weeks where team's slot 0-3 games are all on the same lane
-    // 8 teams play only in slots 0-3 each week (not in game 5), of those 4 stay on one lane.
-    // Target per team: [3,4]
-    const sameLaneCounts = new Array(S_TEAMS).fill(0);
-    for (let w = 0; w < S_WEEKS; w++) {
-        for (let t = 0; t < S_TEAMS; t++) {
-            const lanes = teamWeekLanes[w][t];
-            // Team must have exactly 3 games in slots 0-3 (not playing game 5)
-            if (
-                lanes.length === 3 &&
-                lanes[0] === lanes[1] &&
-                lanes[1] === lanes[2]
-            ) {
-                sameLaneCounts[t]++;
-            }
-        }
-    }
-    let sameLaneBalance = 0;
-    for (let t = 0; t < S_TEAMS; t++) {
-        const c = sameLaneCounts[t];
-        if (c < 3) sameLaneBalance += w8.same_lane_balance * (3 - c);
-        else if (c > 4) sameLaneBalance += w8.same_lane_balance * (c - 4);
-    }
-
-    // 6. Commissioner overlap: minimize co-appearance in slot 0 and slot 4
+    // 5. Commissioner overlap: minimize co-appearance in slot 0 and slot 4
     const teamSlot0 = Array.from({ length: S_TEAMS }, () =>
         new Array(S_WEEKS).fill(false),
     );
@@ -418,23 +376,56 @@ export function evaluateSummerCost(
         }
     }
 
+    // 8. Break balance: each team should have break weeks ~1/3 of the time
+    // Count break positions per week by checking all teams' slot patterns
+    let breakPositionsPerWeek = 0;
+    // Check week 0 to count how many teams have non-consecutive slots
+    for (let t = 0; t < S_TEAMS; t++) {
+        const slots = teamWeekSlots[0][t];
+        if (slots.length === 3) {
+            const isConsecutive =
+                slots[1] === slots[0] + 1 && slots[2] === slots[1] + 1;
+            if (!isConsecutive) breakPositionsPerWeek++;
+        }
+    }
+    const totalBreakSlots = breakPositionsPerWeek * S_WEEKS;
+    const targetLo = Math.floor(totalBreakSlots / S_TEAMS);
+    const targetHi = Math.ceil(totalBreakSlots / S_TEAMS);
+    const breakCounts = new Array(S_TEAMS).fill(0);
+    for (let w = 0; w < S_WEEKS; w++) {
+        for (let t = 0; t < S_TEAMS; t++) {
+            const slots = teamWeekSlots[w][t];
+            if (slots.length !== 3) continue;
+            const isConsecutive =
+                slots[1] === slots[0] + 1 && slots[2] === slots[1] + 1;
+            if (!isConsecutive) breakCounts[t]++;
+        }
+    }
+    let breakBalance = 0;
+    for (let t = 0; t < S_TEAMS; t++) {
+        const c = breakCounts[t];
+        if (c < targetLo) breakBalance += w8.break_balance * (targetLo - c);
+        else if (c > targetHi)
+            breakBalance += w8.break_balance * (c - targetHi);
+    }
+
     const total =
         matchupBalance +
         slotBalance +
         laneBalance +
         game5LaneBalance +
-        sameLaneBalance +
         commissionerOverlap +
-        matchupSpacing;
+        matchupSpacing +
+        breakBalance;
 
     return {
         matchupBalance,
         slotBalance,
         laneBalance,
         game5LaneBalance,
-        sameLaneBalance,
         commissionerOverlap,
         matchupSpacing,
+        breakBalance,
         total,
     };
 }

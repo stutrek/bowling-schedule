@@ -21,9 +21,9 @@ struct Weights {
     slot_balance: u32,
     lane_balance: u32,
     game5_lane_balance: u32,
-    same_lane_balance: u32,
     commissioner_overlap: u32,
     matchup_spacing: u32,
+    break_balance: u32,
     _pad0: u32,
 }
 
@@ -215,11 +215,11 @@ fn evaluate(base: u32) -> u32 {
             let idx = t * 4u + l;
             let c = (lc[idx / 4u] >> ((idx % 4u) * 8u)) & 0xFFu;
             if (l < 2u) {
-                if (c < 7u) { cost += weights.lane_balance * (7u - c); }
+                if (c < 6u) { cost += weights.lane_balance * (6u - c); }
                 else if (c > 7u) { cost += weights.lane_balance * (c - 7u); }
             } else {
                 if (c < 8u) { cost += weights.lane_balance * (8u - c); }
-                else if (c > 8u) { cost += weights.lane_balance * (c - 8u); }
+                else if (c > 9u) { cost += weights.lane_balance * (c - 9u); }
             }
         }
     }
@@ -256,23 +256,7 @@ fn evaluate(base: u32) -> u32 {
         }
     }
 
-    // 5. Same lane balance: count SAME_LANE_POS per team, penalize outside [3,4]
-    var slc: array<u32, 3>;
-    for (var i = 0u; i < 3u; i++) { slc[i] = 0u; }
-
-    for (var w = 0u; w < WEEKS; w++) {
-        for (var i = 0u; i < SAME_LANE_COUNT; i++) {
-            let team = get_team(base, w, SAME_LANE_POS[i]);
-            slc[team / 4u] += 1u << ((team % 4u) * 8u);
-        }
-    }
-    for (var t = 0u; t < TEAMS; t++) {
-        let c = (slc[t / 4u] >> ((t % 4u) * 8u)) & 0xFFu;
-        if (c < 3u) { cost += weights.same_lane_balance * (3u - c); }
-        else if (c > 4u) { cost += weights.same_lane_balance * (c - 4u); }
-    }
-
-    // 6. Commissioner overlap: comm_bits per team, min pair overlap
+    // 5. Commissioner overlap: comm_bits per team, min pair overlap
     var cb: array<u32, 12>;
     for (var i = 0u; i < 12u; i++) { cb[i] = 0u; }
 
@@ -337,6 +321,25 @@ fn evaluate(base: u32) -> u32 {
                 found_first = true;
             }
         }
+    }
+
+    // 8. Break balance: each team should be in break positions ~1/3 of weeks
+    // Target per team: BREAK_COUNT * 10 / 12, use floor/ceil as [lo, hi]
+    let total_break_slots = BREAK_COUNT * WEEKS;
+    let target_lo = total_break_slots / TEAMS;
+    let target_hi = (total_break_slots + TEAMS - 1u) / TEAMS;
+    var brc: array<u32, 3>;  // 12 counters packed 4 per u32
+    for (var i = 0u; i < 3u; i++) { brc[i] = 0u; }
+    for (var w = 0u; w < WEEKS; w++) {
+        for (var i = 0u; i < BREAK_COUNT; i++) {
+            let team = get_team(base, w, BREAK_POS[i]);
+            brc[team / 4u] += 1u << ((team % 4u) * 8u);
+        }
+    }
+    for (var t = 0u; t < TEAMS; t++) {
+        let c = (brc[t / 4u] >> ((t % 4u) * 8u)) & 0xFFu;
+        if (c < target_lo) { cost += weights.break_balance * (target_lo - c); }
+        else if (c > target_hi) { cost += weights.break_balance * (c - target_hi); }
     }
 
     return cost;

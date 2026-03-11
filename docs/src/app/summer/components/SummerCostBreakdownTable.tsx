@@ -28,11 +28,6 @@ export default function SummerCostBreakdownTable() {
             desc: 'Game 5 appearances split evenly between lanes 3 and 4',
         },
         {
-            label: 'Same lane balance',
-            value: cost.sameLaneBalance,
-            desc: 'Same lane for all games 1-4: 3-4 times per team',
-        },
-        {
             label: 'Commissioner overlap',
             value: cost.commissionerOverlap,
             desc: 'Min pair co-appearance in games 1 and 5',
@@ -41,6 +36,11 @@ export default function SummerCostBreakdownTable() {
             label: 'Matchup spacing',
             value: cost.matchupSpacing,
             desc: '2 matchups: 4+ weeks apart; 3 matchups: 2+ weeks apart',
+        },
+        {
+            label: 'Break balance',
+            value: cost.breakBalance,
+            desc: 'Each team gets break weeks ~1/3 of the time',
         },
     ];
 

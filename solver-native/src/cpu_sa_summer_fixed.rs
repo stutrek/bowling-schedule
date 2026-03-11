@@ -108,7 +108,7 @@ fn worker_loop(
     let mut best_cost = current_cost;
 
     let mut temp: f64 = initial_temp;
-    let cooling_rate: f64 = 0.99999983;
+    let cooling_rate: f64 = 0.99999915;
     let min_temp: f64 = 1.0;
     let mut iterations_since_improve: u64 = 0;
     let mut iterations_total: u64 = 0;
@@ -301,14 +301,6 @@ fn worker_loop(
             stats_iters = 0;
         }
 
-        // When SA stagnates, trigger a sweep from best
-        if iterations_since_improve > 50_000_000 {
-            sched = best_sched;
-            temp = min_temp;
-            bd = evaluate_fixed(&sched, &w8);
-            current_cost = bd.total;
-            iterations_since_improve = 0;
-        }
     }
 }
 

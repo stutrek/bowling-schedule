@@ -9,7 +9,10 @@
             "Bash(npx next build)",
             "Bash(cargo build --release -p solver-native --bin template_solver)",
             "Bash(cargo run --release -p solver-native --bin template_solver)",
-            "Bash(cargo check -p solver-native --bin template_solver)"
+            "Bash(cargo check -p solver-native --bin template_solver)",
+            "Bash(cargo check)",
+            "Bash(cargo test)",
+            "Bash(npx biome:*)"
         ]
     }
 }

@@ -2,109 +2,109 @@
     {
         "slot": 0,
         "lane": 0,
-        "pos_a": 5,
-        "pos_b": 3
+        "pos_a": 9,
+        "pos_b": 11
     },
     {
         "slot": 0,
         "lane": 1,
-        "pos_a": 11,
+        "pos_a": 6,
         "pos_b": 4
     },
     {
         "slot": 0,
         "lane": 2,
-        "pos_a": 10,
-        "pos_b": 9
+        "pos_a": 7,
+        "pos_b": 8
     },
     {
         "slot": 0,
         "lane": 3,
         "pos_a": 1,
-        "pos_b": 8
+        "pos_b": 10
     },
     {
         "slot": 1,
         "lane": 0,
-        "pos_a": 11,
-        "pos_b": 5
-    },
-    {
-        "slot": 1,
-        "lane": 1,
-        "pos_a": 3,
-        "pos_b": 4
-    },
-    {
-        "slot": 1,
-        "lane": 2,
-        "pos_a": 10,
-        "pos_b": 1
-    },
-    {
-        "slot": 1,
-        "lane": 3,
-        "pos_a": 9,
-        "pos_b": 8
-    },
-    {
-        "slot": 2,
-        "lane": 0,
-        "pos_a": 7,
-        "pos_b": 11
-    },
-    {
-        "slot": 2,
-        "lane": 1,
-        "pos_a": 4,
-        "pos_b": 0
-    },
-    {
-        "slot": 2,
-        "lane": 2,
-        "pos_a": 10,
-        "pos_b": 2
-    },
-    {
-        "slot": 2,
-        "lane": 3,
         "pos_a": 6,
         "pos_b": 9
     },
     {
-        "slot": 3,
+        "slot": 1,
+        "lane": 1,
+        "pos_a": 11,
+        "pos_b": 4
+    },
+    {
+        "slot": 1,
+        "lane": 2,
+        "pos_a": 10,
+        "pos_b": 8
+    },
+    {
+        "slot": 1,
+        "lane": 3,
+        "pos_a": 1,
+        "pos_b": 7
+    },
+    {
+        "slot": 2,
         "lane": 0,
-        "pos_a": 7,
+        "pos_a": 3,
+        "pos_b": 6
+    },
+    {
+        "slot": 2,
+        "lane": 1,
+        "pos_a": 2,
+        "pos_b": 4
+    },
+    {
+        "slot": 2,
+        "lane": 2,
+        "pos_a": 8,
+        "pos_b": 0
+    },
+    {
+        "slot": 2,
+        "lane": 3,
+        "pos_a": 1,
         "pos_b": 5
     },
     {
         "slot": 3,
-        "lane": 1,
-        "pos_a": 0,
-        "pos_b": 3
+        "lane": 0,
+        "pos_a": 3,
+        "pos_b": 9
     },
     {
         "slot": 3,
-        "lane": 2,
-        "pos_a": 1,
+        "lane": 1,
+        "pos_a": 11,
         "pos_b": 2
     },
     {
         "slot": 3,
+        "lane": 2,
+        "pos_a": 0,
+        "pos_b": 7
+    },
+    {
+        "slot": 3,
         "lane": 3,
-        "pos_a": 8,
-        "pos_b": 6
+        "pos_a": 10,
+        "pos_b": 5
     },
     {
         "slot": 4,
         "lane": 2,
         "pos_a": 2,
-        "pos_b": 7
+        "pos_b": 0
     },
     {
         "slot": 4,
         "lane": 3,
-        "pos_a": 6,
-        "pos_b": 0
+        "pos_a": 5,
+        "pos_b": 3
     }
 ]

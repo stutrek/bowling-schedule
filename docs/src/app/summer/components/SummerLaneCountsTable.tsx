@@ -4,8 +4,8 @@ import { useSummerSchedule } from '../context/SummerScheduleContext';
 import { S_TEAMS } from '../lib/summer-schedule-utils';
 
 function laneColor(lane: number, count: number): string {
-    const target = lane < 2 ? 7 : 8;
-    if (count === target) return 'bg-lime-300';
+    const [lo, hi] = lane < 2 ? [6, 7] : [8, 9];
+    if (count >= lo && count <= hi) return 'bg-lime-300';
     return 'bg-red-300';
 }
 
@@ -17,7 +17,7 @@ export default function SummerLaneCountsTable() {
         <>
             <h2>Lane Balance</h2>
             <p className="text-sm text-gray-600">
-                Lanes 1-2: 7 times per team. Lanes 3-4: 8 times per team.
+                Lanes 1-2: 6-7 times per team. Lanes 3-4: 8-9 times per team.
             </p>
             <div className="overflow-x-auto">
                 <table className="text-sm">
@@ -36,13 +36,13 @@ export default function SummerLaneCountsTable() {
                             <tr key={i}>
                                 <td>Lane {i + 1}</td>
                                 {row.map((count, j) => {
-                                    const target = i < 2 ? 7 : 8;
+                                    const [lo, hi] = i < 2 ? [6, 7] : [8, 9];
                                     return (
                                         <td
                                             // biome-ignore lint/suspicious/noArrayIndexKey: sequential
                                             key={j}
                                             className={laneColor(i, count)}
-                                            title={`Team ${j + 1} on lane ${i + 1}: ${count}x (target ${target})`}
+                                            title={`Team ${j + 1} on lane ${i + 1}: ${count}x (target ${lo}-${hi})`}
                                         >
                                             {count}
                                         </td>

@@ -11,7 +11,7 @@ import SummerMatchupsTable from './components/SummerMatchupsTable';
 import SummerLaneCountsTable from './components/SummerLaneCountsTable';
 import SummerSlotCountsTable from './components/SummerSlotCountsTable';
 import SummerTimeGapsTable from './components/SummerTimeGapsTable';
-import SummerLaneSwitchesTable from './components/SummerLaneSwitchesTable';
+
 import SummerSameLaneTable from './components/SummerSameLaneTable';
 import SummerScheduleEditor from './components/SummerScheduleEditor';
 
@@ -50,7 +50,6 @@ function PageContent() {
                             <SummerSameLaneTable />
                             <SummerSlotCountsTable />
                             <SummerTimeGapsTable />
-                            <SummerLaneSwitchesTable />
                         </>
                     )}
                 </div>

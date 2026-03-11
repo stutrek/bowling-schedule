@@ -3,7 +3,7 @@
 import { useSummerSchedule } from '../context/SummerScheduleContext';
 import { S_TEAMS } from '../lib/summer-schedule-utils';
 
-function sameLaneColor(count: number): string {
+function breakColor(count: number): string {
     if (count >= 3 && count <= 4) return 'bg-lime-300';
     return 'bg-red-300';
 }
@@ -14,10 +14,10 @@ export default function SummerSameLaneTable() {
 
     return (
         <>
-            <h2>Same Lane Balance</h2>
+            <h2>Break Balance</h2>
             <p className="text-sm text-gray-600">
-                Weeks where a team plays all 3 games (slots 1-4) on the same
-                lane. Target: 3-4 per team.
+                Weeks where a team has a break game (non-consecutive slots).
+                Target: 3-4 per team.
             </p>
             <div className="overflow-x-auto">
                 <table className="text-sm">
@@ -31,12 +31,12 @@ export default function SummerSameLaneTable() {
                     </thead>
                     <tbody>
                         <tr>
-                            {analysis.sameLaneCounts.map((count, i) => (
+                            {analysis.breakCounts.map((count, i) => (
                                 <td
                                     // biome-ignore lint/suspicious/noArrayIndexKey: sequential
                                     key={i}
-                                    className={sameLaneColor(count)}
-                                    title={`Team ${i + 1}: ${count} weeks on same lane (target 3-4)`}
+                                    className={breakColor(count)}
+                                    title={`Team ${i + 1}: ${count} break weeks (target 3-4)`}
                                 >
                                     {count}
                                 </td>

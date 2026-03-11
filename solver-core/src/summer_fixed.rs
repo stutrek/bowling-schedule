@@ -52,7 +52,7 @@ pub struct TemplateConfig {
     pub entries: [TemplateEntry; SF_MATCHUPS_PER_WEEK],
     pub slot0_positions: Vec<u8>,
     pub slot4_positions: Vec<u8>,
-    pub same_lane_positions: Vec<u8>,
+    pub break_positions: Vec<u8>,
 }
 
 impl TemplateConfig {
@@ -75,17 +75,17 @@ impl TemplateConfig {
             }
         }
 
-        // same_lane_positions: positions on the same lane for all games in slots 0-3
-        let mut same_lane_positions = Vec::new();
+        // break_positions: positions whose 3 games are NOT all consecutive
+        let mut break_positions = Vec::new();
         for pos in 0..SF_TEAMS as u8 {
-            let games: Vec<&TemplateEntry> = entries.iter()
-                .filter(|e| e.slot < 4 && (e.pos_a == pos || e.pos_b == pos))
+            let mut slots: Vec<u8> = entries.iter()
+                .filter(|e| e.pos_a == pos || e.pos_b == pos)
+                .map(|e| e.slot)
                 .collect();
-            if games.len() == 3 {
-                let lanes: Vec<u8> = games.iter().map(|e| e.lane).collect();
-                if lanes.iter().all(|&l| l == lanes[0]) {
-                    same_lane_positions.push(pos);
-                }
+            slots.sort();
+
+            if slots.len() == 3 && !(slots[1] == slots[0] + 1 && slots[2] == slots[1] + 1) {
+                break_positions.push(pos);
             }
         }
 
@@ -93,7 +93,7 @@ impl TemplateConfig {
             entries,
             slot0_positions: slot0_set.into_iter().collect(),
             slot4_positions: slot4_set.into_iter().collect(),
-            same_lane_positions,
+            break_positions,
         }
     }
 
@@ -131,7 +131,7 @@ impl TemplateConfig {
         let t_pos_b: Vec<u32> = self.entries.iter().map(|e| e.pos_b as u32).collect();
         let slot0: Vec<u32> = self.slot0_positions.iter().map(|&p| p as u32).collect();
         let slot4: Vec<u32> = self.slot4_positions.iter().map(|&p| p as u32).collect();
-        let same_lane: Vec<u32> = self.same_lane_positions.iter().map(|&p| p as u32).collect();
+        let break_pos: Vec<u32> = self.break_positions.iter().map(|&p| p as u32).collect();
 
         let lines = vec![
             fmt_arr("T_SLOT", &t_slot),
@@ -140,10 +140,10 @@ impl TemplateConfig {
             fmt_arr("T_POS_B", &t_pos_b),
             fmt_arr("SLOT0_POS", &slot0),
             fmt_arr("SLOT4_POS", &slot4),
-            fmt_arr("SAME_LANE_POS", &same_lane),
+            fmt_arr("BREAK_POS", &break_pos),
             format!("const SLOT0_COUNT: u32 = {}u;", slot0.len()),
             format!("const SLOT4_COUNT: u32 = {}u;", slot4.len()),
-            format!("const SAME_LANE_COUNT: u32 = {}u;", same_lane.len()),
+            format!("const BREAK_COUNT: u32 = {}u;", break_pos.len()),
         ];
         lines.join("\n")
     }
@@ -214,9 +214,9 @@ pub struct FixedWeights {
     pub slot_balance: u32,
     pub lane_balance: u32,
     pub game5_lane_balance: u32,
-    pub same_lane_balance: u32,
     pub commissioner_overlap: u32,
     pub matchup_spacing: u32,
+    pub break_balance: u32,
 }
 
 #[derive(Clone, Debug)]
@@ -225,24 +225,24 @@ pub struct FixedCostBreakdown {
     pub slot_balance: u32,
     pub lane_balance: u32,
     pub game5_lane_balance: u32,
-    pub same_lane_balance: u32,
     pub commissioner_overlap: u32,
     pub matchup_spacing: u32,
+    pub break_balance: u32,
     pub total: u32,
 }
 
 pub fn fixed_cost_label(c: &FixedCostBreakdown) -> String {
     format!(
-        "total: {:>4} matchup: {:>3} slot: {:>3} lane: {:>3} g5lane: {:>3} same: {:>3} comm: {:>3} spacing: {:>3}",
+        "total: {:>4} matchup: {:>3} slot: {:>3} lane: {:>3} g5lane: {:>3} comm: {:>3} spacing: {:>3} break: {:>3}",
         c.total, c.matchup_balance, c.slot_balance,
-        c.lane_balance, c.game5_lane_balance, c.same_lane_balance, c.commissioner_overlap,
-        c.matchup_spacing,
+        c.lane_balance, c.game5_lane_balance, c.commissioner_overlap,
+        c.matchup_spacing, c.break_balance,
     )
 }
 
 pub const NUM_COST_COMPONENTS: usize = 7;
 pub const COST_LABELS: [&str; NUM_COST_COMPONENTS] = [
-    "matchup", "slot", "lane", "g5lane", "same", "comm", "spacing",
+    "matchup", "slot", "lane", "g5lane", "comm", "spacing", "break",
 ];
 
 /// Generate a random schedule (random permutation per week, random lane swaps).
@@ -336,7 +336,7 @@ pub fn evaluate_fixed(sched: &FixedSchedule, w8: &FixedWeights) -> FixedCostBrea
     for t in 0..SF_TEAMS {
         for l in 0..SF_LANES {
             let c = lane_counts[t * SF_LANES + l];
-            let (lo, hi) = if l < 2 { (7, 7) } else { (8, 8) };
+            let (lo, hi) = if l < 2 { (6, 7) } else { (8, 9) };
             if c < lo || c > hi {
                 let dist = if c < lo { lo - c } else { c - hi };
                 lane_balance += w8.lane_balance * dist;
@@ -369,24 +369,6 @@ pub fn evaluate_fixed(sched: &FixedSchedule, w8: &FixedWeights) -> FixedCostBrea
         let diff = game5_lane2[t].abs_diff(game5_lane3[t]);
         if diff > 1 {
             game5_lane_balance += w8.game5_lane_balance * (diff - 1);
-        }
-    }
-
-    // --- Same lane balance: weeks where team stays on same lane for all games in slots 0-3 ---
-    // 4 "same lane" positions per week × 10 weeks = 40 total "same lane" slots
-    // Target per team: 40/12 ≈ 3.33, so [3,4] is ideal
-    let mut same_lane_counts = [0u32; SF_TEAMS];
-    for w in 0..SF_WEEKS {
-        for &pos in &tc.same_lane_positions {
-            let team = sched.mapping[w][pos as usize] as usize;
-            same_lane_counts[team] += 1;
-        }
-    }
-    let mut same_lane_balance: u32 = 0;
-    for &c in &same_lane_counts {
-        if c < 3 || c > 4 {
-            let dist = if c < 3 { 3 - c } else { c - 4 };
-            same_lane_balance += w8.same_lane_balance * dist;
         }
     }
 
@@ -448,32 +430,55 @@ pub fn evaluate_fixed(sched: &FixedSchedule, w8: &FixedWeights) -> FixedCostBrea
         }
     }
 
+    // --- Break balance: each team should get break positions ~1/3 of weeks ---
+    // break_positions.len() positions have breaks per week, across 10 weeks
+    // Target per team: break_count * 10 / 12. Use floor/ceil as [lo, hi].
+    let break_count = tc.break_positions.len() as u32;
+    let total_break_slots = break_count * SF_WEEKS as u32;
+    let target_lo = total_break_slots / SF_TEAMS as u32;
+    let target_hi = (total_break_slots + SF_TEAMS as u32 - 1) / SF_TEAMS as u32;
+    let mut break_counts = [0u32; SF_TEAMS];
+    for w in 0..SF_WEEKS {
+        for &pos in &tc.break_positions {
+            let team = sched.mapping[w][pos as usize] as usize;
+            break_counts[team] += 1;
+        }
+    }
+    let mut break_balance: u32 = 0;
+    for &c in &break_counts {
+        if c < target_lo {
+            break_balance += w8.break_balance * (target_lo - c);
+        } else if c > target_hi {
+            break_balance += w8.break_balance * (c - target_hi);
+        }
+    }
+
     let total = matchup_balance + slot_balance
-        + lane_balance + game5_lane_balance + same_lane_balance + commissioner_overlap
-        + matchup_spacing;
+        + lane_balance + game5_lane_balance + commissioner_overlap
+        + matchup_spacing + break_balance;
 
     FixedCostBreakdown {
         matchup_balance,
         slot_balance,
         lane_balance,
         game5_lane_balance,
-        same_lane_balance,
         commissioner_overlap,
         matchup_spacing,
+        break_balance,
         total,
     }
 }
 
-/// Identify the worst cost component and return its index (0-5).
+/// Identify the worst cost component and return its index.
 pub fn worst_component(bd: &FixedCostBreakdown) -> usize {
     let components = [
         bd.matchup_balance,
         bd.slot_balance,
         bd.lane_balance,
         bd.game5_lane_balance,
-        bd.same_lane_balance,
         bd.commissioner_overlap,
         bd.matchup_spacing,
+        bd.break_balance,
     ];
     let mut worst = 0;
     for i in 1..components.len() {
@@ -502,9 +507,9 @@ pub fn pick_move(rng: &mut SmallRng, bd: &FixedCostBreakdown) -> usize {
             0 => 4, // matchup → guided matchup
             1 => 5, // slot balance → guided slot
             2 | 3 => 6, // lane balance / game5 lane → guided lane
-            4 => 0, // same lane → team swap (change position assignments)
-            5 => 0, // commissioner → team swap
-            6 => 3, // matchup spacing → week swap (redistribute timing)
+            4 => 0, // commissioner → team swap
+            5 => 3, // matchup spacing → week swap (redistribute timing)
+            6 => 0, // break balance → team swap (change position assignments)
             _ => 0,
         }
     } else {
@@ -1216,14 +1221,14 @@ fn move_guided_lane(
         }
     }
 
-    // Find most imbalanced team-lane (lanes 0-1: target [6,7], lanes 2-3: target [8,9])
+    // Find most imbalanced team-lane (lanes 0-1: target 7, lanes 2-3: target 8)
     let mut worst_team = 0;
     let mut worst_lane = 0;
     let mut worst_excess: u32 = 0;
     for t in 0..SF_TEAMS {
         for l in 0..SF_LANES {
             let c = lane_counts[t * SF_LANES + l];
-            let (lo, hi) = if l < 2 { (7, 7) } else { (8, 8) };
+            let (lo, hi) = if l < 2 { (6, 7) } else { (8, 9) };
             let excess = if c > hi { c - hi } else if c < lo { lo - c } else { 0 };
             if excess > worst_excess {
                 worst_excess = excess;
@@ -1323,8 +1328,8 @@ pub fn fixed_schedule_to_tsv(sched: &FixedSchedule) -> String {
 pub fn perturb_fixed(sched: &mut FixedSchedule, rng: &mut SmallRng, n: usize) {
     let bd = evaluate_fixed(sched, &FixedWeights {
         matchup_balance: 80, slot_balance: 60, lane_balance: 60,
-        game5_lane_balance: 40, same_lane_balance: 40, commissioner_overlap: 30,
-        matchup_spacing: 10,
+        game5_lane_balance: 40, commissioner_overlap: 30,
+        matchup_spacing: 10, break_balance: 40,
     });
     for _ in 0..n {
         let move_id = rng.random_range(0..4u32) as usize;
@@ -1483,9 +1488,9 @@ mod tests {
             slot_balance: 60,
             lane_balance: 60,
             game5_lane_balance: 40,
-            same_lane_balance: 40,
             commissioner_overlap: 30,
             matchup_spacing: 10,
+            break_balance: 40,
         }
     }
 
@@ -1620,16 +1625,4 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_same_lane_positions() {
-        for &pos in &tc().same_lane_positions {
-            let entries: Vec<&TemplateEntry> = tc().entries.iter()
-                .filter(|e| e.slot < 4 && (e.pos_a == pos || e.pos_b == pos))
-                .collect();
-            assert_eq!(entries.len(), 3, "Position {} doesn't have 3 games in slots 0-3", pos);
-            let lanes: Vec<u8> = entries.iter().map(|e| e.lane).collect();
-            assert!(lanes.iter().all(|&l| l == lanes[0]),
-                "Position {} not on same lane: {:?}", pos, lanes);
-        }
-    }
 }
