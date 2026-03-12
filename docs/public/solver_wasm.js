@@ -172,6 +172,20 @@ export class WasmCostBreakdown {
     /**
      * @returns {number}
      */
+    get early_late_consecutive() {
+        const ret = wasm.__wbg_get_wasmcostbreakdown_early_late_consecutive(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * @returns {number}
+     */
+    get half_season_repeat() {
+        const ret = wasm.__wbg_get_wasmcostbreakdown_half_season_repeat(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * @returns {number}
+     */
     get lane_balance() {
         const ret = wasm.__wbg_get_wasmcostbreakdown_lane_balance(this.__wbg_ptr);
         return ret >>> 0;
@@ -227,6 +241,18 @@ export class WasmCostBreakdown {
      */
     set early_late_balance(arg0) {
         wasm.__wbg_set_wasmcostbreakdown_early_late_balance(this.__wbg_ptr, arg0);
+    }
+    /**
+     * @param {number} arg0
+     */
+    set early_late_consecutive(arg0) {
+        wasm.__wbg_set_wasmcostbreakdown_early_late_consecutive(this.__wbg_ptr, arg0);
+    }
+    /**
+     * @param {number} arg0
+     */
+    set half_season_repeat(arg0) {
+        wasm.__wbg_set_wasmcostbreakdown_half_season_repeat(this.__wbg_ptr, arg0);
     }
     /**
      * @param {number} arg0

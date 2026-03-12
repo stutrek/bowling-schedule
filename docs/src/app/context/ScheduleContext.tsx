@@ -38,6 +38,7 @@ type EvaluateFn = (
     consecutive_opponents: number;
     early_late_balance: number;
     early_late_alternation: number;
+    early_late_consecutive: number;
     lane_balance: number;
     lane_switch_balance: number;
     late_lane_balance: number;
@@ -149,6 +150,7 @@ export function ScheduleProvider({ children }: { children: ReactNode }) {
             consecutiveOpponents: c.consecutive_opponents,
             earlyLateBalance: c.early_late_balance,
             earlyLateAlternation: c.early_late_alternation,
+            earlyLateConsecutive: c.early_late_consecutive,
             laneBalance: c.lane_balance,
             laneSwitchBalance: c.lane_switch_balance,
             lateLaneBalance: c.late_lane_balance,

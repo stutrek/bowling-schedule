@@ -16,7 +16,7 @@ use std::time::Instant;
 
 const SYNC_INTERVAL: u64 = 10;
 const VERIFY_INTERVAL_SECS: u64 = 30;
-const SAVE_THRESHOLD: u32 = 420;
+const SAVE_THRESHOLD: u32 = 600;
 
 fn maybe_save_result(
     sched: &WinterFixedSchedule,
@@ -75,6 +75,7 @@ pub fn run(shutdown: Arc<AtomicBool>, args: &[String]) {
         consecutive_opponents: winter_w8.consecutive_opponents,
         early_late_balance: winter_w8.early_late_balance,
         early_late_alternation: winter_w8.early_late_alternation,
+        early_late_consecutive: winter_w8.early_late_consecutive,
         lane_balance: winter_w8.lane_balance,
         lane_switch: winter_w8.lane_switch,
         late_lane_balance: winter_w8.late_lane_balance,
@@ -212,12 +213,13 @@ pub fn run(shutdown: Arc<AtomicBool>, args: &[String]) {
         consecutive_opponents: w8.consecutive_opponents,
         early_late_balance: w8.early_late_balance as f32,
         early_late_alternation: w8.early_late_alternation,
+        early_late_consecutive: w8.early_late_consecutive,
         lane_balance: w8.lane_balance as f32,
         lane_switch: w8.lane_switch as f32,
         late_lane_balance: w8.late_lane_balance as f32,
         commissioner_overlap: w8.commissioner_overlap,
         half_season_repeat: w8.half_season_repeat,
-        _pad0: 0, _pad1: 0,
+        _pad0: 0,
     };
 
     let gpu_params = GpuParams {
@@ -261,6 +263,28 @@ async fn run_gpu(
     cpu_temps_display: Vec<f64>,
     shader_src: String,
 ) {
+    let display_active = Arc::new(AtomicBool::new(true));
+    {
+        let da = Arc::clone(&display_active);
+        std::thread::spawn(move || {
+            use std::io::Read;
+            // Set terminal to raw mode to read single keypresses
+            let _ = std::process::Command::new("stty").args(["-icanon", "-echo"]).status();
+            let stdin = std::io::stdin();
+            for byte in stdin.lock().bytes().flatten() {
+                if byte == b'd' {
+                    let prev = da.load(Ordering::Relaxed);
+                    da.store(!prev, Ordering::Relaxed);
+                    if prev {
+                        eprintln!("\n[display OFF - press 'd' to re-enable]");
+                    } else {
+                        eprintln!("[display ON]");
+                    }
+                }
+            }
+        });
+    }
+
     let chain_count = gpu_params.chain_count;
     let mut chain_source: Vec<String> = vec!["random".to_string(); chain_count as usize];
 
@@ -328,7 +352,13 @@ async fn run_gpu(
 
         macro_rules! maybe_print_table {
             () => {
-                if last_print.elapsed().as_millis() >= 1000 || !pending_events.is_empty() {
+                // Always drain and print events, but only show the table if display is active
+                if !pending_events.is_empty() && !display_active.load(Ordering::Relaxed) {
+                    for msg in pending_events.drain(..) {
+                        eprintln!("{}", msg);
+                    }
+                }
+                if display_active.load(Ordering::Relaxed) && (last_print.elapsed().as_millis() >= 1000 || !pending_events.is_empty()) {
                     let fresh = last_fresh_table.elapsed().as_secs() >= FRESH_TABLE_INTERVAL_SECS;
                     if !fresh && prev_line_count > 0 {
                         eprint!("\x1b[{}A\r\x1b[J", prev_line_count);
@@ -624,10 +654,17 @@ async fn run_gpu(
                     "GPU EVAL MISMATCH p{}: gpu={} cpu={}", pi, gpu_part_cost, verify_cost));
             }
 
-            let _ = cpu_workers.commands[pi].send(WinterFixedWorkerCommand::SetState(schedule));
-
             let level_in_pod = (gpu_part_chain % TEMP_LEVELS) % POD_SIZE;
             let temp_val = temp_for_level(level_in_pod);
+
+            let is_new_global_best = gpu_part_cost < global_best_cost;
+
+            // Seed CPU: low temp (2.0) for new global best, normal reset otherwise
+            if is_new_global_best {
+                let _ = cpu_workers.commands[pi].send(WinterFixedWorkerCommand::SetStateWithTemp(schedule, 2.0));
+            } else {
+                let _ = cpu_workers.commands[pi].send(WinterFixedWorkerCommand::SetState(schedule));
+            }
 
             if gpu_part_cost < partition_best_cost[pi] {
                 let prev = partition_best_cost[pi];
@@ -643,7 +680,7 @@ async fn run_gpu(
                 }
             }
 
-            if gpu_part_cost < global_best_cost {
+            if is_new_global_best {
                 global_best_cost = gpu_part_cost;
                 global_best_schedule = Some(schedule);
                 global_best_meta = GlobalBestMeta {
@@ -807,6 +844,9 @@ async fn run_gpu(
     for h in cpu_workers.handles {
         let _ = h.join();
     }
+
+    // Restore terminal settings
+    let _ = std::process::Command::new("stty").args(["icanon", "echo"]).status();
 
     if let Some(best) = global_best_schedule {
         let final_cost = evaluate_fixed(&best, &w8);

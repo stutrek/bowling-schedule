@@ -17,6 +17,8 @@ pub struct Weights {
     pub consecutive_opponents: u32,
     pub early_late_balance: f64,
     pub early_late_alternation: u32,
+    #[serde(default)]
+    pub early_late_consecutive: u32,
     pub lane_balance: f64,
     pub lane_switch: f64,
     pub late_lane_balance: f64,
@@ -30,6 +32,7 @@ pub struct CostBreakdown {
     pub consecutive_opponents: u32,
     pub early_late_balance: u32,
     pub early_late_alternation: u32,
+    pub early_late_consecutive: u32,
     pub lane_balance: u32,
     pub lane_switch_balance: u32,
     pub late_lane_balance: u32,
@@ -170,6 +173,16 @@ pub fn evaluate(a: &Assignment, w8: &Weights) -> CostBreakdown {
         }
     }
 
+    let mut early_late_consecutive: u32 = 0;
+    for t in 0..TEAMS {
+        for w in 0..(WEEKS - 1) {
+            let base = t * WEEKS;
+            if early_late[base + w] == early_late[base + w + 1] {
+                early_late_consecutive += w8.early_late_consecutive;
+            }
+        }
+    }
+
     let mut lane_balance: u32 = 0;
     let target_l: f64 = (WEEKS as f64 * 2.0) / LANES as f64;
     for t in 0..TEAMS {
@@ -215,6 +228,7 @@ pub fn evaluate(a: &Assignment, w8: &Weights) -> CostBreakdown {
         + consecutive_opponents
         + early_late_balance
         + early_late_alternation
+        + early_late_consecutive
         + lane_balance
         + lane_switch_balance
         + late_lane_balance
@@ -226,6 +240,7 @@ pub fn evaluate(a: &Assignment, w8: &Weights) -> CostBreakdown {
         consecutive_opponents,
         early_late_balance,
         early_late_alternation,
+        early_late_consecutive,
         lane_balance,
         lane_switch_balance,
         late_lane_balance,

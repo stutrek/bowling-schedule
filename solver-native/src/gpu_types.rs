@@ -4,7 +4,7 @@ use rand::Rng;
 
 pub const DEFAULT_CHAIN_COUNT: u32 = 16384;
 pub const MIN_CHAIN_COUNT: u32 = 4096;
-pub const MAX_CHAIN_COUNT: u32 = 16384;
+pub const MAX_CHAIN_COUNT: u32 = 65536;
 pub const ITERS_PER_DISPATCH: u32 = 128;
 
 #[repr(C)]
@@ -20,12 +20,12 @@ pub struct GpuParams {
     pub _pad2: u32,
 }
 
-pub const MAX_SWAP_PAIRS: usize = 8192;
+pub const MAX_SWAP_PAIRS: usize = 32768;
 
-pub const GPU_TEMP_MIN: f64 = 7.0;
-pub const GPU_TEMP_MAX: f64 = 18.0;
+pub const GPU_TEMP_MIN: f64 = 3.0;
+pub const GPU_TEMP_MAX: f64 = 30.0;
 pub const CPU_TEMP_MIN: f64 = 15.0;
-pub const CPU_TEMP_MAX: f64 = 22.0;
+pub const CPU_TEMP_MAX: f64 = 30.0;
 pub const TEMP_LEVELS: usize = 256;
 pub const POD_SIZE: usize = 8;
 

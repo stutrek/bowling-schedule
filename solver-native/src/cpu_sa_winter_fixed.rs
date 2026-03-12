@@ -13,6 +13,7 @@ const MIN_TEMP: f64 = 1.0;
 
 pub enum WinterFixedWorkerCommand {
     SetState(WinterFixedSchedule),
+    SetStateWithTemp(WinterFixedSchedule, f64),
     Sweep,
     Shutdown,
 }
@@ -107,6 +108,17 @@ fn worker_loop(
                         live_best_cost.store(best_cost, Ordering::Relaxed);
                     }
                     active_temp = initial_temp;
+                }
+                WinterFixedWorkerCommand::SetStateWithTemp(new_sched, temp) => {
+                    sched = new_sched;
+                    bd = evaluate_fixed(&sched, &w8);
+                    cost = bd.total;
+                    if cost < best_cost {
+                        best_sched = sched;
+                        best_cost = cost;
+                        live_best_cost.store(best_cost, Ordering::Relaxed);
+                    }
+                    active_temp = temp;
                 }
                 WinterFixedWorkerCommand::Sweep => {
                     pending_sweep = true;

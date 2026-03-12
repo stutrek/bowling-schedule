@@ -4,6 +4,7 @@
     "consecutive_opponents": 10,
     "early_late_balance": 60.0,
     "early_late_alternation": 40,
+    "early_late_consecutive": 5,
     "lane_balance": 15.0,
     "lane_switch": 10.0,
     "late_lane_balance": 15.0,

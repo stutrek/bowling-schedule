@@ -47,9 +47,9 @@ pub fn print_fixed_table_banner(
 
 pub fn print_fixed_table_header() {
     eprintln!(
-        "{:>4} {:>9}  {:>5} {:>5}  {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9}  {}\x1b[K",
+        "{:>4} {:>9}  {:>5} {:>5}  {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9}  {}\x1b[K",
         "src", "temp", "cur", "best",
-        "match", "consec", "el_bal", "el_alt", "lane", "switch", "ll_bal", "comm", "hs_rpt",
+        "match", "consec", "el_bal", "el_alt", "el_con", "lane", "switch", "ll_bal", "comm", "hs_rpt",
         "state",
     );
 }
@@ -73,7 +73,7 @@ pub fn print_fixed_cpu_row(
         "normal".to_string()
     };
     eprintln!(
-        "{}cpu{:<1} {:>9}  {:>5} {:>5}  {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4}  {}{}\x1b[K",
+        "{}cpu{:<1} {:>9}  {:>5} {:>5}  {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4}  {}{}\x1b[K",
         bold,
         core_id, temp_str,
         cur_bd.total, best_bd.total,
@@ -81,6 +81,7 @@ pub fn print_fixed_cpu_row(
         cur_bd.consecutive_opponents, best_bd.consecutive_opponents,
         cur_bd.early_late_balance, best_bd.early_late_balance,
         cur_bd.early_late_alternation, best_bd.early_late_alternation,
+        cur_bd.early_late_consecutive, best_bd.early_late_consecutive,
         cur_bd.lane_balance, best_bd.lane_balance,
         cur_bd.lane_switch_balance, best_bd.lane_switch_balance,
         cur_bd.late_lane_balance, best_bd.late_lane_balance,
@@ -102,12 +103,13 @@ pub fn print_fixed_gpu_row(
         "-".to_string()
     };
     eprintln!(
-        "gpu   {:>5}  ~{:<4} {:>5}  {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4}  {:>6}\x1b[K",
+        "gpu   {:>5}  ~{:<4} {:>5}  {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4}  {:>6}\x1b[K",
         "-", gpu_median, gpu_best_cost,
         "-", best_bd.matchup_balance,
         "-", best_bd.consecutive_opponents,
         "-", best_bd.early_late_balance,
         "-", best_bd.early_late_alternation,
+        "-", best_bd.early_late_consecutive,
         "-", best_bd.lane_balance,
         "-", best_bd.lane_switch_balance,
         "-", best_bd.late_lane_balance,

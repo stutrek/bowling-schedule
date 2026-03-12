@@ -79,6 +79,7 @@ pub struct WinterFixedWeights {
     pub consecutive_opponents: u32,
     pub early_late_balance: f64,
     pub early_late_alternation: u32,
+    pub early_late_consecutive: u32,
     pub lane_balance: f64,
     pub lane_switch: f64,
     pub late_lane_balance: f64,
@@ -92,6 +93,7 @@ pub struct WinterFixedCostBreakdown {
     pub consecutive_opponents: u32,
     pub early_late_balance: u32,
     pub early_late_alternation: u32,
+    pub early_late_consecutive: u32,
     pub lane_balance: u32,
     pub lane_switch_balance: u32,
     pub late_lane_balance: u32,
@@ -103,7 +105,12 @@ pub struct WinterFixedCostBreakdown {
 /// Resolve the effective quad index for a position, applying lane swap flags.
 /// Lane swap early: quads 0↔1; Lane swap late: quads 2↔3
 fn effective_quad(pos: usize, lane_swap_early: bool, lane_swap_late: bool) -> usize {
-    let q = quad_of(pos);
+    effective_quad_from(quad_of(pos), lane_swap_early, lane_swap_late)
+}
+
+/// Resolve effective quad from a quad index directly (avoids redundant quad_of calls).
+#[inline(always)]
+fn effective_quad_from(q: usize, lane_swap_early: bool, lane_swap_late: bool) -> usize {
     match q {
         0 if lane_swap_early => 1,
         1 if lane_swap_early => 0,
@@ -126,62 +133,53 @@ pub fn evaluate_fixed(sched: &WinterFixedSchedule, w8: &WinterFixedWeights) -> W
         let lse = sched.lane_swap_early[w];
         let lsl = sched.lane_swap_late[w];
 
-        // Matchups — iterate template entries
-        for entry in &MATCHUP_ENTRIES {
-            let ta = sched.mapping[w][entry.pos_a as usize];
-            let tb = sched.mapping[w][entry.pos_b as usize];
-            let lo = ta.min(tb) as usize;
-            let hi = ta.max(tb) as usize;
-            matchups[lo * WF_TEAMS + hi] += 1;
-            week_matchup[w * WF_TEAMS * WF_TEAMS + lo * WF_TEAMS + hi] = 1;
-        }
-
-        // Lane counts, early/late, stay/switch — iterate all positions
-        for pos in 0..WF_POSITIONS {
-            let team = sched.mapping[w][pos] as usize;
-            let eq = effective_quad(pos, lse, lsl);
-            let early = if eq < 2 { 1u8 } else { 0u8 };
+        // Iterate by quad like the original — 4 iterations with 1 effective_quad call each
+        for q in 0..WF_QUADS {
+            let eq = effective_quad_from(q, lse, lsl);
+            let base = q * WF_POS_PER_QUAD;
+            let pa = sched.mapping[w][base] as usize;
+            let pb = sched.mapping[w][base + 1] as usize;
+            let pc = sched.mapping[w][base + 2] as usize;
+            let pd = sched.mapping[w][base + 3] as usize;
+            let early: u8 = if eq < 2 { 1 } else { 0 };
             let lo = lane_off_of_quad(eq);
-            let piq = pos_in_quad(pos);
 
-            // Lane counting: same logic as winter.rs
-            // p0: 2 on lane lo, 0 on lo+1
-            // p1: 1 on lane lo, 1 on lo+1
-            // p2: 0 on lane lo, 2 on lo+1
-            // p3: 1 on lane lo+1, 1 on lane lo
-            match piq {
-                0 => {
-                    lane_counts[team * WF_LANES + lo] += 2;
-                }
-                1 => {
-                    lane_counts[team * WF_LANES + lo] += 1;
-                    lane_counts[team * WF_LANES + lo + 1] += 1;
-                }
-                2 => {
-                    lane_counts[team * WF_LANES + lo + 1] += 2;
-                }
-                _ => { // 3
-                    lane_counts[team * WF_LANES + lo + 1] += 1;
-                    lane_counts[team * WF_LANES + lo] += 1;
-                }
+            // Matchups: (pa,pb), (pc,pd), (pa,pd), (pc,pb)
+            let pairs: [(usize, usize); 4] = [(pa, pb), (pc, pd), (pa, pd), (pc, pb)];
+            for &(t1, t2) in &pairs {
+                let lo_t = t1.min(t2);
+                let hi_t = t1.max(t2);
+                matchups[lo_t * WF_TEAMS + hi_t] += 1;
+                week_matchup[w * WF_TEAMS * WF_TEAMS + lo_t * WF_TEAMS + hi_t] = 1;
             }
+
+            // Lane counts: pa=stay(lo×2), pb=split, pc=stay(lo+1×2), pd=split
+            lane_counts[pa * WF_LANES + lo] += 2;
+            lane_counts[pb * WF_LANES + lo] += 1;
+            lane_counts[pb * WF_LANES + lo + 1] += 1;
+            lane_counts[pc * WF_LANES + lo + 1] += 2;
+            lane_counts[pd * WF_LANES + lo + 1] += 1;
+            lane_counts[pd * WF_LANES + lo] += 1;
 
             if eq >= 2 {
-                match piq {
-                    0 => { late_lane_counts[team * WF_LANES + lo] += 2; }
-                    1 => { late_lane_counts[team * WF_LANES + lo] += 1; late_lane_counts[team * WF_LANES + lo + 1] += 1; }
-                    2 => { late_lane_counts[team * WF_LANES + lo + 1] += 2; }
-                    _ => { late_lane_counts[team * WF_LANES + lo + 1] += 1; late_lane_counts[team * WF_LANES + lo] += 1; }
+                late_lane_counts[pa * WF_LANES + lo] += 2;
+                late_lane_counts[pb * WF_LANES + lo] += 1;
+                late_lane_counts[pb * WF_LANES + lo + 1] += 1;
+                late_lane_counts[pc * WF_LANES + lo + 1] += 2;
+                late_lane_counts[pd * WF_LANES + lo + 1] += 1;
+                late_lane_counts[pd * WF_LANES + lo] += 1;
+            }
+
+            // Stay: positions 0 and 2 in quad
+            stay_count[pa] += 1;
+            stay_count[pc] += 1;
+
+            // Early/late
+            for &t in &[pa, pb, pc, pd] {
+                early_late[t * WF_WEEKS + w] = early;
+                if early == 1 {
+                    early_count[t] += 1;
                 }
-            }
-
-            if is_stay(pos) {
-                stay_count[team] += 1;
-            }
-
-            early_late[team * WF_WEEKS + w] = early;
-            if early == 1 {
-                early_count[team] += 1;
             }
         }
     }
@@ -242,7 +240,7 @@ pub fn evaluate_fixed(sched: &WinterFixedSchedule, w8: &WinterFixedWeights) -> W
         early_late_balance += (dev * dev * w8.early_late_balance) as u32;
     }
 
-    // Early/late alternation
+    // Early/late alternation (3 consecutive same)
     let mut early_late_alternation: u32 = 0;
     for t in 0..WF_TEAMS {
         for w in 0..(WF_WEEKS - 2) {
@@ -251,6 +249,17 @@ pub fn evaluate_fixed(sched: &WinterFixedSchedule, w8: &WinterFixedWeights) -> W
                 && early_late[base + w + 1] == early_late[base + w + 2]
             {
                 early_late_alternation += w8.early_late_alternation;
+            }
+        }
+    }
+
+    // Early/late consecutive (2 consecutive same)
+    let mut early_late_consecutive: u32 = 0;
+    for t in 0..WF_TEAMS {
+        for w in 0..(WF_WEEKS - 1) {
+            let base = t * WF_WEEKS;
+            if early_late[base + w] == early_late[base + w + 1] {
+                early_late_consecutive += w8.early_late_consecutive;
             }
         }
     }
@@ -304,6 +313,7 @@ pub fn evaluate_fixed(sched: &WinterFixedSchedule, w8: &WinterFixedWeights) -> W
         + consecutive_opponents
         + early_late_balance
         + early_late_alternation
+        + early_late_consecutive
         + lane_balance
         + lane_switch_balance
         + late_lane_balance
@@ -315,6 +325,7 @@ pub fn evaluate_fixed(sched: &WinterFixedSchedule, w8: &WinterFixedWeights) -> W
         consecutive_opponents,
         early_late_balance,
         early_late_alternation,
+        early_late_consecutive,
         lane_balance,
         lane_switch_balance,
         late_lane_balance,
@@ -355,15 +366,29 @@ pub fn apply_move(
             let w1 = rng.random_range(0..WF_WEEKS);
             let mut w2 = rng.random_range(0..(WF_WEEKS - 1));
             if w2 >= w1 { w2 += 1; }
-            let pos1 = sched.mapping[w1].iter().position(|&t| t == team).unwrap();
-            let pos2 = sched.mapping[w2].iter().position(|&t| t == team).unwrap();
-            // Swap the team with whatever is at its position in the other week
-            let other1 = sched.mapping[w1][pos2];
-            let other2 = sched.mapping[w2][pos1];
-            sched.mapping[w1][pos1] = other2;
-            sched.mapping[w1][pos2] = team;
-            sched.mapping[w2][pos2] = other1;
-            sched.mapping[w2][pos1] = team;
+            let pos1 = match sched.mapping[w1].iter().position(|&t| t == team) {
+                Some(p) => p,
+                None => { // fallback to position swap
+                    let pa = rng.random_range(0..WF_POSITIONS);
+                    let mut pb = rng.random_range(0..(WF_POSITIONS - 1));
+                    if pb >= pa { pb += 1; }
+                    sched.mapping[w1].swap(pa, pb);
+                    return MoveUndo::Swap { week: w1, pos_a: pa, pos_b: pb };
+                }
+            };
+            let pos2 = match sched.mapping[w2].iter().position(|&t| t == team) {
+                Some(p) => p,
+                None => {
+                    let pa = rng.random_range(0..WF_POSITIONS);
+                    let mut pb = rng.random_range(0..(WF_POSITIONS - 1));
+                    if pb >= pa { pb += 1; }
+                    sched.mapping[w2].swap(pa, pb);
+                    return MoveUndo::Swap { week: w2, pos_a: pa, pos_b: pb };
+                }
+            };
+            // Swap pos1↔pos2 within each week (preserves permutations)
+            sched.mapping[w1].swap(pos1, pos2);
+            sched.mapping[w2].swap(pos1, pos2);
             MoveUndo::CrossWeek { w1, w2, pos1, pos2 }
         }
         2 => { // week_swap: swap two entire weeks
@@ -409,15 +434,9 @@ pub fn undo_move(sched: &mut WinterFixedSchedule, undo: &MoveUndo) {
             sched.mapping[*week].swap(*pos_a, *pos_b);
         }
         MoveUndo::CrossWeek { w1, w2, pos1, pos2 } => {
-            // Reverse the 4-way swap
-            let team_at_w1_pos1 = sched.mapping[*w1][*pos1];
-            let team_at_w1_pos2 = sched.mapping[*w1][*pos2];
-            let team_at_w2_pos1 = sched.mapping[*w2][*pos1];
-            let team_at_w2_pos2 = sched.mapping[*w2][*pos2];
-            sched.mapping[*w1][*pos1] = team_at_w2_pos2;
-            sched.mapping[*w1][*pos2] = team_at_w2_pos1;
-            sched.mapping[*w2][*pos1] = team_at_w1_pos2;
-            sched.mapping[*w2][*pos2] = team_at_w1_pos1;
+            // Self-inverse: swap pos1↔pos2 within each week again
+            sched.mapping[*w1].swap(*pos1, *pos2);
+            sched.mapping[*w2].swap(*pos1, *pos2);
         }
         MoveUndo::WeekSwap { w1, w2 } => {
             let tmp_m = sched.mapping[*w1];
@@ -501,8 +520,12 @@ fn guided_matchup(sched: &mut WinterFixedSchedule, rng: &mut SmallRng) -> MoveUn
     let week_start = rng.random_range(0..WF_WEEKS);
     for off in 0..WF_WEEKS {
         let w = (week_start + off) % WF_WEEKS;
-        let pos_a = sched.mapping[w].iter().position(|&t| t == target_a).unwrap();
-        let pos_b = sched.mapping[w].iter().position(|&t| t == target_b).unwrap();
+        let pos_a = match sched.mapping[w].iter().position(|&t| t == target_a) {
+            Some(p) => p, None => continue,
+        };
+        let pos_b = match sched.mapping[w].iter().position(|&t| t == target_b) {
+            Some(p) => p, None => continue,
+        };
         let qa = quad_of(pos_a);
         let qb = quad_of(pos_b);
         let same_half = (qa < 2 && qb < 2) || (qa >= 2 && qb >= 2);
@@ -838,11 +861,11 @@ pub fn from_assignment(a: &crate::winter::Assignment) -> WinterFixedSchedule {
 
 pub fn fixed_cost_label(c: &WinterFixedCostBreakdown) -> String {
     format!(
-        "total: {:>4} matchup: {:>3} consec: {:>3} el_bal: {:>3} el_alt: {:>3} lane: {:>3} switch: {:>3} ll_bal: {:>3} comm: {:>3} hs_rpt: {:>3}",
+        "total: {:>4} matchup: {:>3} consec: {:>3} el_bal: {:>3} el_alt: {:>3} el_con: {:>3} lane: {:>3} switch: {:>3} ll_bal: {:>3} comm: {:>3} hs_rpt: {:>3}",
         c.total, c.matchup_balance, c.consecutive_opponents,
-        c.early_late_balance, c.early_late_alternation, c.lane_balance,
-        c.lane_switch_balance, c.late_lane_balance, c.commissioner_overlap,
-        c.half_season_repeat,
+        c.early_late_balance, c.early_late_alternation, c.early_late_consecutive,
+        c.lane_balance, c.lane_switch_balance, c.late_lane_balance,
+        c.commissioner_overlap, c.half_season_repeat,
     )
 }
 

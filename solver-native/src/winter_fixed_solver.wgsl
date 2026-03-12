@@ -5,6 +5,7 @@ const TEAMS: u32 = 16u;
 const LANES: u32 = 4u;
 const WEEKS: u32 = 12u;
 const POSITIONS: u32 = 16u;
+const QUADS: u32 = 4u;
 const ASSIGN_SIZE: u32 = 25u;
 const FLAG_WORD: u32 = 24u;
 
@@ -14,6 +15,7 @@ struct Weights {
     consecutive_opponents: u32,
     early_late_balance: f32,
     early_late_alternation: u32,
+    early_late_consecutive: u32,
     lane_balance: f32,
     lane_switch: f32,
     late_lane_balance: f32,
@@ -155,25 +157,34 @@ fn eval_matchups_early_late(a: ptr<function, array<u32, 25>>) -> u32 {
         let lsl = get_lane_swap_late(a, w);
         let week_bit = 1u << w;
 
-        // Matchups from template entries
-        for (var mi = 0u; mi < MATCHUPS_PER_WEEK; mi++) {
-            let ta = get_team(a, w, T_POS_A[mi]);
-            let tb = get_team(a, w, T_POS_B[mi]);
-            let lo = min(ta, tb);
-            let hi = max(ta, tb);
-            if (w < half) {
-                inc_matchup(&fh, lo, hi);
-            } else {
-                inc_matchup(&sh, lo, hi);
-            }
-        }
+        // Iterate by quad: matchups + early/late in one pass
+        for (var q = 0u; q < QUADS; q++) {
+            let eq = effective_quad(q, lse, lsl);
+            let base = q * 4u;
+            let pa = get_team(a, w, base);
+            let pb = get_team(a, w, base + 1u);
+            let pc = get_team(a, w, base + 2u);
+            let pd = get_team(a, w, base + 3u);
 
-        // Early/late from effective quad
-        for (var pos = 0u; pos < POSITIONS; pos++) {
-            let team = get_team(a, w, pos);
-            let eq = effective_quad(POS_QUAD[pos], lse, lsl);
+            // 4 matchups per quad: (pa,pb), (pc,pd), (pa,pd), (pc,pb)
+            if (w < half) {
+                inc_matchup(&fh, min(pa,pb), max(pa,pb));
+                inc_matchup(&fh, min(pc,pd), max(pc,pd));
+                inc_matchup(&fh, min(pa,pd), max(pa,pd));
+                inc_matchup(&fh, min(pc,pb), max(pc,pb));
+            } else {
+                inc_matchup(&sh, min(pa,pb), max(pa,pb));
+                inc_matchup(&sh, min(pc,pd), max(pc,pd));
+                inc_matchup(&sh, min(pa,pd), max(pa,pd));
+                inc_matchup(&sh, min(pc,pb), max(pc,pb));
+            }
+
+            // Early/late
             if (eq < 2u) {
-                el[team] |= week_bit;
+                el[pa] |= week_bit;
+                el[pb] |= week_bit;
+                el[pc] |= week_bit;
+                el[pd] |= week_bit;
             }
         }
     }
@@ -200,14 +211,25 @@ fn eval_matchups_early_late(a: ptr<function, array<u32, 25>>) -> u32 {
         var pw1: array<u32, 4>;
         for (var k = 0u; k < 4u; k++) { pw[k] = 0u; pw1[k] = 0u; }
 
-        for (var mi = 0u; mi < MATCHUPS_PER_WEEK; mi++) {
-            let ta0 = get_team(a, w, T_POS_A[mi]);
-            let tb0 = get_team(a, w, T_POS_B[mi]);
-            set_pair_bit(&pw, min(ta0, tb0), max(ta0, tb0));
+        for (var q = 0u; q < QUADS; q++) {
+            let base = q * 4u;
+            let a0 = get_team(a, w, base);
+            let b0 = get_team(a, w, base + 1u);
+            let c0 = get_team(a, w, base + 2u);
+            let d0 = get_team(a, w, base + 3u);
+            set_pair_bit(&pw, min(a0,b0), max(a0,b0));
+            set_pair_bit(&pw, min(c0,d0), max(c0,d0));
+            set_pair_bit(&pw, min(a0,d0), max(a0,d0));
+            set_pair_bit(&pw, min(c0,b0), max(c0,b0));
 
-            let ta1 = get_team(a, w + 1u, T_POS_A[mi]);
-            let tb1 = get_team(a, w + 1u, T_POS_B[mi]);
-            set_pair_bit(&pw1, min(ta1, tb1), max(ta1, tb1));
+            let a1 = get_team(a, w + 1u, base);
+            let b1 = get_team(a, w + 1u, base + 1u);
+            let c1 = get_team(a, w + 1u, base + 2u);
+            let d1 = get_team(a, w + 1u, base + 3u);
+            set_pair_bit(&pw1, min(a1,b1), max(a1,b1));
+            set_pair_bit(&pw1, min(c1,d1), max(c1,d1));
+            set_pair_bit(&pw1, min(a1,d1), max(a1,d1));
+            set_pair_bit(&pw1, min(c1,b1), max(c1,b1));
         }
 
         for (var k = 0u; k < 4u; k++) {
@@ -224,7 +246,7 @@ fn eval_matchups_early_late(a: ptr<function, array<u32, 25>>) -> u32 {
         total += u32(dev * dev * weights.early_late_balance);
     }
 
-    // Early/late alternation
+    // Early/late alternation (3 consecutive same)
     for (var t = 0u; t < TEAMS; t++) {
         for (var w = 0u; w < WEEKS - 2u; w++) {
             let e0 = (el[t] >> w) & 1u;
@@ -232,6 +254,15 @@ fn eval_matchups_early_late(a: ptr<function, array<u32, 25>>) -> u32 {
             let e2 = (el[t] >> (w + 2u)) & 1u;
             let same = (1u - min(e0 ^ e1, 1u)) * (1u - min(e1 ^ e2, 1u));
             total += same * weights.early_late_alternation;
+        }
+    }
+
+    // Early/late consecutive (2 consecutive same)
+    for (var t = 0u; t < TEAMS; t++) {
+        for (var w = 0u; w < WEEKS - 1u; w++) {
+            let e0 = (el[t] >> w) & 1u;
+            let e1 = (el[t] >> (w + 1u)) & 1u;
+            total += (1u - min(e0 ^ e1, 1u)) * weights.early_late_consecutive;
         }
     }
 
@@ -264,41 +295,34 @@ fn eval_lanes(a: ptr<function, array<u32, 25>>) -> u32 {
         let lse = get_lane_swap_early(a, w);
         let lsl = get_lane_swap_late(a, w);
 
-        for (var pos = 0u; pos < POSITIONS; pos++) {
-            let team = get_team(a, w, pos);
-            let eq = effective_quad(POS_QUAD[pos], lse, lsl);
+        for (var q = 0u; q < QUADS; q++) {
+            let eq = effective_quad(q, lse, lsl);
             let lo = (eq % 2u) * 2u;
-            let piq = POS_IN_QUAD[pos];
             let is_late = u32(eq >= 2u);
+            let base = q * 4u;
+            let pa = get_team(a, w, base);
+            let pb = get_team(a, w, base + 1u);
+            let pc = get_team(a, w, base + 2u);
+            let pd = get_team(a, w, base + 3u);
 
-            // Lane counting by position-in-quad
-            switch piq {
-                case 0u: {
-                    lc[team] += 2u << (lo * 8u);
-                    llc[team] += is_late * (2u << (lo * 8u));
-                }
-                case 1u: {
-                    lc[team] += 1u << (lo * 8u);
-                    lc[team] += 1u << ((lo + 1u) * 8u);
-                    llc[team] += is_late * (1u << (lo * 8u));
-                    llc[team] += is_late * (1u << ((lo + 1u) * 8u));
-                }
-                case 2u: {
-                    lc[team] += 2u << ((lo + 1u) * 8u);
-                    llc[team] += is_late * (2u << ((lo + 1u) * 8u));
-                }
-                default: {
-                    lc[team] += 1u << ((lo + 1u) * 8u);
-                    lc[team] += 1u << (lo * 8u);
-                    llc[team] += is_late * (1u << ((lo + 1u) * 8u));
-                    llc[team] += is_late * (1u << (lo * 8u));
-                }
-            }
+            // Lane counts: pa=stay(lo×2), pb=split, pc=stay(lo+1×2), pd=split
+            lc[pa] += 2u << (lo * 8u);
+            lc[pb] += 1u << (lo * 8u);
+            lc[pb] += 1u << ((lo + 1u) * 8u);
+            lc[pc] += 2u << ((lo + 1u) * 8u);
+            lc[pd] += 1u << ((lo + 1u) * 8u);
+            lc[pd] += 1u << (lo * 8u);
 
-            // Stay count: positions 0, 2 within quad are "stay"
-            if (piq == 0u || piq == 2u) {
-                sc[team / 4u] += 1u << ((team % 4u) * 8u);
-            }
+            llc[pa] += is_late * (2u << (lo * 8u));
+            llc[pb] += is_late * (1u << (lo * 8u));
+            llc[pb] += is_late * (1u << ((lo + 1u) * 8u));
+            llc[pc] += is_late * (2u << ((lo + 1u) * 8u));
+            llc[pd] += is_late * (1u << ((lo + 1u) * 8u));
+            llc[pd] += is_late * (1u << (lo * 8u));
+
+            // Stay count: positions 0, 2 in quad
+            sc[pa / 4u] += 1u << ((pa % 4u) * 8u);
+            sc[pc / 4u] += 1u << ((pc % 4u) * 8u);
         }
     }
 
@@ -605,17 +629,17 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             if (w2 >= w1) { w2 += 1u; }
             let pos1 = find_team_pos(&a, w1, team);
             let pos2 = find_team_pos(&a, w2, team);
-            if (pos1 != 0xFFFFFFFFu && pos2 != 0xFFFFFFFFu) {
+            if (pos1 != 0xFFFFFFFFu && pos2 != 0xFFFFFFFFu && pos1 != pos2) {
+                // Save the 4 cells for undo
                 let s0 = get_team(&a, w1, pos1);
                 let s1 = get_team(&a, w1, pos2);
                 let s2 = get_team(&a, w2, pos1);
                 let s3 = get_team(&a, w2, pos2);
-                let other1 = get_team(&a, w2, pos1);
-                let other2 = get_team(&a, w1, pos2);
-                set_team(&a, w1, pos1, other2);
-                set_team(&a, w1, pos2, team);
-                set_team(&a, w2, pos2, other1);
-                set_team(&a, w2, pos1, team);
+                // Swap pos1↔pos2 within each week (preserves permutations)
+                set_team(&a, w1, pos1, s1);
+                set_team(&a, w1, pos2, s0);
+                set_team(&a, w2, pos1, s3);
+                set_team(&a, w2, pos2, s2);
                 let new_cost = evaluate(&a);
                 let delta = i32(new_cost) - i32(cost);
                 if (sa_accept(delta, temp, &rng)) {

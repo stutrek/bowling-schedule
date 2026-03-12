@@ -27,26 +27,38 @@ export default function EarlyLateTable() {
                             <tr key={i}>
                                 <td>Team {i + 1}</td>
                                 {row.map((group, j) => {
-                                    const isViolation =
+                                    const isStreak =
                                         violations.earlyLateStreaks.has(
+                                            `${i}-${j}`,
+                                        );
+                                    const isConsecutive =
+                                        !isStreak &&
+                                        violations.earlyLateConsecutive.has(
                                             `${i}-${j}`,
                                         );
                                     let bg =
                                         group < 3 ? 'bg-white' : 'bg-black';
-                                    if (isViolation)
+                                    if (isStreak)
                                         bg =
                                             group < 3
                                                 ? 'bg-red-200'
                                                 : 'bg-red-800';
+                                    else if (isConsecutive)
+                                        bg =
+                                            group < 3
+                                                ? 'bg-yellow-100'
+                                                : 'bg-yellow-900';
                                     return (
                                         <td
                                             // biome-ignore lint/suspicious/noArrayIndexKey: sequential
                                             key={j}
                                             className={bg}
                                             title={
-                                                isViolation
+                                                isStreak
                                                     ? `Team ${i + 1}: 3+ consecutive ${group < 3 ? 'early' : 'late'} weeks`
-                                                    : undefined
+                                                    : isConsecutive
+                                                      ? `Team ${i + 1}: 2 consecutive ${group < 3 ? 'early' : 'late'} weeks`
+                                                      : undefined
                                             }
                                         >
                                             {group}

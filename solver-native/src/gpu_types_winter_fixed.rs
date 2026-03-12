@@ -17,13 +17,13 @@ pub struct GpuWinterFixedWeights {
     pub consecutive_opponents: u32,
     pub early_late_balance: f32,
     pub early_late_alternation: u32,
+    pub early_late_consecutive: u32,
     pub lane_balance: f32,
     pub lane_switch: f32,
     pub late_lane_balance: f32,
     pub commissioner_overlap: u32,
     pub half_season_repeat: u32,
     pub _pad0: u32,
-    pub _pad1: u32,
 }
 
 #[repr(C)]
@@ -96,8 +96,8 @@ mod tests {
         let w8 = WinterFixedWeights {
             matchup_zero: 80, matchup_triple: 40,
             consecutive_opponents: 30, early_late_balance: 20.0,
-            early_late_alternation: 15, lane_balance: 25.0,
-            lane_switch: 15.0, late_lane_balance: 15.0,
+            early_late_alternation: 15, early_late_consecutive: 1,
+            lane_balance: 25.0, lane_switch: 15.0, late_lane_balance: 15.0,
             commissioner_overlap: 30, half_season_repeat: 20,
         };
         for _ in 0..20 {

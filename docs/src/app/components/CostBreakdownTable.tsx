@@ -28,6 +28,11 @@ export default function CostBreakdownTable() {
             desc: 'No three early or late in a row',
         },
         {
+            label: 'Early/late consecutive',
+            value: cost.earlyLateConsecutive,
+            desc: 'Avoid two early or late in a row',
+        },
+        {
             label: 'Lane balance',
             value: cost.laneBalance,
             desc: 'Each team on each lane 6 times',

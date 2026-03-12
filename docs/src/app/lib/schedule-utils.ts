@@ -22,6 +22,7 @@ export interface Analysis {
 export interface Violations {
     consecutivePairs: Set<string>;
     earlyLateStreaks: Set<string>;
+    earlyLateConsecutive: Set<string>;
 }
 
 export interface CostBreakdown {
@@ -29,6 +30,7 @@ export interface CostBreakdown {
     consecutiveOpponents: number;
     earlyLateBalance: number;
     earlyLateAlternation: number;
+    earlyLateConsecutive: number;
     laneBalance: number;
     laneSwitchBalance: number;
     lateLaneBalance: number;
@@ -211,7 +213,20 @@ export function computeViolations(schedule: Schedule): Violations {
         }
     }
 
-    return { consecutivePairs, earlyLateStreaks };
+    const earlyLateConsecutive = new Set<string>();
+    for (let t = 0; t < T; t++) {
+        for (let w = 0; w < W - 1; w++) {
+            const base = t * W;
+            const v0 = earlyLate[base + w];
+            const v1 = earlyLate[base + w + 1];
+            if (v0 > 0 && v0 === v1) {
+                earlyLateConsecutive.add(`${t}-${w}`);
+                earlyLateConsecutive.add(`${t}-${w + 1}`);
+            }
+        }
+    }
+
+    return { consecutivePairs, earlyLateStreaks, earlyLateConsecutive };
 }
 
 export function cloneGames(games: Game[]): Game[] {
