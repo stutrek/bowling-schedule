@@ -24,8 +24,8 @@ pub const MAX_SWAP_PAIRS: usize = 8192;
 
 pub const GPU_TEMP_MIN: f64 = 7.0;
 pub const GPU_TEMP_MAX: f64 = 18.0;
-pub const CPU_TEMP_MIN: f64 = 11.0;
-pub const CPU_TEMP_MAX: f64 = 17.0;
+pub const CPU_TEMP_MIN: f64 = 15.0;
+pub const CPU_TEMP_MAX: f64 = 22.0;
 pub const TEMP_LEVELS: usize = 256;
 pub const POD_SIZE: usize = 8;
 

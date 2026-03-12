@@ -12,7 +12,8 @@
             "Bash(cargo check -p solver-native --bin template_solver)",
             "Bash(cargo check)",
             "Bash(cargo test)",
-            "Bash(npx biome:*)"
+            "Bash(npx biome:*)",
+            "Bash(cargo build:*)"
         ]
     }
 }

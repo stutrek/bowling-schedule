@@ -1,10 +1,10 @@
-use crate::cpu_sa_winter::WorkerReport;
+use crate::cpu_sa_winter_fixed::WinterFixedWorkerReport;
 use crate::output::{GlobalBestMeta, fmt_elapsed};
-use solver_core::winter::{cost_label, evaluate, CostBreakdown, Weights};
+use solver_core::winter_fixed::{evaluate_fixed, fixed_cost_label, WinterFixedCostBreakdown, WinterFixedWeights};
 use std::time::Instant;
 
-pub struct WorkerMeta {
-    pub last_report: Option<WorkerReport>,
+pub struct WinterFixedWorkerMeta {
+    pub last_report: Option<WinterFixedWorkerReport>,
     pub prev_iterations: u64,
     pub prev_iter_time: Instant,
     pub iters_per_sec: u64,
@@ -23,9 +23,9 @@ fn fmt_ips(ips: u64) -> String {
     }
 }
 
-pub fn print_table_banner(
+pub fn print_fixed_table_banner(
     global_best_cost: u32,
-    global_best_bd: &CostBreakdown,
+    global_best_bd: &WinterFixedCostBreakdown,
     meta: &GlobalBestMeta,
     start_time: Instant,
     gpu_ips: u64,
@@ -42,10 +42,10 @@ pub fn print_table_banner(
         global_best_cost, meta.source, age_str,
         fmt_ips(gpu_ips), fmt_ips(cpu_ips),
     );
-    eprintln!("   {}\x1b[K", cost_label(global_best_bd));
+    eprintln!("   {}\x1b[K", fixed_cost_label(global_best_bd));
 }
 
-pub fn print_table_header() {
+pub fn print_fixed_table_header() {
     eprintln!(
         "{:>4} {:>9}  {:>5} {:>5}  {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9}  {}\x1b[K",
         "src", "temp", "cur", "best",
@@ -54,19 +54,24 @@ pub fn print_table_header() {
     );
 }
 
-pub fn print_cpu_row(
+pub fn print_fixed_cpu_row(
     core_id: usize,
-    report: &WorkerReport,
-    w8: &Weights,
-    meta: &WorkerMeta,
+    report: &WinterFixedWorkerReport,
+    w8: &WinterFixedWeights,
+    meta: &WinterFixedWorkerMeta,
     initial_temp: f64,
 ) {
-    let cur_bd = evaluate(&report.current_assignment, w8);
-    let best_bd = evaluate(&report.best_assignment, w8);
+    let cur_bd = evaluate_fixed(&report.current_schedule, w8);
+    let best_bd = evaluate_fixed(&report.best_schedule, w8);
     let best_age = meta.best_found_at.elapsed().as_secs();
     let bold = if best_age < 10 { "\x1b[1m" } else { "" };
     let reset = if best_age < 10 { "\x1b[0m" } else { "" };
     let temp_str = format!("{:.0}/{:.1}", initial_temp, report.current_temp);
+    let state = if report.sweep_round > 0 {
+        format!("sweep-{}", report.sweep_round)
+    } else {
+        "normal".to_string()
+    };
     eprintln!(
         "{}cpu{:<1} {:>9}  {:>5} {:>5}  {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4}  {}{}\x1b[K",
         bold,
@@ -81,14 +86,14 @@ pub fn print_cpu_row(
         cur_bd.late_lane_balance, best_bd.late_lane_balance,
         cur_bd.commissioner_overlap, best_bd.commissioner_overlap,
         cur_bd.half_season_repeat, best_bd.half_season_repeat,
-        "normal", reset,
+        state, reset,
     );
 }
 
-pub fn print_gpu_row(
+pub fn print_fixed_gpu_row(
     gpu_best_cost: u32,
     gpu_median: u32,
-    best_bd: &CostBreakdown,
+    best_bd: &WinterFixedCostBreakdown,
     gpu_ips: u64,
 ) {
     let ips = if gpu_ips > 0 {

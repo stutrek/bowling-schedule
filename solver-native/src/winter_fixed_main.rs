@@ -1,12 +1,13 @@
 use rand::rngs::SmallRng;
 use rand::{Rng, SeedableRng};
-use crate::cpu_sa_winter::{self as cpu_sa, CpuWorkers, WorkerCommand, NUM_MOVES, MOVE_NAMES};
+use crate::cpu_sa_winter_fixed::{self, WinterFixedCpuWorkers, WinterFixedWorkerCommand};
 use crate::gpu_setup::create_gpu_resources;
 use crate::gpu_types::*;
-use crate::gpu_types_winter::*;
+use crate::gpu_types_winter_fixed::*;
 use crate::output::*;
-use crate::output_winter::*;
-use solver_core::winter::*;
+use crate::output_winter_fixed::*;
+use solver_core::winter_fixed::*;
+use solver_core::winter;
 use std::collections::HashSet;
 use std::fs;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -18,19 +19,19 @@ const VERIFY_INTERVAL_SECS: u64 = 30;
 const SAVE_THRESHOLD: u32 = 420;
 
 fn maybe_save_result(
-    assignment: &Assignment,
+    sched: &WinterFixedSchedule,
     cost: u32,
     source_label: &str,
     results_dir: &str,
-    saved_hashes: &mut HashSet<[u32; ASSIGN_U32S]>,
+    saved_hashes: &mut HashSet<[u32; WF_ASSIGN_U32S]>,
 ) {
-    let mut out = *assignment;
+    let mut out = *sched;
     reassign_commissioners(&mut out);
-    let hash = pack_assignment(&out);
+    let hash = pack_fixed_schedule(&out);
     if saved_hashes.insert(hash) {
         let ts = chrono::Local::now().format("%Y%m%d-%H%M%S%z");
         let filename = format!("{}/{:04}-{}-{}.tsv", results_dir, cost, source_label, ts);
-        let _ = fs::write(&filename, assignment_to_tsv(&out));
+        let _ = fs::write(&filename, fixed_schedule_to_tsv(&out));
     }
 }
 
@@ -41,16 +42,16 @@ fn reseed_partition_chains(
     cost_buf: &wgpu::Buffer,
     best_cost_buf: &wgpu::Buffer,
     chain_source: &mut [String],
-    w8: &Weights,
-    source: &Assignment,
+    w8: &WinterFixedWeights,
+    source: &WinterFixedSchedule,
     source_label: &str,
     p_start: usize,
     p_end: usize,
 ) {
-    let packed = pack_assignment(source);
-    let cost = evaluate(source, w8).total;
+    let packed = pack_fixed_schedule(source);
+    let cost = evaluate_fixed(source, w8).total;
     for idx in p_start..p_end {
-        let offset_assign = (idx * ASSIGN_U32S * 4) as u64;
+        let offset_assign = (idx * WF_ASSIGN_U32S * 4) as u64;
         let offset_cost = (idx * 4) as u64;
         queue.write_buffer(assign_buf, offset_assign, bytemuck::cast_slice(&packed));
         queue.write_buffer(best_assign_buf, offset_assign, bytemuck::cast_slice(&packed));
@@ -63,14 +64,28 @@ fn reseed_partition_chains(
 pub fn run(shutdown: Arc<AtomicBool>, args: &[String]) {
     let no_seed = args.iter().any(|a| a == "--no-seed");
     let no_cpu = args.iter().any(|a| a == "--no-cpu");
+    let do_sweep = args.iter().any(|a| a == "--sweep");
 
     let weights_str = fs::read_to_string("../weights.json").expect("Failed to read weights.json");
-    let w8: Weights = serde_json::from_str(&weights_str).expect("Invalid weights.json");
+    let winter_w8: winter::Weights = serde_json::from_str(&weights_str).expect("Invalid weights.json");
+    // Convert winter Weights to WinterFixedWeights
+    let w8 = WinterFixedWeights {
+        matchup_zero: winter_w8.matchup_zero,
+        matchup_triple: winter_w8.matchup_triple,
+        consecutive_opponents: winter_w8.consecutive_opponents,
+        early_late_balance: winter_w8.early_late_balance,
+        early_late_alternation: winter_w8.early_late_alternation,
+        lane_balance: winter_w8.lane_balance,
+        lane_switch: winter_w8.lane_switch,
+        late_lane_balance: winter_w8.late_lane_balance,
+        commissioner_overlap: winter_w8.commissioner_overlap,
+        half_season_repeat: winter_w8.half_season_repeat,
+    };
 
     let results_dir = "results/gpu";
     fs::create_dir_all(results_dir).expect("Failed to create results directory");
 
-    let mut seeds: Vec<Assignment> = Vec::new();
+    let mut seeds: Vec<WinterFixedSchedule> = Vec::new();
     if !no_seed {
         for seed_dir in &["results/split-sa/full", results_dir] {
             if let Ok(entries) = fs::read_dir(seed_dir) {
@@ -78,8 +93,8 @@ pub fn run(shutdown: Arc<AtomicBool>, args: &[String]) {
                     let path = entry.path();
                     if path.extension().map_or(false, |e| e == "tsv") {
                         if let Ok(contents) = fs::read_to_string(&path) {
-                            if let Some(a) = parse_tsv(&contents) {
-                                seeds.push(a);
+                            if let Some(s) = parse_fixed_tsv(&contents) {
+                                seeds.push(s);
                             }
                         }
                     }
@@ -89,8 +104,8 @@ pub fn run(shutdown: Arc<AtomicBool>, args: &[String]) {
     }
 
     // Score and sort seeds by cost (best first)
-    let mut scored_seeds: Vec<(Assignment, u32)> = seeds.iter()
-        .map(|a| (*a, evaluate(a, &w8).total))
+    let mut scored_seeds: Vec<(WinterFixedSchedule, u32)> = seeds.iter()
+        .map(|s| (*s, evaluate_fixed(s, &w8).total))
         .collect();
     scored_seeds.sort_by_key(|(_, c)| *c);
 
@@ -106,7 +121,7 @@ pub fn run(shutdown: Arc<AtomicBool>, args: &[String]) {
     };
     let cpu_temps_display = cpu_temps.clone();
 
-    let cpu_workers = cpu_sa::run_cpu_workers(
+    let cpu_workers = cpu_sa_winter_fixed::run_winter_fixed_cpu_workers(
         cpu_cores,
         w8.clone(),
         cpu_temps,
@@ -117,8 +132,8 @@ pub fn run(shutdown: Arc<AtomicBool>, args: &[String]) {
     {
         let seed_partitions = cpu_cores.min(3).min(scored_seeds.len());
         for i in 0..seed_partitions {
-            let (ref seed_a, seed_cost) = scored_seeds[i];
-            let _ = cpu_workers.commands[i].send(WorkerCommand::SetState(*seed_a));
+            let (ref seed_s, seed_cost) = scored_seeds[i];
+            let _ = cpu_workers.commands[i].send(WinterFixedWorkerCommand::SetState(*seed_s));
             eprintln!("  CPU {} seeded with cost {}", i, seed_cost);
         }
         if seed_partitions > 0 {
@@ -126,18 +141,29 @@ pub fn run(shutdown: Arc<AtomicBool>, args: &[String]) {
         }
     }
 
-    let chain_count = detect_chain_count(ASSIGN_U32S);
+    if do_sweep {
+        for cmd in &cpu_workers.commands {
+            let _ = cmd.send(WinterFixedWorkerCommand::Sweep);
+        }
+        eprintln!("Sweep mode enabled for all CPU workers");
+    }
+
+    let chain_count = detect_chain_count(WF_ASSIGN_U32S);
     let num_wgs = chain_count as usize / TEMP_LEVELS;
     let wgs_per_part = if cpu_cores > 0 { num_wgs / cpu_cores } else { num_wgs };
     let pods_per_wg = TEMP_LEVELS / POD_SIZE;
     let total_pods = num_wgs * pods_per_wg;
     eprintln!(
-        "GPU solver: {} chains, {} workgroups ({}/partition), {} iters/dispatch",
+        "GPU winter-fixed solver: {} chains, {} workgroups ({}/partition), {} iters/dispatch",
         chain_count, num_wgs, wgs_per_part, ITERS_PER_DISPATCH,
     );
     eprintln!(
         "  pods: {} per wg × {} wgs = {} total, {} chains/pod",
         pods_per_wg, num_wgs, total_pods, POD_SIZE,
+    );
+    eprintln!(
+        "  ASSIGN_U32S: {} (was 48 in winter), chain_count: {} (was {})",
+        WF_ASSIGN_U32S, chain_count, detect_chain_count(48),
     );
     {
         let temps: Vec<String> = (0..POD_SIZE).map(|l| format!("{:.1}", temp_for_level(l))).collect();
@@ -150,26 +176,26 @@ pub fn run(shutdown: Arc<AtomicBool>, args: &[String]) {
     );
 
     let mut rng = SmallRng::from_os_rng();
-    let mut assign_data = vec![0u32; chain_count as usize * ASSIGN_U32S];
+    let mut assign_data = vec![0u32; chain_count as usize * WF_ASSIGN_U32S];
     let mut rng_data = vec![0u32; chain_count as usize * 4];
     let mut cost_data = vec![0u32; chain_count as usize];
-    let mut best_assign_data = vec![0u32; chain_count as usize * ASSIGN_U32S];
+    let mut best_assign_data = vec![0u32; chain_count as usize * WF_ASSIGN_U32S];
     let mut best_cost_data = vec![u32::MAX; chain_count as usize];
 
     // Seed GPU chains: top-3 partitions from scored seeds, rest random
     let chains_per_part = if cpu_cores > 0 { chain_count as usize / cpu_cores } else { chain_count as usize };
     let seed_chain_limit = chains_per_part * cpu_cores.min(3);
     for i in 0..chain_count as usize {
-        let a = if i < scored_seeds.len() && i < seed_chain_limit {
+        let s = if i < scored_seeds.len() && i < seed_chain_limit {
             scored_seeds[i].0
         } else {
-            random_assignment(&mut rng)
+            random_fixed_schedule(&mut rng)
         };
-        let packed = pack_assignment(&a);
-        let cost = evaluate(&a, &w8).total;
+        let packed = pack_fixed_schedule(&s);
+        let cost = evaluate_fixed(&s, &w8).total;
 
-        assign_data[i * ASSIGN_U32S..(i + 1) * ASSIGN_U32S].copy_from_slice(&packed);
-        best_assign_data[i * ASSIGN_U32S..(i + 1) * ASSIGN_U32S].copy_from_slice(&packed);
+        assign_data[i * WF_ASSIGN_U32S..(i + 1) * WF_ASSIGN_U32S].copy_from_slice(&packed);
+        best_assign_data[i * WF_ASSIGN_U32S..(i + 1) * WF_ASSIGN_U32S].copy_from_slice(&packed);
         cost_data[i] = cost;
         best_cost_data[i] = cost;
 
@@ -180,7 +206,7 @@ pub fn run(shutdown: Arc<AtomicBool>, args: &[String]) {
         rng_data[i * 4 + 3] = rng.random::<u32>() | 1;
     }
 
-    let gpu_weights = GpuWeights {
+    let gpu_weights = GpuWinterFixedWeights {
         matchup_zero: w8.matchup_zero,
         matchup_triple: w8.matchup_triple,
         consecutive_opponents: w8.consecutive_opponents,
@@ -203,10 +229,17 @@ pub fn run(shutdown: Arc<AtomicBool>, args: &[String]) {
         _pad0: 0, _pad1: 0, _pad2: 0,
     };
 
+    // Inject template constants into shader
+    let shader_src = format!(
+        "{}\n{}",
+        wgsl_consts(),
+        include_str!("winter_fixed_solver.wgsl"),
+    );
+
     pollster::block_on(run_gpu(
         assign_data, best_assign_data, cost_data, best_cost_data, rng_data,
         gpu_weights, gpu_params, w8, results_dir.to_string(), shutdown, rng,
-        cpu_workers, cpu_cores, cpu_temps_display,
+        cpu_workers, cpu_cores, cpu_temps_display, shader_src,
     ));
 }
 
@@ -217,15 +250,16 @@ async fn run_gpu(
     cost_data: Vec<u32>,
     best_cost_data: Vec<u32>,
     rng_data: Vec<u32>,
-    gpu_weights: GpuWeights,
+    gpu_weights: GpuWinterFixedWeights,
     gpu_params: GpuParams,
-    w8: Weights,
+    w8: WinterFixedWeights,
     results_dir: String,
     shutdown: Arc<AtomicBool>,
     mut rng: SmallRng,
-    cpu_workers: CpuWorkers,
+    cpu_workers: WinterFixedCpuWorkers,
     cpu_cores: usize,
     cpu_temps_display: Vec<f64>,
+    shader_src: String,
 ) {
     let chain_count = gpu_params.chain_count;
     let mut chain_source: Vec<String> = vec!["random".to_string(); chain_count as usize];
@@ -233,20 +267,20 @@ async fn run_gpu(
     let gpu = create_gpu_resources(
         &assign_data, &best_assign_data, &cost_data, &best_cost_data, &rng_data,
         bytemuck::bytes_of(&gpu_weights), &gpu_params,
-        bytemuck::bytes_of(&THRESH_DEFAULT),
-        ASSIGN_U32S,
-        include_str!("winter_solver.wgsl"),
-        include_str!("winter_exchange.wgsl"),
+        bytemuck::bytes_of(&WF_THRESH_DEFAULT),
+        WF_ASSIGN_U32S,
+        &shader_src,
+        include_str!("winter_fixed_exchange.wgsl"),
     ).await;
 
     let mut global_best_cost = u32::MAX;
-    let mut global_best_assignment: Option<Assignment> = None;
+    let mut global_best_schedule: Option<WinterFixedSchedule> = None;
     let mut dispatch_count = 0u64;
     let start_time = Instant::now();
     let mut last_verify = Instant::now();
-    let mut last_thresh = THRESH_DEFAULT;
+    let mut last_thresh = WF_THRESH_DEFAULT;
 
-    let mut worker_metas: Vec<WorkerMeta> = (0..cpu_cores).map(|_| WorkerMeta {
+    let mut worker_metas: Vec<WinterFixedWorkerMeta> = (0..cpu_cores).map(|_| WinterFixedWorkerMeta {
         last_report: None,
         prev_iterations: 0,
         prev_iter_time: Instant::now(),
@@ -262,15 +296,15 @@ async fn run_gpu(
     let mut partition_gpu_bests: Vec<u32> = vec![0; cpu_cores];
     let mut counts_reset_done = false;
     let mut partition_best_cost: Vec<u32> = vec![u32::MAX; cpu_cores];
-    let mut saved_hashes: HashSet<[u32; ASSIGN_U32S]> = HashSet::new();
+    let mut saved_hashes: HashSet<[u32; WF_ASSIGN_U32S]> = HashSet::new();
     // Pre-populate from existing result files on disk
     if let Ok(entries) = fs::read_dir(&results_dir) {
         for entry in entries.flatten() {
             let path = entry.path();
             if path.extension().map_or(false, |e| e == "tsv") {
                 if let Ok(contents) = fs::read_to_string(&path) {
-                    if let Some(a) = parse_tsv(&contents) {
-                        saved_hashes.insert(pack_assignment(&a));
+                    if let Some(s) = parse_fixed_tsv(&contents) {
+                        saved_hashes.insert(pack_fixed_schedule(&s));
                     }
                 }
             }
@@ -305,20 +339,20 @@ async fn run_gpu(
                         eprintln!("{}", msg);
                     }
                     let mut lines: u32 = 0;
-                    if let Some(ref best) = global_best_assignment {
-                        let best_bd = evaluate(best, &w8);
+                    if let Some(ref best) = global_best_schedule {
+                        let best_bd = evaluate_fixed(best, &w8);
                         let elapsed_s = start_time.elapsed().as_secs_f64().max(0.001);
                         let gpu_ips = (dispatch_count as f64 * ITERS_PER_DISPATCH as f64 * chain_count as f64 / elapsed_s) as u64;
                         let cpu_ips: u64 = worker_metas.iter().map(|m| m.iters_per_sec).sum();
-                        print_table_banner(global_best_cost, &best_bd, &global_best_meta, start_time, gpu_ips, cpu_ips);
+                        print_fixed_table_banner(global_best_cost, &best_bd, &global_best_meta, start_time, gpu_ips, cpu_ips);
                         lines += 2;
                     }
-                    print_table_header();
+                    print_fixed_table_header();
                     lines += 1;
                     for (i, meta) in worker_metas.iter().enumerate() {
                         if let Some(ref _report) = meta.last_report {
                             let temp = if i < cpu_temps_display.len() { cpu_temps_display[i] } else { 0.0 };
-                            print_cpu_row(i, meta.last_report.as_ref().unwrap(), &w8, meta, temp);
+                            print_fixed_cpu_row(i, meta.last_report.as_ref().unwrap(), &w8, meta, temp);
                             lines += 1;
                         }
                     }
@@ -547,8 +581,8 @@ async fn run_gpu(
             let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("Read Partition Best"),
             });
-            let offset = gpu_part_chain as u64 * ASSIGN_U32S as u64 * 4;
-            encoder.copy_buffer_to_buffer(&gpu.best_assign_buf, offset, &gpu.assign_readback_buf, 0, (ASSIGN_U32S * 4) as u64);
+            let offset = gpu_part_chain as u64 * WF_ASSIGN_U32S as u64 * 4;
+            encoder.copy_buffer_to_buffer(&gpu.best_assign_buf, offset, &gpu.assign_readback_buf, 0, (WF_ASSIGN_U32S * 4) as u64);
             gpu.queue.submit(Some(encoder.finish()));
 
             let assign_slice = gpu.assign_readback_buf.slice(..);
@@ -574,23 +608,23 @@ async fn run_gpu(
                 continue;
             }
 
-            let packed: [u32; ASSIGN_U32S] = {
+            let packed: [u32; WF_ASSIGN_U32S] = {
                 let data = assign_slice.get_mapped_range();
                 let slice: &[u32] = bytemuck::cast_slice(&data);
-                let mut arr = [0u32; ASSIGN_U32S];
+                let mut arr = [0u32; WF_ASSIGN_U32S];
                 arr.copy_from_slice(slice);
                 arr
             };
             gpu.assign_readback_buf.unmap();
 
-            let assignment = unpack_assignment(&packed);
-            let verify_cost = evaluate(&assignment, &w8).total;
+            let schedule = unpack_fixed_schedule(&packed);
+            let verify_cost = evaluate_fixed(&schedule, &w8).total;
             if verify_cost != gpu_part_cost {
                 event!(start_time.elapsed(), &format!(
                     "GPU EVAL MISMATCH p{}: gpu={} cpu={}", pi, gpu_part_cost, verify_cost));
             }
 
-            let _ = cpu_workers.commands[pi].send(WorkerCommand::SetState(assignment));
+            let _ = cpu_workers.commands[pi].send(WinterFixedWorkerCommand::SetState(schedule));
 
             let level_in_pod = (gpu_part_chain % TEMP_LEVELS) % POD_SIZE;
             let temp_val = temp_for_level(level_in_pod);
@@ -605,13 +639,13 @@ async fn run_gpu(
                     pi, gpu_part_cost, prev, temp_val));
 
                 if gpu_part_cost <= SAVE_THRESHOLD {
-                    maybe_save_result(&assignment, gpu_part_cost, &format!("gpu-p{}", pi), &results_dir, &mut saved_hashes);
+                    maybe_save_result(&schedule, gpu_part_cost, &format!("gpu-p{}", pi), &results_dir, &mut saved_hashes);
                 }
             }
 
             if gpu_part_cost < global_best_cost {
                 global_best_cost = gpu_part_cost;
-                global_best_assignment = Some(assignment);
+                global_best_schedule = Some(schedule);
                 global_best_meta = GlobalBestMeta {
                     source: format!("gpu-p{}-T{:.1}", pi, temp_val),
                     found_at: Instant::now(),
@@ -623,7 +657,7 @@ async fn run_gpu(
                     &gpu.queue, &gpu.assign_buf, &gpu.best_assign_buf,
                     &gpu.cost_buf, &gpu.best_cost_buf,
                     &mut chain_source, &w8,
-                    &assignment, &format!("gpu-p{}", pi), p_start, p_end,
+                    &schedule, &format!("gpu-p{}", pi), p_start, p_end,
                 );
             }
         }
@@ -632,7 +666,7 @@ async fn run_gpu(
         while let Ok(report) = cpu_workers.reports.try_recv() {
             let cid = report.core_id;
             if cid < worker_metas.len() {
-                let real_best = evaluate(&report.best_assignment, &w8).total;
+                let real_best = evaluate_fixed(&report.best_schedule, &w8).total;
                 if real_best < partition_best_cost[cid] {
                     let prev = partition_best_cost[cid];
                     partition_best_cost[cid] = real_best;
@@ -642,12 +676,12 @@ async fn run_gpu(
                         "PARTITION {} NEW BEST {} (was {}) from cpu{}", cid, real_best, prev, cid));
 
                     if real_best <= SAVE_THRESHOLD {
-                        maybe_save_result(&report.best_assignment, real_best, &format!("cpu{}", cid), &results_dir, &mut saved_hashes);
+                        maybe_save_result(&report.best_schedule, real_best, &format!("cpu{}", cid), &results_dir, &mut saved_hashes);
                     }
                 }
                 if real_best < global_best_cost {
                     global_best_cost = real_best;
-                    global_best_assignment = Some(report.best_assignment);
+                    global_best_schedule = Some(report.best_schedule);
                     global_best_meta = GlobalBestMeta {
                         source: format!("cpu{}", cid),
                         found_at: Instant::now(),
@@ -663,7 +697,7 @@ async fn run_gpu(
                         &gpu.queue, &gpu.assign_buf, &gpu.best_assign_buf,
                         &gpu.cost_buf, &gpu.best_cost_buf,
                         &mut chain_source, &w8,
-                        &report.best_assignment, &source_label, p_start, p_end,
+                        &report.best_schedule, &source_label, p_start, p_end,
                     );
                 }
                 let dt = worker_metas[cid].prev_iter_time.elapsed().as_secs_f64();
@@ -692,22 +726,19 @@ async fn run_gpu(
             }
             if n > 0 {
                 let nf = n as f64;
-                let base_weights: [f64; NUM_MOVES] = [
-                    0.10, 0.25, 0.10, 0.06, 0.06, 0.05, 0.04, 0.06, 0.05, 0.15, 0.08,
-                ];
-                let mut weights = [0.0f64; NUM_MOVES];
-                for m in 0..NUM_MOVES {
+                let mut weights = [0.0f64; WF_GPU_NUM_MOVES];
+                for m in 0..WF_GPU_NUM_MOVES {
                     let rate = avg_rates[m] / nf;
-                    weights[m] = base_weights[m] * (0.1 + rate);
+                    weights[m] = WF_GPU_BASE_WEIGHTS[m] * (0.1 + rate);
                 }
                 let sum: f64 = weights.iter().sum();
-                let mut thresh = GpuMoveThresholds { t: [0u32; 12] };
+                let mut thresh = GpuWinterFixedMoveThresholds { t: [0u32; 8] };
                 let mut cum = 0.0;
-                for m in 0..NUM_MOVES {
+                for m in 0..WF_GPU_NUM_MOVES {
                     cum += weights[m] / sum;
                     thresh.t[m] = (cum * 100.0).round() as u32;
                 }
-                thresh.t[NUM_MOVES - 1] = 100;
+                thresh.t[WF_GPU_NUM_MOVES - 1] = 100;
                 if thresh.t != last_thresh.t {
                     gpu.queue.write_buffer(&gpu.move_thresh_buf, 0, bytemuck::bytes_of(&thresh));
                     last_thresh = thresh;
@@ -719,10 +750,10 @@ async fn run_gpu(
         maybe_print_table!();
         if dispatch_count % SYNC_INTERVAL == 0 {
             for pi in 0..cpu_cores {
-                let seed_assignment = worker_metas[pi].last_report.as_ref()
-                    .map(|r| r.best_assignment);
-                let seed_assignment = match seed_assignment {
-                    Some(a) => a,
+                let seed_schedule = worker_metas[pi].last_report.as_ref()
+                    .map(|r| r.best_schedule);
+                let seed_schedule = match seed_schedule {
+                    Some(s) => s,
                     None => continue,
                 };
                 let source_label = format!("cpu{}", pi);
@@ -736,11 +767,11 @@ async fn run_gpu(
                     let level_in_pod = (idx % TEMP_LEVELS) % POD_SIZE;
                     let t_frac = level_in_pod as f64 / (POD_SIZE - 1).max(1) as f64;
                     let pert = (t_frac * t_frac * 5.0) as usize;
-                    let mut a = seed_assignment;
-                    perturb(&mut a, &mut rng, pert);
-                    let packed = pack_assignment(&a);
-                    let cost = evaluate(&a, &w8).total;
-                    let offset_assign = (idx * ASSIGN_U32S * 4) as u64;
+                    let mut s = seed_schedule;
+                    perturb_fixed(&mut s, &mut rng, pert);
+                    let packed = pack_fixed_schedule(&s);
+                    let cost = evaluate_fixed(&s, &w8).total;
+                    let offset_assign = (idx * WF_ASSIGN_U32S * 4) as u64;
                     let offset_cost = (idx * 4) as u64;
                     gpu.queue.write_buffer(&gpu.assign_buf, offset_assign, bytemuck::cast_slice(&packed));
                     gpu.queue.write_buffer(&gpu.best_assign_buf, offset_assign, bytemuck::cast_slice(&packed));
@@ -754,8 +785,8 @@ async fn run_gpu(
 
         // 7. Periodic GPU verification
         if last_verify.elapsed().as_secs() >= VERIFY_INTERVAL_SECS {
-            if let Some(ref best) = global_best_assignment {
-                let verify_cost = evaluate(best, &w8);
+            if let Some(ref best) = global_best_schedule {
+                let verify_cost = evaluate_fixed(best, &w8);
                 if verify_cost.total != global_best_cost {
                     event!(start_time.elapsed(), &format!(
                         "VERIFY: MISMATCH global best {} != cpu eval {}",
@@ -771,16 +802,16 @@ async fn run_gpu(
 
     // Shutdown
     for cmd_tx in &cpu_workers.commands {
-        let _ = cmd_tx.send(WorkerCommand::Shutdown);
+        let _ = cmd_tx.send(WinterFixedWorkerCommand::Shutdown);
     }
     for h in cpu_workers.handles {
         let _ = h.join();
     }
 
-    if let Some(best) = global_best_assignment {
-        let final_cost = evaluate(&best, &w8);
+    if let Some(best) = global_best_schedule {
+        let final_cost = evaluate_fixed(&best, &w8);
         eprintln!("{}", format_event(start_time.elapsed(), &format!(
-            "Final best: {} | {}", global_best_cost, cost_label(&final_cost),
+            "Final best: {} | {}", global_best_cost, fixed_cost_label(&final_cost),
         )));
     }
 }

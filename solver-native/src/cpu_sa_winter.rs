@@ -8,6 +8,8 @@ use solver_core::winter::*;
 
 pub const BATCH_SIZE: u64 = 10_000;
 const STATS_RECOMPUTE: u64 = 10_000;
+const COOLING_RATE: f64 = 0.999999915;
+const MIN_TEMP: f64 = 1.0;
 const QUAD_PAIRS: [(usize, usize); 6] = [(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)];
 
 pub const NUM_MOVES: usize = 11;
@@ -33,6 +35,7 @@ pub struct WorkerReport {
     pub current_assignment: Assignment,
     pub current_cost: u32,
     pub iterations_total: u64,
+    pub current_temp: f64,
     pub move_rates: [f64; NUM_MOVES],
     pub move_shares: [f64; NUM_MOVES],
 }
@@ -110,6 +113,7 @@ fn worker_loop(
                         best_cost = cost.total;
                         live_best_cost.store(best_cost, Ordering::Relaxed);
                     }
+                    active_temp = initial_temp;
                 }
                 WorkerCommand::SetTemp(t) => {
                     active_temp = t;
@@ -400,9 +404,19 @@ fn worker_loop(
 
                 if accepted { stats.accepts[move_id] += 1; }
             }
+
+            active_temp = (active_temp * COOLING_RATE).max(MIN_TEMP);
         }
         iterations_total = batch_end;
         live_best_cost.store(best_cost, Ordering::Relaxed);
+
+        // Reheat when temperature bottoms out
+        if active_temp <= MIN_TEMP + 0.01 {
+            a = best_a;
+            perturb(&mut a, &mut SmallRng::from_os_rng(), 3);
+            cost = evaluate(&a, &active_w8);
+            active_temp = initial_temp;
+        }
 
         let _ = report_tx.send(WorkerReport {
             core_id,
@@ -411,6 +425,7 @@ fn worker_loop(
             current_assignment: a,
             current_cost: cost.total,
             iterations_total,
+            current_temp: active_temp,
             move_rates: stats.last_rates,
             move_shares: stats.last_shares,
         });
