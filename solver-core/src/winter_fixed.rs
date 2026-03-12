@@ -422,8 +422,23 @@ pub fn apply_move(
         6 => { // guided_lane
             guided_lane(sched, rng)
         }
-        _ => { // guided_early_late
+        7 => { // guided_early_late
             guided_early_late(sched, rng)
+        }
+        8 => { // guided_consecutive_opponents
+            guided_consecutive(sched, rng)
+        }
+        9 => { // guided_lane_switch
+            guided_lane_switch(sched, rng)
+        }
+        10 => { // guided_late_lane
+            guided_late_lane(sched, rng)
+        }
+        11 => { // guided_commissioner
+            guided_commissioner(sched, rng)
+        }
+        _ => { // guided_half_season_repeat
+            guided_half_season(sched, rng)
         }
     }
 }
@@ -458,102 +473,163 @@ pub fn undo_move(sched: &mut WinterFixedSchedule, undo: &MoveUndo) {
     }
 }
 
-pub const NUM_MOVES: usize = 8;
+pub const NUM_MOVES: usize = 13;
 pub const MOVE_NAMES: [&str; NUM_MOVES] = [
     "pos_swp", "cross_wk", "wk_swap", "tog_e", "tog_l",
     "g_match", "g_lane", "g_el",
+    "g_consec", "g_lswitch", "g_llane", "g_comm", "g_hsrpt",
 ];
 
 pub const BASE_WEIGHTS: [f64; NUM_MOVES] = [
-    0.30, 0.10, 0.06, 0.08, 0.08, 0.10, 0.18, 0.10,
+    0.18, 0.08, 0.04, 0.06, 0.06, 0.08, 0.10, 0.08,
+    0.06, 0.06, 0.06, 0.06, 0.08,
 ];
 
-pub fn pick_move(rng: &mut SmallRng, _bd: &WinterFixedCostBreakdown) -> usize {
-    let r: f64 = rng.random();
-    let mut cum = 0.0;
-    for m in 0..NUM_MOVES {
-        cum += BASE_WEIGHTS[m];
-        if r < cum { return m; }
+/// Identify the worst cost component. Returns index 0-9.
+pub fn worst_component(bd: &WinterFixedCostBreakdown) -> usize {
+    let components = [
+        bd.matchup_balance,
+        bd.consecutive_opponents,
+        bd.early_late_balance,
+        bd.early_late_alternation,
+        bd.early_late_consecutive,
+        bd.lane_balance,
+        bd.lane_switch_balance,
+        bd.late_lane_balance,
+        bd.commissioner_overlap,
+        bd.half_season_repeat,
+    ];
+    let mut worst = 0;
+    for i in 1..components.len() {
+        if components[i] > components[worst] {
+            worst = i;
+        }
     }
-    NUM_MOVES - 1
+    worst
+}
+
+pub fn pick_move(rng: &mut SmallRng, bd: &WinterFixedCostBreakdown) -> usize {
+    // 50% chance: guided move targeting worst component
+    // 50% chance: weighted random from all moves (adaptive)
+    if rng.random_bool(0.5) {
+        pick_move_guided_only(bd)
+    } else {
+        let r: f64 = rng.random();
+        let mut cum = 0.0;
+        // Renormalize base weights for random selection
+        let sum: f64 = BASE_WEIGHTS.iter().sum();
+        for m in 0..NUM_MOVES {
+            cum += BASE_WEIGHTS[m] / sum;
+            if r < cum { return m; }
+        }
+        NUM_MOVES - 1
+    }
+}
+
+/// Pick only a guided move targeting the worst component. For sweep perturbation.
+pub fn pick_move_guided_only(bd: &WinterFixedCostBreakdown) -> usize {
+    match worst_component(bd) {
+        0 => 5,  // matchup → guided matchup
+        1 => 8,  // consecutive opponents → guided consecutive
+        2 | 3 | 4 => 7, // early/late balance/alternation/consecutive → guided early_late
+        5 => 6,  // lane balance → guided lane
+        6 => 9,  // lane switch → guided lane switch
+        7 => 10, // late lane → guided late lane
+        8 => 11, // commissioner → guided commissioner
+        9 => 12, // half season repeat → guided half season
+        _ => 0,
+    }
 }
 
 fn guided_matchup(sched: &mut WinterFixedSchedule, rng: &mut SmallRng) -> MoveUndo {
-    // Find a team pair with 0 matchups and try to bring them together
+    // Count matchups per pair
     let mut matchups = [0u8; WF_TEAMS * WF_TEAMS];
+    let mut week_matchup = [[false; WF_TEAMS * WF_TEAMS]; WF_WEEKS];
     for w in 0..WF_WEEKS {
         for entry in &MATCHUP_ENTRIES {
             let ta = sched.mapping[w][entry.pos_a as usize] as usize;
             let tb = sched.mapping[w][entry.pos_b as usize] as usize;
-            matchups[ta.min(tb) * WF_TEAMS + ta.max(tb)] = 1;
+            let lo = ta.min(tb);
+            let hi = ta.max(tb);
+            matchups[lo * WF_TEAMS + hi] += 1;
+            week_matchup[w][lo * WF_TEAMS + hi] = true;
         }
     }
 
+    // Find worst pair: most over-matched (3+) or under-matched (0)
+    let mut worst_lo = 0;
+    let mut worst_hi = 1;
+    let mut worst_dist: i32 = 0;
     let start = rng.random_range(0..WF_TEAMS);
-    let mut target_a = 0u8;
-    let mut target_b = 0u8;
-    let mut found = false;
-    'outer: for off_i in 0..WF_TEAMS {
+    for off_i in 0..WF_TEAMS {
         let i = (start + off_i) % WF_TEAMS;
         for j in (i + 1)..WF_TEAMS {
-            if matchups[i * WF_TEAMS + j] == 0 {
-                target_a = i as u8;
-                target_b = j as u8;
-                found = true;
-                break 'outer;
+            let c = matchups[i * WF_TEAMS + j] as i32;
+            let dist = if c == 0 { 2 } else if c >= 3 { c - 1 } else { 0 };
+            if dist > worst_dist {
+                worst_dist = dist;
+                worst_lo = i;
+                worst_hi = j;
             }
         }
     }
 
-    if !found {
-        // Fallback to position swap
-        let w = rng.random_range(0..WF_WEEKS);
-        let pa = rng.random_range(0..WF_POSITIONS);
-        let mut pb = rng.random_range(0..(WF_POSITIONS - 1));
-        if pb >= pa { pb += 1; }
-        sched.mapping[w].swap(pa, pb);
-        return MoveUndo::Swap { week: w, pos_a: pa, pos_b: pb };
+    if worst_dist == 0 {
+        return fallback_swap(sched, rng);
     }
 
-    // Find a week where both teams are in the same half (both early or both late)
-    // but different quads, then swap one into the other's quad
-    let week_start = rng.random_range(0..WF_WEEKS);
-    for off in 0..WF_WEEKS {
-        let w = (week_start + off) % WF_WEEKS;
-        let pos_a = match sched.mapping[w].iter().position(|&t| t == target_a) {
-            Some(p) => p, None => continue,
-        };
-        let pos_b = match sched.mapping[w].iter().position(|&t| t == target_b) {
-            Some(p) => p, None => continue,
-        };
+    let c = matchups[worst_lo * WF_TEAMS + worst_hi];
+    if c >= 3 {
+        // Over-matched: find a week where they play and swap one out
+        let play_weeks: Vec<usize> = (0..WF_WEEKS)
+            .filter(|&w| week_matchup[w][worst_lo * WF_TEAMS + worst_hi])
+            .collect();
+        if play_weeks.is_empty() { return fallback_swap(sched, rng); }
+        let w = play_weeks[rng.random_range(0..play_weeks.len())];
+        let target = if rng.random_bool(0.5) { worst_lo } else { worst_hi };
+        let pos = sched.mapping[w].iter().position(|&t| t as usize == target).unwrap();
+        // Swap with a random position in a different quad
+        let my_quad = quad_of(pos);
+        let candidates: Vec<usize> = (0..WF_POSITIONS).filter(|&p| quad_of(p) != my_quad).collect();
+        let swap_pos = candidates[rng.random_range(0..candidates.len())];
+        sched.mapping[w].swap(pos, swap_pos);
+        return MoveUndo::Swap { week: w, pos_a: pos, pos_b: swap_pos };
+    } else {
+        // Under-matched (0): find a week where they DON'T play and bring them together
+        let mut no_play_weeks: Vec<usize> = (0..WF_WEEKS)
+            .filter(|&w| !week_matchup[w][worst_lo * WF_TEAMS + worst_hi])
+            .collect();
+        if no_play_weeks.is_empty() { no_play_weeks = (0..WF_WEEKS).collect(); }
+        let w = no_play_weeks[rng.random_range(0..no_play_weeks.len())];
+        let pos_a = sched.mapping[w].iter().position(|&t| t as usize == worst_lo).unwrap();
+        let pos_b = sched.mapping[w].iter().position(|&t| t as usize == worst_hi).unwrap();
         let qa = quad_of(pos_a);
         let qb = quad_of(pos_b);
         let same_half = (qa < 2 && qb < 2) || (qa >= 2 && qb >= 2);
         if same_half && qa != qb {
-            // Swap target_b with a random non-target_a position in target_a's quad
+            // Swap target_b into target_a's quad
             let q_base = qa * WF_POS_PER_QUAD;
             let candidates: Vec<usize> = (q_base..q_base + WF_POS_PER_QUAD)
                 .filter(|&p| p != pos_a)
                 .collect();
-            if candidates.is_empty() { continue; }
-            let swap_pos = candidates[rng.random_range(0..candidates.len())];
-            sched.mapping[w].swap(pos_b, swap_pos);
-            return MoveUndo::Swap { week: w, pos_a: pos_b, pos_b: swap_pos };
+            if !candidates.is_empty() {
+                let swap_pos = candidates[rng.random_range(0..candidates.len())];
+                sched.mapping[w].swap(pos_b, swap_pos);
+                return MoveUndo::Swap { week: w, pos_a: pos_b, pos_b: swap_pos };
+            }
         }
+        // If not in same half, swap one into the other's half
+        let target_range = if qa < 2 { 8..16 } else { 0..8 };
+        let swap_pos = rng.random_range(target_range);
+        sched.mapping[w].swap(pos_b, swap_pos);
+        return MoveUndo::Swap { week: w, pos_a: pos_b, pos_b: swap_pos };
     }
-
-    // Fallback
-    let w = rng.random_range(0..WF_WEEKS);
-    let pa = rng.random_range(0..WF_POSITIONS);
-    let mut pb = rng.random_range(0..(WF_POSITIONS - 1));
-    if pb >= pa { pb += 1; }
-    sched.mapping[w].swap(pa, pb);
-    MoveUndo::Swap { week: w, pos_a: pa, pos_b: pb }
 }
 
 fn guided_lane(sched: &mut WinterFixedSchedule, rng: &mut SmallRng) -> MoveUndo {
-    // Find team with worst lane imbalance, try to fix via toggle or swap
+    // Find team with worst lane imbalance
     let mut lane_counts = [0i32; WF_TEAMS * WF_LANES];
+    // Track per-team per-week lane contributions for week targeting
     for w in 0..WF_WEEKS {
         let lse = sched.lane_swap_early[w];
         let lsl = sched.lane_swap_late[w];
@@ -573,16 +649,16 @@ fn guided_lane(sched: &mut WinterFixedSchedule, rng: &mut SmallRng) -> MoveUndo 
 
     let target_l = (WF_WEEKS as f64 * 2.0) / WF_LANES as f64;
     let mut worst_team = 0usize;
+    let mut worst_lane = 0usize;
     let mut worst_dev = 0.0f64;
     for t in 0..WF_TEAMS {
         for l in 0..WF_LANES {
             let dev = (lane_counts[t * WF_LANES + l] as f64 - target_l).abs();
-            if dev > worst_dev { worst_dev = dev; worst_team = t; }
+            if dev > worst_dev { worst_dev = dev; worst_team = t; worst_lane = l; }
         }
     }
 
     if worst_dev < 1.0 {
-        // Try a toggle instead
         let w = rng.random_range(0..WF_WEEKS);
         if rng.random_bool(0.5) {
             sched.lane_swap_early[w] = !sched.lane_swap_early[w];
@@ -593,39 +669,63 @@ fn guided_lane(sched: &mut WinterFixedSchedule, rng: &mut SmallRng) -> MoveUndo 
         }
     }
 
-    // Find worst_team in a random week and swap its position within the quad
-    let start = rng.random_range(0..WF_WEEKS);
-    for off in 0..WF_WEEKS {
-        let w = (start + off) % WF_WEEKS;
-        if let Some(pos) = sched.mapping[w].iter().position(|&t| t == worst_team as u8) {
-            let q_base = quad_of(pos) * WF_POS_PER_QUAD;
-            let mut swap_pos = q_base + rng.random_range(0..(WF_POS_PER_QUAD - 1));
-            if swap_pos >= pos { swap_pos += 1; }
-            if swap_pos >= q_base + WF_POS_PER_QUAD { swap_pos = q_base; }
-            sched.mapping[w].swap(pos, swap_pos);
-            return MoveUndo::Swap { week: w, pos_a: pos, pos_b: swap_pos };
+    let over = lane_counts[worst_team * WF_LANES + worst_lane] as f64 > target_l;
+
+    // Find weeks where worst_team contributes to the over-represented lane
+    let mut good_weeks: Vec<(usize, usize)> = Vec::new(); // (week, pos)
+    for w in 0..WF_WEEKS {
+        let lse = sched.lane_swap_early[w];
+        let lsl = sched.lane_swap_late[w];
+        let pos = sched.mapping[w].iter().position(|&t| t as usize == worst_team).unwrap();
+        let eq = effective_quad(pos, lse, lsl);
+        let lo = lane_off_of_quad(eq);
+        let piq = pos_in_quad(pos);
+        // Check if this position contributes to worst_lane
+        let on_lane = match piq {
+            0 => lo == worst_lane,
+            1 => lo == worst_lane || lo + 1 == worst_lane,
+            2 => lo + 1 == worst_lane,
+            _ => lo + 1 == worst_lane || lo == worst_lane,
+        };
+        if over && on_lane {
+            good_weeks.push((w, pos));
+        } else if !over && !on_lane {
+            good_weeks.push((w, pos));
         }
     }
 
-    // Fallback
-    let w = rng.random_range(0..WF_WEEKS);
-    let pa = rng.random_range(0..WF_POSITIONS);
-    let mut pb = rng.random_range(0..(WF_POSITIONS - 1));
-    if pb >= pa { pb += 1; }
-    sched.mapping[w].swap(pa, pb);
-    MoveUndo::Swap { week: w, pos_a: pa, pos_b: pb }
+    if good_weeks.is_empty() {
+        return fallback_swap(sched, rng);
+    }
+
+    let (w, pos) = good_weeks[rng.random_range(0..good_weeks.len())];
+    // Swap within the quad to change lane assignment
+    let q_base = quad_of(pos) * WF_POS_PER_QUAD;
+    let candidates: Vec<usize> = (q_base..q_base + WF_POS_PER_QUAD)
+        .filter(|&p| p != pos)
+        .collect();
+    let swap_pos = candidates[rng.random_range(0..candidates.len())];
+    sched.mapping[w].swap(pos, swap_pos);
+    MoveUndo::Swap { week: w, pos_a: pos, pos_b: swap_pos }
 }
 
 fn guided_early_late(sched: &mut WinterFixedSchedule, rng: &mut SmallRng) -> MoveUndo {
     // Find team with worst early/late imbalance
     let mut early_count = [0i32; WF_TEAMS];
+    let mut team_early_weeks: [Vec<usize>; WF_TEAMS] = std::array::from_fn(|_| Vec::new());
+    let mut team_late_weeks: [Vec<usize>; WF_TEAMS] = std::array::from_fn(|_| Vec::new());
     for w in 0..WF_WEEKS {
         let lse = sched.lane_swap_early[w];
         let lsl = sched.lane_swap_late[w];
         for pos in 0..WF_POSITIONS {
             let team = sched.mapping[w][pos] as usize;
             let eq = effective_quad(pos, lse, lsl);
-            if eq < 2 { early_count[team] += 1; }
+            if eq < 2 {
+                early_count[team] += 1;
+                team_early_weeks[team].push(w);
+            } else {
+                team_late_weeks[team].push(w);
+            }
         }
     }
 
@@ -643,40 +743,361 @@ fn guided_early_late(sched: &mut WinterFixedSchedule, rng: &mut SmallRng) -> Mov
     }
 
     if worst_dev < 1.0 {
-        let w = rng.random_range(0..WF_WEEKS);
-        let pa = rng.random_range(0..WF_POSITIONS);
-        let mut pb = rng.random_range(0..(WF_POSITIONS - 1));
-        if pb >= pa { pb += 1; }
-        sched.mapping[w].swap(pa, pb);
-        return MoveUndo::Swap { week: w, pos_a: pa, pos_b: pb };
+        return fallback_swap(sched, rng);
     }
 
-    // Find a week and swap this team between early and late positions
-    let start = rng.random_range(0..WF_WEEKS);
-    for off in 0..WF_WEEKS {
-        let w = (start + off) % WF_WEEKS;
-        let lse = sched.lane_swap_early[w];
-        let lsl = sched.lane_swap_late[w];
-        if let Some(pos) = sched.mapping[w].iter().position(|&t| t == worst_team as u8) {
-            let eq = effective_quad(pos, lse, lsl);
-            let in_early = eq < 2;
-            if (too_many_early && in_early) || (!too_many_early && !in_early) {
-                // Swap with a random position in the opposite half
-                let target_range = if in_early { 8..16 } else { 0..8 };
-                let swap_pos = rng.random_range(target_range);
-                sched.mapping[w].swap(pos, swap_pos);
-                return MoveUndo::Swap { week: w, pos_a: pos, pos_b: swap_pos };
-            }
+    // Find a team with opposite imbalance to swap with
+    let swap_target = (0..WF_TEAMS).find(|&t| {
+        let dev = early_count[t] as f64 - target_e;
+        if too_many_early { dev < -0.5 } else { dev > 0.5 }
+    });
+
+    // Pick week where worst_team is in the wrong half
+    let weeks = if too_many_early { &team_early_weeks[worst_team] } else { &team_late_weeks[worst_team] };
+    if weeks.is_empty() {
+        return fallback_swap(sched, rng);
+    }
+    let w = weeks[rng.random_range(0..weeks.len())];
+    let lse = sched.lane_swap_early[w];
+    let lsl = sched.lane_swap_late[w];
+    let pos = sched.mapping[w].iter().position(|&t| t as usize == worst_team).unwrap();
+    let eq = effective_quad(pos, lse, lsl);
+    let in_early = eq < 2;
+
+    if let Some(target) = swap_target {
+        // Find target's position and swap — prefer if target is in opposite half this week
+        let tpos = sched.mapping[w].iter().position(|&t| t as usize == target).unwrap();
+        let teq = effective_quad(tpos, lse, lsl);
+        let t_in_early = teq < 2;
+        if in_early != t_in_early {
+            sched.mapping[w].swap(pos, tpos);
+            return MoveUndo::Swap { week: w, pos_a: pos, pos_b: tpos };
         }
     }
 
-    // Fallback
+    // Swap with a random position in the opposite half
+    let target_range = if in_early { 8..16 } else { 0..8 };
+    let swap_pos = rng.random_range(target_range);
+    sched.mapping[w].swap(pos, swap_pos);
+    MoveUndo::Swap { week: w, pos_a: pos, pos_b: swap_pos }
+}
+
+fn fallback_swap(sched: &mut WinterFixedSchedule, rng: &mut SmallRng) -> MoveUndo {
     let w = rng.random_range(0..WF_WEEKS);
     let pa = rng.random_range(0..WF_POSITIONS);
     let mut pb = rng.random_range(0..(WF_POSITIONS - 1));
     if pb >= pa { pb += 1; }
     sched.mapping[w].swap(pa, pb);
     MoveUndo::Swap { week: w, pos_a: pa, pos_b: pb }
+}
+
+/// Guided consecutive opponents: find a pair that plays in consecutive weeks and separate them.
+fn guided_consecutive(sched: &mut WinterFixedSchedule, rng: &mut SmallRng) -> MoveUndo {
+    let mut week_matchup = [[false; WF_TEAMS * WF_TEAMS]; WF_WEEKS];
+    for w in 0..WF_WEEKS {
+        for entry in &MATCHUP_ENTRIES {
+            let ta = sched.mapping[w][entry.pos_a as usize] as usize;
+            let tb = sched.mapping[w][entry.pos_b as usize] as usize;
+            let lo = ta.min(tb);
+            let hi = ta.max(tb);
+            week_matchup[w][lo * WF_TEAMS + hi] = true;
+        }
+    }
+
+    // Find a consecutive pair
+    let mut violations: Vec<(usize, usize, usize)> = Vec::new(); // (week, team_lo, team_hi)
+    for w in 0..(WF_WEEKS - 1) {
+        if w == 4 || w == 5 { continue; } // skip the gap
+        for i in 0..WF_TEAMS {
+            for j in (i + 1)..WF_TEAMS {
+                let idx = i * WF_TEAMS + j;
+                if week_matchup[w][idx] && week_matchup[w + 1][idx] {
+                    violations.push((w, i, j));
+                }
+            }
+        }
+    }
+
+    if violations.is_empty() {
+        return fallback_swap(sched, rng);
+    }
+
+    let (w, tlo, thi) = violations[rng.random_range(0..violations.len())];
+    // Pick one of the two consecutive weeks and swap one of the teams out of their matchup
+    let target_w = if rng.random_bool(0.5) { w } else { w + 1 };
+    let target_team = if rng.random_bool(0.5) { tlo } else { thi };
+    let pos = sched.mapping[target_w].iter().position(|&t| t as usize == target_team).unwrap();
+    // Swap with someone in a different quad (same half to avoid disrupting early/late)
+    let my_quad = quad_of(pos);
+    let same_half: Vec<usize> = (0..WF_POSITIONS)
+        .filter(|&p| quad_of(p) != my_quad && ((quad_of(p) < 2) == (my_quad < 2)))
+        .collect();
+    if same_half.is_empty() {
+        return fallback_swap(sched, rng);
+    }
+    let swap_pos = same_half[rng.random_range(0..same_half.len())];
+    sched.mapping[target_w].swap(pos, swap_pos);
+    MoveUndo::Swap { week: target_w, pos_a: pos, pos_b: swap_pos }
+}
+
+/// Guided lane switch: balance stay vs split positions per team.
+fn guided_lane_switch(sched: &mut WinterFixedSchedule, rng: &mut SmallRng) -> MoveUndo {
+    let mut stay_count = [0i32; WF_TEAMS];
+    for w in 0..WF_WEEKS {
+        for pos in 0..WF_POSITIONS {
+            let team = sched.mapping[w][pos] as usize;
+            if is_stay(pos) { stay_count[team] += 1; }
+        }
+    }
+
+    let target_stay = WF_WEEKS as f64 / 2.0;
+    let mut worst_team = 0;
+    let mut worst_dev = 0.0f64;
+    let mut too_many_stay = false;
+    for t in 0..WF_TEAMS {
+        let dev = stay_count[t] as f64 - target_stay;
+        if dev.abs() > worst_dev {
+            worst_dev = dev.abs();
+            worst_team = t;
+            too_many_stay = dev > 0.0;
+        }
+    }
+
+    if worst_dev < 1.0 {
+        return fallback_swap(sched, rng);
+    }
+
+    // Find weeks where worst_team is in wrong position type
+    let mut good_weeks: Vec<(usize, usize)> = Vec::new();
+    for w in 0..WF_WEEKS {
+        let pos = sched.mapping[w].iter().position(|&t| t as usize == worst_team).unwrap();
+        if (too_many_stay && is_stay(pos)) || (!too_many_stay && !is_stay(pos)) {
+            good_weeks.push((w, pos));
+        }
+    }
+
+    if good_weeks.is_empty() {
+        return fallback_swap(sched, rng);
+    }
+
+    let (w, pos) = good_weeks[rng.random_range(0..good_weeks.len())];
+    // Swap within the same quad with a position of opposite type (stay↔split)
+    let q_base = quad_of(pos) * WF_POS_PER_QUAD;
+    let candidates: Vec<usize> = (q_base..q_base + WF_POS_PER_QUAD)
+        .filter(|&p| p != pos && is_stay(p) != is_stay(pos))
+        .collect();
+    if candidates.is_empty() {
+        return fallback_swap(sched, rng);
+    }
+    let swap_pos = candidates[rng.random_range(0..candidates.len())];
+    sched.mapping[w].swap(pos, swap_pos);
+    MoveUndo::Swap { week: w, pos_a: pos, pos_b: swap_pos }
+}
+
+/// Guided late lane balance: fix lane imbalance in late games specifically.
+fn guided_late_lane(sched: &mut WinterFixedSchedule, rng: &mut SmallRng) -> MoveUndo {
+    let mut late_lane_counts = [0i32; WF_TEAMS * WF_LANES];
+    for w in 0..WF_WEEKS {
+        let lse = sched.lane_swap_early[w];
+        let lsl = sched.lane_swap_late[w];
+        for q in 0..WF_QUADS {
+            let eq = effective_quad_from(q, lse, lsl);
+            if eq < 2 { continue; } // only late
+            let base = q * WF_POS_PER_QUAD;
+            let lo = lane_off_of_quad(eq);
+            let pa = sched.mapping[w][base] as usize;
+            let pb = sched.mapping[w][base + 1] as usize;
+            let pc = sched.mapping[w][base + 2] as usize;
+            let pd = sched.mapping[w][base + 3] as usize;
+            late_lane_counts[pa * WF_LANES + lo] += 2;
+            late_lane_counts[pb * WF_LANES + lo] += 1;
+            late_lane_counts[pb * WF_LANES + lo + 1] += 1;
+            late_lane_counts[pc * WF_LANES + lo + 1] += 2;
+            late_lane_counts[pd * WF_LANES + lo + 1] += 1;
+            late_lane_counts[pd * WF_LANES + lo] += 1;
+        }
+    }
+
+    let target = WF_WEEKS as f64 / WF_LANES as f64;
+    let mut worst_team = 0;
+    let mut worst_dev = 0.0f64;
+    for t in 0..WF_TEAMS {
+        for l in 0..WF_LANES {
+            let dev = (late_lane_counts[t * WF_LANES + l] as f64 - target).abs();
+            if dev > worst_dev { worst_dev = dev; worst_team = t; }
+        }
+    }
+
+    if worst_dev < 1.0 {
+        // Toggle a late lane swap
+        let w = rng.random_range(0..WF_WEEKS);
+        sched.lane_swap_late[w] = !sched.lane_swap_late[w];
+        return MoveUndo::ToggleLaneLate { week: w };
+    }
+
+    // Find worst_team in a late quad and swap within that quad
+    let mut good_weeks: Vec<(usize, usize)> = Vec::new();
+    for w in 0..WF_WEEKS {
+        let lse = sched.lane_swap_early[w];
+        let lsl = sched.lane_swap_late[w];
+        let pos = sched.mapping[w].iter().position(|&t| t as usize == worst_team).unwrap();
+        let eq = effective_quad(pos, lse, lsl);
+        if eq >= 2 {
+            good_weeks.push((w, pos));
+        }
+    }
+
+    if good_weeks.is_empty() {
+        return fallback_swap(sched, rng);
+    }
+
+    let (w, pos) = good_weeks[rng.random_range(0..good_weeks.len())];
+    let q_base = quad_of(pos) * WF_POS_PER_QUAD;
+    let candidates: Vec<usize> = (q_base..q_base + WF_POS_PER_QUAD)
+        .filter(|&p| p != pos)
+        .collect();
+    let swap_pos = candidates[rng.random_range(0..candidates.len())];
+    sched.mapping[w].swap(pos, swap_pos);
+    MoveUndo::Swap { week: w, pos_a: pos, pos_b: swap_pos }
+}
+
+/// Guided commissioner: reduce overlap in early/late patterns between team pairs.
+fn guided_commissioner(sched: &mut WinterFixedSchedule, rng: &mut SmallRng) -> MoveUndo {
+    // Compute early/late pattern per team
+    let mut early_late = [0u8; WF_TEAMS * WF_WEEKS];
+    for w in 0..WF_WEEKS {
+        let lse = sched.lane_swap_early[w];
+        let lsl = sched.lane_swap_late[w];
+        for pos in 0..WF_POSITIONS {
+            let team = sched.mapping[w][pos] as usize;
+            let eq = effective_quad(pos, lse, lsl);
+            early_late[team * WF_WEEKS + w] = if eq < 2 { 1 } else { 0 };
+        }
+    }
+
+    // Find pair with minimum overlap (same as evaluate)
+    let mut min_overlap = WF_WEEKS as u32;
+    let mut min_i = 0;
+    let mut min_j = 1;
+    for i in 0..WF_TEAMS {
+        for j in (i + 1)..WF_TEAMS {
+            let mut overlap = 0u32;
+            for w in 0..WF_WEEKS {
+                if early_late[i * WF_WEEKS + w] == early_late[j * WF_WEEKS + w] {
+                    overlap += 1;
+                }
+            }
+            if overlap < min_overlap {
+                min_overlap = overlap;
+                min_i = i;
+                min_j = j;
+            }
+        }
+    }
+
+    if min_overlap <= 1 {
+        return fallback_swap(sched, rng);
+    }
+
+    // Find a week where they have the same pattern and flip one of them
+    let target = if rng.random_bool(0.5) { min_i } else { min_j };
+    let mut same_weeks: Vec<usize> = Vec::new();
+    for w in 0..WF_WEEKS {
+        if early_late[min_i * WF_WEEKS + w] == early_late[min_j * WF_WEEKS + w] {
+            same_weeks.push(w);
+        }
+    }
+
+    if same_weeks.is_empty() {
+        return fallback_swap(sched, rng);
+    }
+
+    let w = same_weeks[rng.random_range(0..same_weeks.len())];
+    let pos = sched.mapping[w].iter().position(|&t| t as usize == target).unwrap();
+    let eq = effective_quad(pos, sched.lane_swap_early[w], sched.lane_swap_late[w]);
+    let in_early = eq < 2;
+    // Swap to opposite half
+    let target_range = if in_early { 8..16 } else { 0..8 };
+    let swap_pos = rng.random_range(target_range);
+    sched.mapping[w].swap(pos, swap_pos);
+    MoveUndo::Swap { week: w, pos_a: pos, pos_b: swap_pos }
+}
+
+/// Guided half-season repeat: fix pairs that play more than once in the same half.
+fn guided_half_season(sched: &mut WinterFixedSchedule, rng: &mut SmallRng) -> MoveUndo {
+    const HALF: usize = WF_WEEKS / 2;
+    let mut fh_matchups = [0u8; WF_TEAMS * WF_TEAMS];
+    let mut sh_matchups = [0u8; WF_TEAMS * WF_TEAMS];
+
+    for w in 0..WF_WEEKS {
+        for entry in &MATCHUP_ENTRIES {
+            let ta = sched.mapping[w][entry.pos_a as usize] as usize;
+            let tb = sched.mapping[w][entry.pos_b as usize] as usize;
+            let lo = ta.min(tb);
+            let hi = ta.max(tb);
+            let idx = lo * WF_TEAMS + hi;
+            if w < HALF { fh_matchups[idx] += 1; }
+            else { sh_matchups[idx] += 1; }
+        }
+    }
+
+    // Find worst violating pair
+    let mut worst_pair = (0, 1);
+    let mut worst_excess: u8 = 0;
+    let mut in_first_half = true;
+    for i in 0..WF_TEAMS {
+        for j in (i + 1)..WF_TEAMS {
+            let idx = i * WF_TEAMS + j;
+            if fh_matchups[idx] > 1 && fh_matchups[idx] - 1 > worst_excess {
+                worst_excess = fh_matchups[idx] - 1;
+                worst_pair = (i, j);
+                in_first_half = true;
+            }
+            if sh_matchups[idx] > 1 && sh_matchups[idx] - 1 > worst_excess {
+                worst_excess = sh_matchups[idx] - 1;
+                worst_pair = (i, j);
+                in_first_half = false;
+            }
+        }
+    }
+
+    if worst_excess == 0 {
+        return fallback_swap(sched, rng);
+    }
+
+    // Find a week in the offending half where they play and swap one out
+    let range = if in_first_half { 0..HALF } else { HALF..WF_WEEKS };
+    let mut play_weeks: Vec<usize> = Vec::new();
+    for w in range {
+        for entry in &MATCHUP_ENTRIES {
+            let ta = sched.mapping[w][entry.pos_a as usize] as usize;
+            let tb = sched.mapping[w][entry.pos_b as usize] as usize;
+            let lo = ta.min(tb);
+            let hi = ta.max(tb);
+            if lo == worst_pair.0 && hi == worst_pair.1 {
+                play_weeks.push(w);
+                break;
+            }
+        }
+    }
+
+    if play_weeks.is_empty() {
+        return fallback_swap(sched, rng);
+    }
+
+    let w = play_weeks[rng.random_range(0..play_weeks.len())];
+    let target = if rng.random_bool(0.5) { worst_pair.0 } else { worst_pair.1 };
+    let pos = sched.mapping[w].iter().position(|&t| t as usize == target).unwrap();
+    let my_quad = quad_of(pos);
+    let same_half: Vec<usize> = (0..WF_POSITIONS)
+        .filter(|&p| quad_of(p) != my_quad && ((quad_of(p) < 2) == (my_quad < 2)))
+        .collect();
+    if same_half.is_empty() {
+        return fallback_swap(sched, rng);
+    }
+    let swap_pos = same_half[rng.random_range(0..same_half.len())];
+    sched.mapping[w].swap(pos, swap_pos);
+    MoveUndo::Swap { week: w, pos_a: pos, pos_b: swap_pos }
 }
 
 // ── Systematic sweep ──

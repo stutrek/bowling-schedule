@@ -225,7 +225,17 @@ fn worker_loop(
         // Reheat when temperature bottoms out
         if active_temp <= MIN_TEMP + 0.01 {
             sched = best_sched;
-            perturb_fixed(&mut sched, &mut SmallRng::from_os_rng(), 3);
+            bd = evaluate_fixed(&sched, &w8);
+            // Mix of guided and random perturbation
+            for _ in 0..3 {
+                if rng.random_bool(0.5) {
+                    let move_id = pick_move_guided_only(&bd);
+                    let _ = apply_move(&mut sched, move_id, &bd, &mut rng);
+                    bd = evaluate_fixed(&sched, &w8);
+                } else {
+                    let _ = apply_move(&mut sched, 0, &bd, &mut rng);
+                }
+            }
             bd = evaluate_fixed(&sched, &w8);
             cost = bd.total;
             active_temp = initial_temp;
