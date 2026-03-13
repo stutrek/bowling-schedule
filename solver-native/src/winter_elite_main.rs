@@ -483,7 +483,7 @@ async fn run_gpu(
         }
 
         // ── 5. Assign idle workers ──
-        let busy_islands: Vec<usize> = worker_states.iter()
+        let mut busy_islands: Vec<usize> = worker_states.iter()
             .filter_map(|s| s.island_idx())
             .collect();
         for cid in 0..cpu_cores {
@@ -502,6 +502,7 @@ async fn run_gpu(
                         start_iters,
                         start_cost: island.best_cost,
                     };
+                    busy_islands.push(island_idx);
                 }
             }
         }
