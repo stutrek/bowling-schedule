@@ -18,4 +18,7 @@ pub mod summer_fixed_main;
 pub mod winter_main;
 pub mod winter_fixed_main;
 
+#[cfg(test)]
+mod test_histogram;
+
 pub use solver_core::winter::*;
