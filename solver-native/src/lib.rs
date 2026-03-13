@@ -17,6 +17,10 @@ pub mod summer_main;
 pub mod summer_fixed_main;
 pub mod winter_main;
 pub mod winter_fixed_main;
+pub mod gpu_sa_loop;
+pub mod island_pool;
+pub mod winter_elite_main;
+pub mod output_winter_elite;
 
 #[cfg(test)]
 mod test_histogram;

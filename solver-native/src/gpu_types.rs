@@ -22,12 +22,12 @@ pub struct GpuParams {
 
 pub const MAX_SWAP_PAIRS: usize = 32768;
 
-pub const GPU_TEMP_MIN: f64 = 1.0;
+pub const GPU_TEMP_MIN: f64 = 3.0;
 pub const GPU_TEMP_MAX: f64 = 30.0;
 pub const CPU_TEMP_MIN: f64 = 15.0;
 pub const CPU_TEMP_MAX: f64 = 30.0;
 pub const TEMP_LEVELS: usize = 256;
-pub const POD_SIZE: usize = 8;
+pub const POD_SIZE: usize = 32;
 
 /// Geometric spacing: uniform 1/T gaps for better replica exchange acceptance.
 pub fn temp_for_level(level: usize) -> f64 {
