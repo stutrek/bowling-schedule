@@ -224,6 +224,27 @@ Both solvers share the same parallel tempering infrastructure:
 
 **The fix: a fixed day template.** Instead of optimizing every position, the solver now uses a single ideal day layout as a fixed template and only varies which team fills which role each week. This guarantees good game spacing by construction and reduces the search space from 200 independent positions to 12-team permutations plus lane swap flags -- a dramatically simpler problem that the solver handles easily.
 
+## Experimental: Island-based Elite Solver (`elite-experiments` branch)
+
+The standard solver converges all 8 CPU partitions to the same local minimum -- typically around cost 520. Longer runs (12-24 hours) don't improve beyond this. The `elite-experiments` branch explores a different architecture designed to maintain diversity across the search while still deeply refining each solution.
+
+### The idea
+
+Instead of 8 fixed CPU partitions, the GPU's 65,536 chains are divided into **128 independent islands of 512 chains each**. Replica exchange only happens within islands, never across them. Each island converges to its own local minimum independently. 8 CPU workers cycle between islands, spending ~24 seconds deeply refining each one before moving on.
+
+To prevent islands from all converging to the same basin (which is what happens with the standard solver), the system uses **team-normalized similarity detection**. Since team labels are arbitrary (swapping all occurrences of team 3 and team 7 produces an equivalent real-world schedule), island bests are compared after normalizing team labels. If two islands converge to the same solution, the worse one is reset with fresh random schedules.
+
+### Status
+
+The architecture runs but has a known cross-contamination bug where CPU workers can spread solutions between islands. When a CPU finishes refining one island and gets assigned to a new one, stale reports from the old island can leak into the new one. A generation-tagging fix has been implemented but not yet validated in long runs. The branch should be considered experimental.
+
+### Running it
+
+```bash
+git checkout elite-experiments
+cargo run --release -p solver-native --bin solver -- --league winter-elite
+```
+
 ## Running the web viewer
 
 ```bash
