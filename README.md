@@ -86,7 +86,7 @@ Every 100,000 iterations, the solver picks two quads in the same week and brute-
 
 ### Winter results
 
-Best known result: **cost 300**. Results are saved to `solver-native/results/gpu/` with filenames like `0300-cpu5-20260301-212702-0500.tsv`. These can be loaded in the web viewer.
+The best results are the ones that scored 520. The results with a better score hyper-optimized less relevant scores, such as repeat week matchups, while losing some of the more more important (to humans) attributes.
 
 ### Running the winter solver
 
