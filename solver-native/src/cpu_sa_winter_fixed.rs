@@ -14,8 +14,6 @@ const MIN_TEMP: f64 = 1.0;
 pub enum WinterFixedWorkerCommand {
     SetState(WinterFixedSchedule),
     SetStateWithTemp(WinterFixedSchedule, f64),
-    /// Unconditionally reset both current and best state (for island cycling).
-    ResetState(WinterFixedSchedule),
     Sweep,
     Shutdown,
 }
@@ -121,15 +119,6 @@ fn worker_loop(
                         live_best_cost.store(best_cost, Ordering::Relaxed);
                     }
                     active_temp = temp;
-                }
-                WinterFixedWorkerCommand::ResetState(new_sched) => {
-                    sched = new_sched;
-                    bd = evaluate_fixed(&sched, &w8);
-                    cost = bd.total;
-                    best_sched = sched;
-                    best_cost = cost;
-                    live_best_cost.store(best_cost, Ordering::Relaxed);
-                    active_temp = initial_temp;
                 }
                 WinterFixedWorkerCommand::Sweep => {
                     pending_sweep = true;
