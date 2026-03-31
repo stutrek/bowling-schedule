@@ -10,13 +10,13 @@ pub struct GpuWeights {
     pub consecutive_opponents: u32,
     pub early_late_balance: f32,
     pub early_late_alternation: u32,
+    pub early_late_consecutive: u32,
     pub lane_balance: f32,
     pub lane_switch: f32,
     pub late_lane_balance: f32,
     pub commissioner_overlap: u32,
     pub half_season_repeat: u32,
     pub _pad0: u32,
-    pub _pad1: u32,
 }
 
 #[repr(C)]

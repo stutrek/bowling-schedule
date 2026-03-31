@@ -165,12 +165,26 @@ def build_model(w8, tight=False, seed_assignment=None):
         m.add(pen_matchup == w8['matchup_zero'] * sum(zero_flags)
                             + w8['matchup_triple'] * sum(excess_list))
 
-    # ── Half-season constraint: at most one meeting per pair per half ──
+    # ── PENALTY 9: Half-season repeat ─────────────────────────────────
     H = W // 2
+    hs_w = w8.get('half_season_repeat', 0)
+    hs_excess = []
     for i in range(T):
         for j in range(i + 1, T):
-            m.add(sum(week_match[w, i, j] for w in range(H)) <= 1)
-            m.add(sum(week_match[w, i, j] for w in range(H, W)) <= 1)
+            for half_start, half_end in [(0, H), (H, W)]:
+                hc = m.new_int_var(0, H, f'hc{i}{j}{half_start}')
+                m.add(hc == sum(
+                    week_match[w, i, j]
+                    for w in range(half_start, half_end)
+                ))
+                hc_m1 = m.new_int_var(-1, H - 1, f'hm{i}{j}{half_start}')
+                m.add(hc_m1 == hc - 1)
+                ex = m.new_int_var(0, H - 1, f'he{i}{j}{half_start}')
+                m.add_max_equality(ex, [hc_m1, ZERO])
+                hs_excess.append(ex)
+
+    pen_hs = m.new_int_var(0, 500_000, 'pen_hs')
+    m.add(pen_hs == hs_w * sum(hs_excess))
 
     # ── PENALTY 2: Consecutive opponents ────────────────────────────────
     consec_flags = []
@@ -220,6 +234,29 @@ def build_model(w8, tight=False, seed_assignment=None):
 
         pen_alt = m.new_int_var(0, 500_000, 'pen_alt')
         m.add(pen_alt == w8['early_late_alternation'] * sum(alt_flags))
+
+    # ── PENALTY 4b: Consecutive (2-in-a-row same slot) ─────────────────
+    el_con_w = w8.get('early_late_consecutive', 0)
+    if el_con_w > 0:
+        consec_el_flags = []
+        for t in range(T):
+            for w in range(W - 1):
+                # same = 1 when both early or both late
+                same = m.new_bool_var(f'ec{t}{w}')
+                m.add_multiplication_equality(same, [early[w, t], early[w + 1, t]])
+                # also detect both-late: neither early
+                same_l = m.new_bool_var(f'ecl{t}{w}')
+                m.add_multiplication_equality(same_l, [early[w, t].negated(),
+                                                        early[w + 1, t].negated()])
+                either = m.new_bool_var(f'ece{t}{w}')
+                m.add_bool_or([same, same_l]).only_enforce_if(either)
+                m.add_bool_and([same.negated(), same_l.negated()]).only_enforce_if(either.negated())
+                consec_el_flags.append(either)
+
+        pen_el_con = m.new_int_var(0, 500_000, 'pen_el_con')
+        m.add(pen_el_con == el_con_w * sum(consec_el_flags))
+    else:
+        pen_el_con = m.new_int_var(0, 0, 'pen_el_con')
 
     # ── PENALTY 5: Lane balance ─────────────────────────────────────────
     if tight:
@@ -350,10 +387,12 @@ def build_model(w8, tight=False, seed_assignment=None):
         'consec':  pen_consec,
         'el_bal':  pen_el,
         'el_alt':  pen_alt,
+        'el_con':  pen_el_con,
         'lane':    pen_lane,
         'switch':  pen_switch,
         'll_bal':  pen_ll,
         'comm':    pen_comm,
+        'hs_rpt':  pen_hs,
     }
 
     total = m.new_int_var(0, 5_000_000, 'total')
@@ -573,11 +612,22 @@ def main():
             print(f'\n  Best proven lower bound: {solver.best_objective_bound}')
             print('  (solver hit time limit before proving optimality)')
 
+        sched = extract_schedule(solver, x)
+        cost = solver.value(total)
+        import os
+        import datetime
+        results_dir = 'solver-native/results/gpu'
+        os.makedirs(results_dir, exist_ok=True)
+        ts = datetime.datetime.now().strftime('%Y%m%d-%H%M%S%z')
+        auto_path = f'{results_dir}/{cost:04d}-cpsat-{ts}.tsv'
+        with open(auto_path, 'w') as f:
+            f.write(assignment_to_tsv(sched))
+        print(f'\n  Schedule saved to {auto_path}')
+
         if args.save:
-            sched = extract_schedule(solver, x)
             with open(args.save, 'w') as f:
                 f.write(assignment_to_tsv(sched))
-            print(f'\n  Schedule saved to {args.save}')
+            print(f'  Also saved to {args.save}')
 
         print(f'{"=" * 55}')
 

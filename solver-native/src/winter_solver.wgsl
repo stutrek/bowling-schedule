@@ -12,6 +12,7 @@ struct Weights {
     consecutive_opponents: u32,
     early_late_balance: f32,
     early_late_alternation: u32,
+    early_late_consecutive: u32,
     lane_balance: f32,
     lane_switch: f32,
     late_lane_balance: f32,
@@ -228,6 +229,15 @@ fn eval_matchups_early_late(a: ptr<function, array<u32, 48>>) -> u32 {
             let e2 = (el[t] >> (w + 2u)) & 1u;
             let same = (1u - min(e0 ^ e1, 1u)) * (1u - min(e1 ^ e2, 1u));
             total += same * weights.early_late_alternation;
+        }
+    }
+
+    // Early/late consecutive (2 consecutive same)
+    for (var t = 0u; t < TEAMS; t++) {
+        for (var w = 0u; w < WEEKS - 1u; w++) {
+            let e0 = (el[t] >> w) & 1u;
+            let e1 = (el[t] >> (w + 1u)) & 1u;
+            total += (1u - min(e0 ^ e1, 1u)) * weights.early_late_consecutive;
         }
     }
 

@@ -186,12 +186,13 @@ pub fn run(shutdown: Arc<AtomicBool>, args: &[String]) {
         consecutive_opponents: w8.consecutive_opponents,
         early_late_balance: w8.early_late_balance as f32,
         early_late_alternation: w8.early_late_alternation,
+        early_late_consecutive: w8.early_late_consecutive,
         lane_balance: w8.lane_balance as f32,
         lane_switch: w8.lane_switch as f32,
         late_lane_balance: w8.late_lane_balance as f32,
         commissioner_overlap: w8.commissioner_overlap,
         half_season_repeat: w8.half_season_repeat,
-        _pad0: 0, _pad1: 0,
+        _pad0: 0,
     };
 
     let gpu_params = GpuParams {
