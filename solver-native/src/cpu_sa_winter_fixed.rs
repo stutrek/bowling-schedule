@@ -15,7 +15,9 @@ pub enum WinterFixedWorkerCommand {
     SetState(WinterFixedSchedule),
     SetStateWithTemp(WinterFixedSchedule, f64),
     /// Unconditionally reset both current and best state (for island cycling).
-    ResetState(WinterFixedSchedule),
+    /// The u64 is a generation tag so the main loop can identify which assignment
+    /// a report belongs to.
+    ResetState(WinterFixedSchedule, u64),
     Sweep,
     Shutdown,
 }
@@ -31,6 +33,7 @@ pub struct WinterFixedWorkerReport {
     pub sweep_round: u32,
     pub move_rates: [f64; NUM_MOVES],
     pub move_shares: [f64; NUM_MOVES],
+    pub generation: u64,
 }
 
 pub struct WinterFixedCpuWorkers {
@@ -96,6 +99,7 @@ fn worker_loop(
     let mut iterations_total: u64 = 0;
     let mut sweep_round: u32 = 0;
     let mut pending_sweep = false;
+    let mut generation: u64 = 0;
 
     loop {
         while let Ok(cmd) = cmd_rx.try_recv() {
@@ -122,7 +126,7 @@ fn worker_loop(
                     }
                     active_temp = temp;
                 }
-                WinterFixedWorkerCommand::ResetState(new_sched) => {
+                WinterFixedWorkerCommand::ResetState(new_sched, gen) => {
                     sched = new_sched;
                     bd = evaluate_fixed(&sched, &w8);
                     cost = bd.total;
@@ -130,6 +134,7 @@ fn worker_loop(
                     best_cost = cost;
                     live_best_cost.store(best_cost, Ordering::Relaxed);
                     active_temp = initial_temp;
+                    generation = gen;
                 }
                 WinterFixedWorkerCommand::Sweep => {
                     pending_sweep = true;
@@ -166,6 +171,7 @@ fn worker_loop(
                 sweep_round,
                 move_rates: stats.last_rates,
                 move_shares: stats.last_shares,
+                generation,
             });
             if improvements == 0 {
                 sweep_round = 0;
@@ -263,6 +269,7 @@ fn worker_loop(
             sweep_round,
             move_rates: stats.last_rates,
             move_shares: stats.last_shares,
+            generation,
         });
     }
 }

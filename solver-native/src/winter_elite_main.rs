@@ -208,6 +208,7 @@ async fn run_gpu(
     let mut last_thresh = WF_THRESH_DEFAULT;
 
     let mut pool = IslandPool::new(10.0);
+    let mut next_generation: u64 = 1;
     let mut worker_states: Vec<EliteWorkerState> = (0..cpu_cores).map(|_| EliteWorkerState::Idle).collect();
     let mut worker_metas: Vec<EliteWorkerMeta> = (0..cpu_cores).map(|_| EliteWorkerMeta {
         last_report: None,
@@ -414,6 +415,19 @@ async fn run_gpu(
             let cid = report.core_id;
             if cid >= worker_metas.len() { continue; }
 
+            // Check generation — skip reports from a previous island assignment.
+            // The CPU thread hasn't processed ResetState yet, so its best_schedule
+            // belongs to the old island and must not contaminate the new one.
+            let expected_gen = match &worker_states[cid] {
+                EliteWorkerState::Refining { generation, .. } => *generation,
+                EliteWorkerState::Idle => 0,
+            };
+            if report.generation != expected_gen {
+                // Update meta for display only, don't touch any island or global state
+                worker_metas[cid].last_report = Some(report);
+                continue;
+            }
+
             let real_best = evaluate_fixed(&report.best_schedule, &w8).total;
 
             // Update global best
@@ -443,14 +457,6 @@ async fn run_gpu(
                 let island_idx = *island_idx;
                 let start_iters = *start_iters;
                 let cycle_iters = report.iterations_total.saturating_sub(start_iters);
-
-                // Skip stale reports from before ResetState was processed.
-                // A report needs at least one batch of progress to be from the current island.
-                if cycle_iters < 10_000 {
-                    // Update meta only, don't touch island
-                    worker_metas[cid].last_report = Some(report);
-                    continue;
-                }
 
                 // Update island best from CPU (only if island hasn't been reset)
                 if pool.islands[island_idx].best_cost < u32::MAX {
@@ -510,11 +516,14 @@ async fn run_gpu(
                     let start_iters = worker_metas[cid].last_report.as_ref()
                         .map(|r| r.iterations_total)
                         .unwrap_or(0);
-                    let _ = cpu_workers.commands[cid].send(WinterFixedWorkerCommand::ResetState(sched));
+                    let gen = next_generation;
+                    next_generation += 1;
+                    let _ = cpu_workers.commands[cid].send(WinterFixedWorkerCommand::ResetState(sched, gen));
                     worker_states[cid] = EliteWorkerState::Refining {
                         island_idx,
                         start_iters,
                         start_cost: island.best_cost,
+                        generation: gen,
                     };
                     busy_islands.push(island_idx);
                 }

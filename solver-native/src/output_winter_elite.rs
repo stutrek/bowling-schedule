@@ -18,6 +18,7 @@ pub enum EliteWorkerState {
         island_idx: usize,
         start_iters: u64,
         start_cost: u32,
+        generation: u64,
     },
 }
 
@@ -81,7 +82,7 @@ pub fn print_elite_worker_row(
                 core_id, "--", "--", "--", "--", "--", "idle",
             );
         }
-        EliteWorkerState::Refining { island_idx, start_iters, start_cost } => {
+        EliteWorkerState::Refining { island_idx, start_iters, start_cost, .. } => {
             let (best_cost, current_iters) = meta.last_report.as_ref()
                 .map(|r| (r.best_cost, r.iterations_total))
                 .unwrap_or((*start_cost, *start_iters));
