@@ -228,3 +228,23 @@ pub fn write_chain_raw(
     gpu.queue.write_buffer(&gpu.cost_buf, offset_cost, bytemuck::bytes_of(&cost));
     gpu.queue.write_buffer(&gpu.best_cost_buf, offset_cost, bytemuck::bytes_of(&cost));
 }
+
+/// Write a contiguous range of chains in bulk (2 write_buffer calls instead of 4×N).
+/// `chain_start` is the first chain index. `assign_data` is packed assignments concatenated,
+/// `cost_data` is the cost for each chain. Both slices must have the same chain count.
+pub fn write_island_raw(
+    gpu: &GpuResources,
+    chain_start: usize,
+    assign_data: &[u32],
+    cost_data: &[u32],
+    assign_u32s: usize,
+) {
+    let offset_assign = (chain_start * assign_u32s * 4) as u64;
+    let offset_cost = (chain_start * 4) as u64;
+    let assign_bytes = bytemuck::cast_slice(assign_data);
+    let cost_bytes = bytemuck::cast_slice(cost_data);
+    gpu.queue.write_buffer(&gpu.assign_buf, offset_assign, assign_bytes);
+    gpu.queue.write_buffer(&gpu.best_assign_buf, offset_assign, assign_bytes);
+    gpu.queue.write_buffer(&gpu.cost_buf, offset_cost, cost_bytes);
+    gpu.queue.write_buffer(&gpu.best_cost_buf, offset_cost, cost_bytes);
+}

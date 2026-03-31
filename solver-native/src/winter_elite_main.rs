@@ -39,6 +39,7 @@ fn maybe_save_result(
 
 pub fn run(shutdown: Arc<AtomicBool>, args: &[String]) {
     let no_seed = args.iter().any(|a| a == "--no-seed");
+    let dedup = args.iter().any(|a| a == "--dedup");
 
     let weights_str = fs::read_to_string("../weights.json").expect("Failed to read weights.json");
     let winter_w8: winter::Weights = serde_json::from_str(&weights_str).expect("Invalid weights.json");
@@ -166,7 +167,7 @@ pub fn run(shutdown: Arc<AtomicBool>, args: &[String]) {
     pollster::block_on(run_gpu(
         assign_data, best_assign_data, cost_data, best_cost_data, rng_data,
         gpu_weights, gpu_params, w8, results_dir.to_string(), shutdown, rng,
-        cpu_workers, cpu_cores, shader_src,
+        cpu_workers, cpu_cores, shader_src, dedup,
     ));
 }
 
@@ -186,6 +187,7 @@ async fn run_gpu(
     cpu_workers: WinterFixedCpuWorkers,
     cpu_cores: usize,
     shader_src: String,
+    dedup: bool,
 ) {
     let chain_count = gpu_params.chain_count;
 
@@ -205,7 +207,7 @@ async fn run_gpu(
     let mut last_verify = Instant::now();
     let mut last_thresh = WF_THRESH_DEFAULT;
 
-    let mut pool = IslandPool::new(20.0);
+    let mut pool = IslandPool::new(10.0);
     let mut worker_states: Vec<EliteWorkerState> = (0..cpu_cores).map(|_| EliteWorkerState::Idle).collect();
     let mut worker_metas: Vec<EliteWorkerMeta> = (0..cpu_cores).map(|_| EliteWorkerMeta {
         last_report: None,
@@ -437,36 +439,48 @@ async fn run_gpu(
             }
 
             // Check if refinement cycle is complete
-            if let EliteWorkerState::Refining { island_idx, start_iters, start_cost } = &worker_states[cid] {
+            if let EliteWorkerState::Refining { island_idx, start_iters, .. } = &worker_states[cid] {
                 let island_idx = *island_idx;
                 let start_iters = *start_iters;
-                let start_cost = *start_cost;
                 let cycle_iters = report.iterations_total.saturating_sub(start_iters);
 
-                // Update island best from CPU
-                let packed = pack_fixed_schedule(&report.best_schedule);
-                if pool.update_island_best(island_idx, &packed, real_best, dispatch_count) {
-                    worker_metas[cid].best_found_at = Instant::now();
-                    event!(start_time.elapsed(), &format!(
-                        "ISLAND {} improved {} → {} by cpu{}", island_idx, start_cost, real_best, cid));
+                // Skip stale reports from before ResetState was processed.
+                // A report needs at least one batch of progress to be from the current island.
+                if cycle_iters < 10_000 {
+                    // Update meta only, don't touch island
+                    worker_metas[cid].last_report = Some(report);
+                    continue;
+                }
+
+                // Update island best from CPU (only if island hasn't been reset)
+                if pool.islands[island_idx].best_cost < u32::MAX {
+                    let packed = pack_fixed_schedule(&report.best_schedule);
+                    if pool.update_island_best(island_idx, &packed, real_best, dispatch_count) {
+                        worker_metas[cid].best_found_at = Instant::now();
+                    }
                 }
 
                 if cycle_iters >= REFINEMENT_ITERS {
-                    // Cycle complete — reseed island and go idle
-                    let best_sched = report.best_schedule;
-                    let island_start = island_idx * ISLAND_SIZE;
-                    let island_end = island_start + ISLAND_SIZE;
-                    for ci in island_start..island_end {
-                        let level_in_pod = (ci % TEMP_LEVELS) % POD_SIZE;
-                        let t_frac = level_in_pod as f64 / (POD_SIZE - 1).max(1) as f64;
-                        let pert = (t_frac * t_frac * 5.0) as usize;
-                        let mut s = best_sched;
-                        perturb_fixed(&mut s, &mut rng, pert);
-                        let p = pack_fixed_schedule(&s);
-                        let c = evaluate_fixed(&s, &w8).total;
-                        gpu_sa_loop::write_chain_raw(&gpu, ci, &p, c, WF_ASSIGN_U32S);
+                    // Cycle complete — reseed island and go idle (only if island hasn't been reset)
+                    if pool.islands[island_idx].best_cost < u32::MAX {
+                        let best_sched = report.best_schedule;
+                        let island_start = island_idx * ISLAND_SIZE;
+                        let mut assign_bulk = Vec::with_capacity(ISLAND_SIZE * WF_ASSIGN_U32S);
+                        let mut cost_bulk = Vec::with_capacity(ISLAND_SIZE);
+                        for ci in island_start..island_start + ISLAND_SIZE {
+                            let level_in_pod = (ci % TEMP_LEVELS) % POD_SIZE;
+                            let t_frac = level_in_pod as f64 / (POD_SIZE - 1).max(1) as f64;
+                            let pert = (t_frac * t_frac * 40.0) as usize;
+                            let mut s = best_sched;
+                            perturb_fixed(&mut s, &mut rng, pert);
+                            let p = pack_fixed_schedule(&s);
+                            let c = evaluate_fixed(&s, &w8).total;
+                            assign_bulk.extend_from_slice(&p);
+                            cost_bulk.push(c);
+                        }
+                        gpu_sa_loop::write_island_raw(&gpu, island_start, &assign_bulk, &cost_bulk, WF_ASSIGN_U32S);
+                        pool.mark_refined(island_idx);
                     }
-                    pool.mark_refined(island_idx);
                     worker_states[cid] = EliteWorkerState::Idle;
                 }
             }
@@ -496,7 +510,7 @@ async fn run_gpu(
                     let start_iters = worker_metas[cid].last_report.as_ref()
                         .map(|r| r.iterations_total)
                         .unwrap_or(0);
-                    let _ = cpu_workers.commands[cid].send(WinterFixedWorkerCommand::SetState(sched));
+                    let _ = cpu_workers.commands[cid].send(WinterFixedWorkerCommand::ResetState(sched));
                     worker_states[cid] = EliteWorkerState::Refining {
                         island_idx,
                         start_iters,
@@ -541,28 +555,35 @@ async fn run_gpu(
             }
         }
 
-        // ── 7. Periodic maintenance: dedup + stagnation ──
-        {
-            let busy: Vec<usize> = worker_states.iter()
-                .filter_map(|s| s.island_idx())
-                .collect();
-            let resets = pool.periodic_maintenance(dispatch_count, &busy);
+        // ── 7. Periodic maintenance: dedup + stagnation (only with --dedup) ──
+        if dedup {
+            let resets = pool.periodic_maintenance(dispatch_count, &[]);
             for (island_idx, reason) in &resets {
+                // Evict any CPU worker assigned to this island
+                for cid in 0..cpu_cores {
+                    if worker_states[cid].island_idx() == Some(*island_idx) {
+                        worker_states[cid] = EliteWorkerState::Idle;
+                    }
+                }
                 // Write random schedules to the reset island's chains
                 let island_start = island_idx * ISLAND_SIZE;
-                for ci in island_start..island_start + ISLAND_SIZE {
+                let mut assign_bulk = Vec::with_capacity(ISLAND_SIZE * WF_ASSIGN_U32S);
+                let mut cost_bulk = Vec::with_capacity(ISLAND_SIZE);
+                for _ in 0..ISLAND_SIZE {
                     let s = random_fixed_schedule(&mut rng);
                     let p = pack_fixed_schedule(&s);
                     let c = evaluate_fixed(&s, &w8).total;
-                    gpu_sa_loop::write_chain_raw(&gpu, ci, &p, c, WF_ASSIGN_U32S);
+                    assign_bulk.extend_from_slice(&p);
+                    cost_bulk.push(c);
                 }
+                gpu_sa_loop::write_island_raw(&gpu, island_start, &assign_bulk, &cost_bulk, WF_ASSIGN_U32S);
                 event!(start_time.elapsed(), &format!(
                     "{}: island#{} reset", reason.to_uppercase(), island_idx));
             }
-        }
 
-        // ── 8. Adaptive min_distance ──
-        pool.maybe_adapt(dispatch_count, &mut rng);
+            // ── 8. Adaptive min_distance ──
+            pool.maybe_adapt(dispatch_count, &mut rng);
+        }
 
         // ── 9. Periodic verification ──
         if last_verify.elapsed().as_secs() >= VERIFY_INTERVAL_SECS {

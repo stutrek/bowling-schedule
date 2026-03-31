@@ -13,7 +13,7 @@ pub const DEDUP_INTERVAL: u64 = 500;
 pub const REFINEMENT_ITERS: u64 = 10_000_000;
 
 const ADAPT_INTERVAL: u64 = 100;
-const MIN_DISTANCE_FLOOR: f64 = 5.0;
+const MIN_DISTANCE_FLOOR: f64 = 2.0;
 const MIN_DISTANCE_CEIL: f64 = 80.0;
 const TARGET_OCCUPANCY: f64 = 0.75;
 const DISTANCE_CROWD_FACTOR: f64 = 1.5;
@@ -152,13 +152,15 @@ impl IslandPool {
         if dispatch_count >= self.last_dedup_dispatch + DEDUP_INTERVAL {
             self.last_dedup_dispatch = dispatch_count;
 
-            // Dedup
+            // Dedup — only reset each island once per round
             let dupes = self.find_duplicates();
+            let mut already_reset = std::collections::HashSet::new();
             for (worse, _better, _d) in &dupes {
-                if !busy.contains(worse) {
+                if !busy.contains(worse) && !already_reset.contains(worse) {
                     self.reset_island(*worse);
                     self.dedup_resets += 1;
                     resets.push((*worse, "dedup"));
+                    already_reset.insert(*worse);
                 }
             }
 
@@ -195,7 +197,9 @@ impl IslandPool {
 
         let old = self.min_distance;
         if occupancy < TARGET_OCCUPANCY {
-            self.min_distance *= 0.9;
+            // Decay faster the worse occupancy is
+            let decay = 0.5 + 0.4 * (occupancy / TARGET_OCCUPANCY);
+            self.min_distance *= decay;
         } else if avg_d < self.min_distance * DISTANCE_CROWD_FACTOR {
             self.min_distance *= 1.1;
         }
