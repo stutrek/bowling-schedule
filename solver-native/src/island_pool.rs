@@ -6,8 +6,6 @@ use solver_core::winter_fixed::{WF_TEAMS, WF_WEEKS, WF_POSITIONS};
 use rand::rngs::SmallRng;
 use rand::Rng;
 
-pub const NUM_ISLANDS: usize = 128;
-pub const ISLAND_SIZE: usize = 512;
 pub const STAGNATION_DISPATCHES: u64 = 5000;
 pub const DEDUP_INTERVAL: u64 = 500;
 pub const REFINEMENT_ITERS: u64 = 10_000_000;
@@ -32,6 +30,8 @@ pub struct IslandMeta {
 
 pub struct IslandPool {
     pub islands: Vec<IslandMeta>,
+    pub num_islands: usize,
+    pub island_size: usize,
     pub min_distance: f64,
     pub dedup_resets: u64,
     pub stagnation_resets: u64,
@@ -40,19 +40,21 @@ pub struct IslandPool {
 }
 
 impl IslandPool {
-    pub fn new(initial_min_distance: f64) -> Self {
-        let islands = (0..NUM_ISLANDS)
+    pub fn new(num_islands: usize, island_size: usize, initial_min_distance: f64) -> Self {
+        let islands = (0..num_islands)
             .map(|i| IslandMeta {
                 best_packed: [0u32; WF_ASSIGN_U32S],
                 best_cost: u32::MAX,
                 normalized: [0u32; MAPPING_U32S],
                 last_improved_dispatch: 0,
                 times_refined: 0,
-                chain_start: i * ISLAND_SIZE,
+                chain_start: i * island_size,
             })
             .collect();
         IslandPool {
             islands,
+            num_islands,
+            island_size,
             min_distance: initial_min_distance,
             dedup_resets: 0,
             stagnation_resets: 0,
@@ -104,9 +106,9 @@ impl IslandPool {
     pub fn find_duplicates(&self) -> Vec<(usize, usize, u32)> {
         let threshold = self.min_distance as u32;
         let mut dupes = Vec::new();
-        for i in 0..NUM_ISLANDS {
+        for i in 0..self.num_islands {
             if self.islands[i].best_cost == u32::MAX { continue; }
-            for j in (i + 1)..NUM_ISLANDS {
+            for j in (i + 1)..self.num_islands {
                 if self.islands[j].best_cost == u32::MAX { continue; }
                 let d = nibble_distance(&self.islands[i].normalized, &self.islands[j].normalized);
                 if d < threshold {
@@ -192,7 +194,7 @@ impl IslandPool {
             .map(|(idx, _)| idx)
             .collect();
 
-        let occupancy = active.len() as f64 / NUM_ISLANDS as f64;
+        let occupancy = active.len() as f64 / self.num_islands as f64;
         let avg_d = self.sampled_avg_pairwise_distance(&active, rng);
 
         let old = self.min_distance;

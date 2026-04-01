@@ -1,5 +1,5 @@
 use crate::cpu_sa_winter_fixed::WinterFixedWorkerReport;
-use crate::island_pool::{IslandPoolStats, NUM_ISLANDS};
+use crate::island_pool::IslandPoolStats;
 use crate::output::{GlobalBestMeta, fmt_elapsed, fmt_ips};
 use solver_core::winter_fixed::{fixed_cost_label, WinterFixedCostBreakdown, NUM_MOVES, MOVE_NAMES};
 use std::time::Instant;
@@ -53,10 +53,10 @@ pub fn print_elite_banner(
     eprintln!("   {}\x1b[K", fixed_cost_label(global_best_bd));
 }
 
-pub fn print_island_summary(stats: &IslandPoolStats, avg_d: f64) {
+pub fn print_island_summary(stats: &IslandPoolStats, num_islands: usize, avg_d: f64) {
     eprintln!(
         "islands: {} total, {} active, {} stagnant, {} reset(dedup), {} reset(stag) | min_d={:.1} avg_d={:.1}\x1b[K",
-        NUM_ISLANDS, stats.active, stats.stagnant,
+        num_islands, stats.active, stats.stagnant,
         stats.dedup_resets, stats.stagnation_resets,
         stats.min_distance, avg_d,
     );

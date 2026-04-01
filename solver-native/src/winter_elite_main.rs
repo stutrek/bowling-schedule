@@ -5,7 +5,7 @@ use crate::gpu_sa_loop;
 use crate::gpu_setup::create_gpu_resources;
 use crate::gpu_types::*;
 use crate::gpu_types_winter_fixed::*;
-use crate::island_pool::{IslandPool, NUM_ISLANDS, ISLAND_SIZE, REFINEMENT_ITERS};
+use crate::island_pool::{IslandPool, REFINEMENT_ITERS};
 use crate::output::*;
 use crate::output_winter_elite::*;
 use solver_core::winter_fixed::*;
@@ -40,6 +40,10 @@ fn maybe_save_result(
 pub fn run(shutdown: Arc<AtomicBool>, args: &[String]) {
     let no_seed = args.iter().any(|a| a == "--no-seed");
     let dedup = args.iter().any(|a| a == "--dedup");
+    let island_ratio: usize = args.windows(2)
+        .find(|w| w[0] == "--island-ratio")
+        .and_then(|w| w[1].parse().ok())
+        .unwrap_or(2);
 
     let weights_str = fs::read_to_string("../weights.json").expect("Failed to read weights.json");
     let winter_w8: winter::Weights = serde_json::from_str(&weights_str).expect("Invalid weights.json");
@@ -91,18 +95,19 @@ pub fn run(shutdown: Arc<AtomicBool>, args: &[String]) {
     );
 
     let chain_count = detect_chain_count(WF_ASSIGN_U32S);
-    let expected_chains = (NUM_ISLANDS * ISLAND_SIZE) as u32;
+    let num_islands = cpu_cores * island_ratio;
+    let island_size = chain_count as usize / num_islands;
     assert!(
-        chain_count >= expected_chains,
-        "GPU supports {} chains but need {} ({} islands × {} chains)",
-        chain_count, expected_chains, NUM_ISLANDS, ISLAND_SIZE,
+        island_size >= TEMP_LEVELS,
+        "Island size {} too small (need at least {} for pod structure)",
+        island_size, TEMP_LEVELS,
     );
-    // Use exactly NUM_ISLANDS * ISLAND_SIZE chains
-    let chain_count = expected_chains;
+    // Round down to exact multiple
+    let chain_count = (num_islands * island_size) as u32;
 
     eprintln!(
         "GPU winter-elite solver: {} chains = {} islands × {} chains/island, {} iters/dispatch",
-        chain_count, NUM_ISLANDS, ISLAND_SIZE, ITERS_PER_DISPATCH,
+        chain_count, num_islands, island_size, ITERS_PER_DISPATCH,
     );
     eprintln!(
         "  ASSIGN_U32S: {}, {} CPU cores at T={:.1}, {} seed files",
@@ -167,7 +172,7 @@ pub fn run(shutdown: Arc<AtomicBool>, args: &[String]) {
     pollster::block_on(run_gpu(
         assign_data, best_assign_data, cost_data, best_cost_data, rng_data,
         gpu_weights, gpu_params, w8, results_dir.to_string(), shutdown, rng,
-        cpu_workers, cpu_cores, shader_src, dedup,
+        cpu_workers, cpu_cores, shader_src, dedup, num_islands, island_size,
     ));
 }
 
@@ -188,6 +193,8 @@ async fn run_gpu(
     cpu_cores: usize,
     shader_src: String,
     dedup: bool,
+    num_islands: usize,
+    island_size: usize,
 ) {
     let chain_count = gpu_params.chain_count;
 
@@ -207,7 +214,7 @@ async fn run_gpu(
     let mut last_verify = Instant::now();
     let mut last_thresh = WF_THRESH_DEFAULT;
 
-    let mut pool = IslandPool::new(10.0);
+    let mut pool = IslandPool::new(num_islands, island_size, 10.0);
     let mut next_generation: u64 = 1;
     let mut worker_states: Vec<EliteWorkerState> = (0..cpu_cores).map(|_| EliteWorkerState::Idle).collect();
     let mut worker_metas: Vec<EliteWorkerMeta> = (0..cpu_cores).map(|_| EliteWorkerMeta {
@@ -304,7 +311,7 @@ async fn run_gpu(
                             .collect();
                         let avg_d = pool.sampled_avg_pairwise_distance(&active, &mut rng);
                         let stats = pool.stats(dispatch_count);
-                        print_island_summary(&stats, avg_d);
+                        print_island_summary(&stats, num_islands, avg_d);
                         lines += 1;
                     }
                     eprintln!();
@@ -362,9 +369,9 @@ async fn run_gpu(
         dispatch_count += 1;
 
         // ── 2. Per-island: find best chain, update pool ──
-        for island_idx in 0..NUM_ISLANDS {
-            let start = island_idx * ISLAND_SIZE;
-            let end = start + ISLAND_SIZE;
+        for island_idx in 0..num_islands {
+            let start = island_idx * island_size;
+            let end = start + island_size;
             let mut best_in_island = u32::MAX;
             let mut best_chain = start;
             for ci in start..end {
@@ -402,7 +409,7 @@ async fn run_gpu(
 
         // ── 3. Replica exchange (within-island only) ──
         let (attempts, swaps) = gpu_sa_loop::replica_exchange(
-            &gpu, &current_costs, chain_count, ISLAND_SIZE,
+            &gpu, &current_costs, chain_count, island_size,
             temp_for_level, &locked_chains, &mut rng, dispatch_count,
         );
         exchange_attempts_total += attempts;
@@ -470,10 +477,10 @@ async fn run_gpu(
                     // Cycle complete — reseed island and go idle (only if island hasn't been reset)
                     if pool.islands[island_idx].best_cost < u32::MAX {
                         let best_sched = report.best_schedule;
-                        let island_start = island_idx * ISLAND_SIZE;
-                        let mut assign_bulk = Vec::with_capacity(ISLAND_SIZE * WF_ASSIGN_U32S);
-                        let mut cost_bulk = Vec::with_capacity(ISLAND_SIZE);
-                        for ci in island_start..island_start + ISLAND_SIZE {
+                        let island_start = island_idx * island_size;
+                        let mut assign_bulk = Vec::with_capacity(island_size * WF_ASSIGN_U32S);
+                        let mut cost_bulk = Vec::with_capacity(island_size);
+                        for ci in island_start..island_start + island_size {
                             let level_in_pod = (ci % TEMP_LEVELS) % POD_SIZE;
                             let t_frac = level_in_pod as f64 / (POD_SIZE - 1).max(1) as f64;
                             let pert = (t_frac * t_frac * 40.0) as usize;
@@ -575,10 +582,10 @@ async fn run_gpu(
                     }
                 }
                 // Write random schedules to the reset island's chains
-                let island_start = island_idx * ISLAND_SIZE;
-                let mut assign_bulk = Vec::with_capacity(ISLAND_SIZE * WF_ASSIGN_U32S);
-                let mut cost_bulk = Vec::with_capacity(ISLAND_SIZE);
-                for _ in 0..ISLAND_SIZE {
+                let island_start = island_idx * island_size;
+                let mut assign_bulk = Vec::with_capacity(island_size * WF_ASSIGN_U32S);
+                let mut cost_bulk = Vec::with_capacity(island_size);
+                for _ in 0..island_size {
                     let s = random_fixed_schedule(&mut rng);
                     let p = pack_fixed_schedule(&s);
                     let c = evaluate_fixed(&s, &w8).total;
