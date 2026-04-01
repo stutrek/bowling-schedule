@@ -86,7 +86,7 @@ Every 100,000 iterations, the solver picks two quads in the same week and brute-
 
 ### Winter results
 
-The best results are the ones that scored 520. The results with a better score hyper-optimized less relevant scores, such as repeat week matchups, while losing some of the more more important (to humans) attributes.
+The best practical results score around 520. Schedules with lower numerical scores exist, but they achieve those numbers by over-optimizing less important metrics (like half-season repeat matchups) at the expense of attributes that matter more to bowlers, such as lane balance and early/late distribution.
 
 ### Running the winter solver
 
@@ -113,7 +113,7 @@ A 10-week schedule for 12 teams with 3 games per team per week. The summer leagu
 
 Each week has 5 game slots and 4 lanes. Games 1-4 use all 4 lanes (8 teams playing, 4 matchups per slot). Game 5 only uses lanes 3-4 (4 teams playing, 2 matchups). This gives 18 matchups per week and exactly 3 games per team.
 
-Each team ideally plays two consecutive games and a third game with a one-game break -- for example, games 1, 2, and 4. Some teams must play three consecutive games or have a two-game break for the math to work out.
+The template maximizes the number of teams that play three consecutive games each week. With 12 teams and 5 game slots, 8 positions get three consecutive games and 4 positions have a one-game break between two of their games. The solver balances break positions evenly across teams over the season.
 
 ### The fixed template approach
 
@@ -130,18 +130,19 @@ The template guarantees these properties by construction:
 - Consecutive games are always on the same lane -- no switching between back-to-back games
 - For games 1-4, teams that switch lanes are always on the same lane pair (lanes 5-6 or 7-8), so they stay on the same ball return
 - All teams in game 5 have a break before their slot, so they're ready to start at any moment
-- Every team gets exactly one break game -- it's never three games in a row, never a two-game gap
+- No team ever has a two-game gap -- it's either three consecutive games or two consecutive with a one-game break
 
 ### Constraints
 
-Six penalties, weighted in [summer_fixed_weights.json](summer_fixed_weights.json):
+Seven penalties, weighted in [summer_fixed_weights.json](summer_fixed_weights.json):
 
 1. **Matchup balance** -- every pair of teams should play each other 2 or 3 times across the season. Penalty scales with distance from this range.
 2. **Slot balance** -- each team should play in each game slot a balanced number of times. Slots 1-4: 6-7 times each. Slot 5: 3-4 times.
 3. **Lane balance** -- each team should play on each lane a balanced number of times. Lanes 1-2: 6-7 times each (they only get traffic from games 1-4). Lanes 3-4: 8-9 times each (they get traffic from all 5 games).
 4. **Game 5 lane balance** -- within a team's game 5 appearances, they should be on lane 3 and lane 4 roughly equally.
-5. **Same lane balance** -- some template positions stay on the same lane for all 3 games in slots 1-4. Each team should land in these "same lane" positions 3-4 times across the season.
-6. **Commissioner overlap** -- two player-commissioners need coverage across the night. The schedule minimizes how often any pair of teams both appears in game 1 and game 5. In post-processing, the best pair gets assigned to teams 1 and 2.
+5. **Commissioner overlap** -- two player-commissioners need coverage across the night. The schedule minimizes how often any pair of teams both appears in game 1 and game 5. In post-processing, the best pair gets assigned to teams 1 and 2.
+6. **Matchup spacing** -- pairs that play each other multiple times should be spread across the season. Pairs with 2 matchups need at least 4 weeks apart; pairs with 3 need at least 2 weeks apart.
+7. **Break balance** -- the 4 break positions (teams with a one-game gap instead of three consecutive) should be distributed evenly across teams over the season.
 
 ### The algorithm
 
@@ -230,19 +231,25 @@ The standard solver converges all 8 CPU partitions to the same local minimum -- 
 
 ### The idea
 
-Instead of 8 fixed CPU partitions, the GPU's 65,536 chains are divided into **128 independent islands of 512 chains each**. Replica exchange only happens within islands, never across them. Each island converges to its own local minimum independently. 8 CPU workers cycle between islands, spending ~24 seconds deeply refining each one before moving on.
+Instead of 8 fixed CPU partitions, the GPU's 65,536 chains are divided into independent islands. By default there are 2 islands per CPU core (e.g. 16 islands with 8 CPUs), each with ~4,096 chains. Replica exchange only happens within islands, never across them. Each island converges to its own local minimum independently. CPU workers cycle between islands, spending ~24 seconds deeply refining each one before moving on.
 
-To prevent islands from all converging to the same basin (which is what happens with the standard solver), the system uses **team-normalized similarity detection**. Since team labels are arbitrary (swapping all occurrences of team 3 and team 7 produces an equivalent real-world schedule), island bests are compared after normalizing team labels. If two islands converge to the same solution, the worse one is reset with fresh random schedules.
+To prevent islands from all converging to the same basin (which is what happens with the standard solver), the system uses **team-normalized similarity detection** (enabled with `--dedup`). Since team labels are arbitrary (swapping all occurrences of team 3 and team 7 produces an equivalent real-world schedule), island bests are compared after normalizing team labels. If two islands converge to the same solution, the worse one is reset with fresh random schedules.
 
 ### Status
 
-The architecture runs but has a known cross-contamination bug where CPU workers can spread solutions between islands. When a CPU finishes refining one island and gets assigned to a new one, stale reports from the old island can leak into the new one. A generation-tagging fix has been implemented but not yet validated in long runs. The branch should be considered experimental.
+The architecture runs but may still have bugs related to cross-contamination between islands. A generation-tagging fix has been implemented to prevent stale CPU reports from leaking solutions between islands. The branch should be considered experimental.
 
 ### Running it
 
 ```bash
 git checkout elite-experiments
 cargo run --release -p solver-native --bin solver -- --league winter-elite
+
+# With deduplication (reset islands that converge to the same solution)
+cargo run --release -p solver-native --bin solver -- --league winter-elite --dedup
+
+# Change the ratio of islands to CPUs (default: 2, so 8 CPUs = 16 islands)
+cargo run --release -p solver-native --bin solver -- --league winter-elite --island-ratio 4
 ```
 
 ## Running the web viewer
