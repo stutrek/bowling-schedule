@@ -1,8 +1,8 @@
 # Bowling Schedule Optimizer
 
-Optimized bowling schedules for a league with two seasons -- a 16-team winter season and a 12-team summer season. Both use [parallel tempering](https://en.wikipedia.org/wiki/Parallel_tempering) (GPU+CPU hybrid) to find schedules that balance many competing constraints simultaneously.
+Optimized bowling schedules for a league with two seasons -- a 16-team winter season and a 12-team summer season. A computer searches through millions of possible schedules to find ones that balance many competing constraints simultaneously.
 
-**[Try the interactive web UI →](https://stutrek.github.io/bowling-schedule/)**
+**[See visualizations of the schedules →](https://stutrek.github.io/bowling-schedule/)**
 
 ---
 
@@ -48,9 +48,11 @@ The position of a team within its quad determines three things at once: which la
 
 ### The Algorithm
 
-The solver uses [parallel tempering](https://en.wikipedia.org/wiki/Parallel_tempering), an advanced form of [simulated annealing](https://en.wikipedia.org/wiki/Simulated_annealing). The core idea: imagine trying to solve a jigsaw puzzle by randomly swapping pieces. If a swap makes things better, keep it. If it makes things worse, sometimes keep it anyway -- to avoid getting stuck in a dead end. Run many copies of this process at different levels of "willingness to accept bad swaps," and let them share good solutions with each other.
+The solver starts with a random schedule and tries to improve it by making small random changes -- swapping two teams between groups, flipping who plays early vs late, etc. If a change makes the schedule better, it's kept. Otherwise it's rejected. To speed this up, the solver runs thousands of copies of this process at the same time on a GPU, with CPU workers running alongside for deeper optimization. The GPU and CPU sides share their best schedules with each other.
 
-The solver is a hybrid GPU+CPU system. The GPU runs thousands of parallel chains via wgpu compute shaders ([`solver.wgsl`](solver-native/src/solver.wgsl)), while CPU workers run alongside for refinement. The GPU chains are organized into pods of 8 temperature levels with geometric spacing, and the CPU workers each own one partition of the GPU chains. The GPU and CPU sides share solutions bidirectionally -- when a GPU chain finds a better schedule than its CPU partition owner, it seeds the CPU worker, and vice versa.
+This approach can get stuck. The solver might find a pretty good schedule where every single change makes it worse, even though a much better schedule exists nearby -- it just takes a few bad steps to get there. To avoid this, some of the GPU copies are dedicated explorers that accept worse schedules freely, always searching for new starting points. When an explorer stumbles onto something promising, it gets passed to the strict copies for fine-tuning.
+
+The core technique is called [simulated annealing](https://en.wikipedia.org/wiki/Simulated_annealing), the explorer/strict copy structure is [parallel tempering](https://en.wikipedia.org/wiki/Parallel_tempering), and solutions are exchanged between copies using the [Metropolis criterion](https://en.wikipedia.org/wiki/Metropolis%E2%80%93Hastings_algorithm).
 
 #### Temperature ladder
 
