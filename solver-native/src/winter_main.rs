@@ -83,6 +83,7 @@ fn reseed_partition_chains(
 pub fn run(shutdown: Arc<AtomicBool>, args: &[String]) {
     let no_seed = args.iter().any(|a| a == "--no-seed");
     let no_cpu = args.iter().any(|a| a == "--no-cpu");
+    let cooling = args.iter().any(|a| a == "--cooling");
 
     let weights_str = fs::read_to_string("../weights.json").expect("Failed to read weights.json");
     let w8: Weights = serde_json::from_str(&weights_str).expect("Invalid weights.json");
@@ -131,6 +132,7 @@ pub fn run(shutdown: Arc<AtomicBool>, args: &[String]) {
         w8.clone(),
         cpu_temps,
         Arc::clone(&shutdown),
+        cooling,
     );
 
     // Seed only top 3 CPU workers
@@ -315,20 +317,16 @@ async fn run_gpu(
 
     let mut pending_events: Vec<String> = Vec::new();
     let mut last_print = Instant::now();
-    let mut last_fresh_table = Instant::now();
     let mut prev_line_count: u32 = 0;
 
     loop {
-        if shutdown.load(Ordering::Relaxed) { break; }
+        if shutdown.load(Ordering::SeqCst) { break; }
 
         macro_rules! maybe_print_table {
             () => {
                 if last_print.elapsed().as_millis() >= 1000 || !pending_events.is_empty() {
-                    let fresh = last_fresh_table.elapsed().as_secs() >= FRESH_TABLE_INTERVAL_SECS;
-                    if !fresh && prev_line_count > 0 {
+                    if prev_line_count > 0 {
                         eprint!("\x1b[{}A\r\x1b[J", prev_line_count);
-                    } else if fresh {
-                        last_fresh_table = Instant::now();
                     }
                     for msg in pending_events.drain(..) {
                         eprintln!("{}", msg);
@@ -450,7 +448,7 @@ async fn run_gpu(
             match gpu.device.poll(wgpu::PollType::Poll) {
                 Ok(status) if status.is_queue_empty() => { poll_ok = true; break; }
                 Ok(_) => {
-                    if shutdown.load(Ordering::Relaxed) { break; }
+                    if shutdown.load(Ordering::SeqCst) { break; }
                     if Instant::now() > poll_deadline {
                         eprintln!("GPU poll timed out after 30s at dispatch {} — device may be lost", dispatch_count);
                         break;
@@ -568,6 +566,8 @@ async fn run_gpu(
 
         maybe_print_table!();
 
+        if shutdown.load(Ordering::SeqCst) { break; }
+
         // 3. Per-partition GPU feedback + global best tracking
         for pi in 0..cpu_cores {
             let (gpu_part_cost, gpu_part_chain) = partition_bests[pi];
@@ -590,6 +590,7 @@ async fn run_gpu(
                 match gpu.device.poll(wgpu::PollType::Poll) {
                     Ok(status) if status.is_queue_empty() => { assign_poll_ok = true; break; }
                     Ok(_) => {
+                        if shutdown.load(Ordering::SeqCst) { break; }
                         if Instant::now() > poll_deadline {
                             eprintln!("GPU assign poll timed out for partition {}", pi);
                             break;
@@ -668,6 +669,8 @@ async fn run_gpu(
                 );
             }
         }
+
+        if shutdown.load(Ordering::SeqCst) { break; }
 
         // 4. Drain CPU reports
         while let Ok(report) = cpu_workers.reports.try_recv() {
@@ -777,6 +780,8 @@ async fn run_gpu(
                 }
             }
         }
+
+        if shutdown.load(Ordering::SeqCst) { break; }
 
         // 6. Sync interval: per-partition reseeding + stagnation
         maybe_print_table!();

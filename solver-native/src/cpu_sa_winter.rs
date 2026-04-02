@@ -52,6 +52,7 @@ pub fn run_cpu_workers(
     w8: Weights,
     temps: Vec<f64>,
     shutdown: Arc<AtomicBool>,
+    cooling: bool,
 ) -> CpuWorkers {
     let (report_tx, report_rx) = mpsc::channel();
     let mut cmd_txs = Vec::with_capacity(num_cores);
@@ -71,7 +72,7 @@ pub fn run_cpu_workers(
         let report_tx = report_tx.clone();
 
         handles.push(thread::spawn(move || {
-            worker_loop(core_id, w8, temp, shutdown, cmd_rx, report_tx, live_best);
+            worker_loop(core_id, w8, temp, cooling, shutdown, cmd_rx, report_tx, live_best);
         }));
     }
 
@@ -87,6 +88,7 @@ fn worker_loop(
     core_id: usize,
     initial_w8: Weights,
     initial_temp: f64,
+    cooling: bool,
     shutdown: Arc<AtomicBool>,
     cmd_rx: mpsc::Receiver<WorkerCommand>,
     report_tx: mpsc::Sender<WorkerReport>,
@@ -122,7 +124,7 @@ fn worker_loop(
             }
         }
 
-        if shutdown.load(Ordering::Relaxed) {
+        if shutdown.load(Ordering::SeqCst) {
             return;
         }
 
@@ -405,13 +407,15 @@ fn worker_loop(
                 if accepted { stats.accepts[move_id] += 1; }
             }
 
-            active_temp = (active_temp * COOLING_RATE).max(MIN_TEMP);
+            if cooling {
+                active_temp = (active_temp * COOLING_RATE).max(MIN_TEMP);
+            }
         }
         iterations_total = batch_end;
         live_best_cost.store(best_cost, Ordering::Relaxed);
 
         // Reheat when temperature bottoms out
-        if active_temp <= MIN_TEMP + 0.01 {
+        if cooling && active_temp <= MIN_TEMP + 0.01 {
             a = best_a;
             perturb(&mut a, &mut SmallRng::from_os_rng(), 3);
             cost = evaluate(&a, &active_w8);
