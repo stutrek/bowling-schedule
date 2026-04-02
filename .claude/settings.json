@@ -1,21 +1,22 @@
 {
-    "permissions": {
-        "allow": [
-            "Bash(cargo build --release -p solver-native --bin summer_fixed_solver)",
-            "Bash(cargo check -p solver-native)",
-            "Bash(cargo check -p solver-core)",
-            "Bash(cargo test -p solver-core test_sweep_undoes_perturbation -- --nocapture)",
-            "Bash(cargo check --lib -p solver-core)",
-            "Bash(npx next build)",
-            "Bash(cargo build --release -p solver-native --bin template_solver)",
-            "Bash(cargo run --release -p solver-native --bin template_solver)",
-            "Bash(cargo check -p solver-native --bin template_solver)",
-            "Bash(cargo check)",
-            "Bash(cargo test)",
-            "Bash(npx biome:*)",
-            "Bash(cargo build:*)",
-            "Bash(cargo test:*)",
-            "Bash(git branch:*)"
-        ]
-    }
+  "permissions": {
+    "allow": [
+      "Bash(cargo build --release -p solver-native --bin summer_fixed_solver)",
+      "Bash(cargo check -p solver-native)",
+      "Bash(cargo check -p solver-core)",
+      "Bash(cargo test -p solver-core test_sweep_undoes_perturbation -- --nocapture)",
+      "Bash(cargo check --lib -p solver-core)",
+      "Bash(npx next build)",
+      "Bash(cargo build --release -p solver-native --bin template_solver)",
+      "Bash(cargo run --release -p solver-native --bin template_solver)",
+      "Bash(cargo check -p solver-native --bin template_solver)",
+      "Bash(cargo check)",
+      "Bash(cargo test)",
+      "Bash(npx biome:*)",
+      "Bash(cargo build:*)",
+      "Bash(cargo test:*)",
+      "Bash(sed:*)",
+      "Bash(git:*)"
+    ]
+  }
 }

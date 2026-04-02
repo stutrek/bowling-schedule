@@ -4,6 +4,8 @@ use solver_core::winter::{cost_label, evaluate, CostBreakdown, Weights};
 use std::time::Instant;
 
 pub struct WorkerMeta {
+    pub reseeded_at: Instant,
+    pub cost_at_reseed: u32,
     pub last_report: Option<WorkerReport>,
     pub prev_iterations: u64,
     pub prev_iter_time: Instant,
@@ -60,13 +62,16 @@ pub fn print_cpu_row(
     w8: &Weights,
     meta: &WorkerMeta,
     initial_temp: f64,
+    stagnation: u64,
 ) {
     let cur_bd = evaluate(&report.current_assignment, w8);
     let best_bd = evaluate(&report.best_assignment, w8);
     let best_age = meta.best_found_at.elapsed().as_secs();
+    let since_reseed = meta.reseeded_at.elapsed().as_secs();
     let bold = if best_age < 10 { "\x1b[1m" } else { "" };
     let reset = if best_age < 10 { "\x1b[0m" } else { "" };
     let temp_str = format!("{:.0}/{:.1}", initial_temp, report.current_temp);
+    let state = format!("stag={} rs={}s", stagnation, since_reseed);
     eprintln!(
         "{}cpu{:<1} {:>9}  {:>5} {:>5}  {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4} {:>4}/{:<4}  {}{}\x1b[K",
         bold,
@@ -81,7 +86,7 @@ pub fn print_cpu_row(
         cur_bd.late_lane_balance, best_bd.late_lane_balance,
         cur_bd.commissioner_overlap, best_bd.commissioner_overlap,
         cur_bd.half_season_repeat, best_bd.half_season_repeat,
-        "normal", reset,
+        state, reset,
     );
 }
 
